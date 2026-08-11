@@ -1,0 +1,14 @@
+method: clip_image
+
+model:
+  name: ViT-B/16
+  checkpoint: checkpoints/clip/ViT-B-16.pt
+
+runtime:
+  device: cuda
+  batch_size: 256
+  score_batch_size: 512
+  num_workers: 4
+
+output:
+  dir: runs/clip_image

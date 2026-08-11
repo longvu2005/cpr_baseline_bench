@@ -1,85 +1,95 @@
+# CPR Baseline Benchmark
 
-# Adding a New Baseline
+This repository provides a common evaluation protocol for CPR baseline methods.
 
-Each baseline is an independent mini-project.
+Each baseline may use its own implementation and dependencies, but all methods must use the same data, output format, and evaluator.
 
-Baseline implementations do not need to share code, environments, or dependencies.
-All methods only need to use the common benchmark data and export results in the required format.
+## Repository Structure
 
-## 1. Create a Method Folder
+    data/
+    checkpoints/
+    methods/
+      simple/
+      published/
+    runs/
+    outputs/
+    tables/
+    evaluate.py
+    build_tables.py
 
-Choose one group:
+## Adding a New Baseline
 
-    methods/simple/
-    methods/published/
+Create a method folder under:
 
-Example:
-
-    methods/simple/new_method/
+    methods/simple/<method_name>/
 
 or:
 
-    methods/published/new_method/
+    methods/published/<method_name>/
 
-A method folder may contain:
+Recommended structure:
 
-    methods/simple/new_method/
+    methods/simple/<method_name>/
+    |-- config.yaml
     |-- run.py
     |-- requirements.txt
-    |-- README.md
-    `-- other_files/
+    `-- README.md
 
-Each baseline may use its own implementation.
+Each baseline is independent and may use its own environment and dependencies.
 
-## 2. Common Benchmark Data
+## Config
 
-All methods use:
+Keep method and runtime settings in config.yaml.
+
+Example:
+
+    method: clip_image
+
+    model:
+      name: ViT-B/16
+      checkpoint: checkpoints/clip/ViT-B-16.pt
+
+    runtime:
+      device: cuda
+      batch_size: 256
+      score_batch_size: 512
+      num_workers: 4
+
+    output:
+      dir: runs/clip_image
+
+Runtime parameters are used for memory and speed.
+They should not be tuned using retrieval performance.
+
+## Common Data
+
+All methods must use:
 
     data/gallery/
     data/gallery.jsonl
     data/queries.jsonl
 
-Do not create separate benchmark data for each method.
+Do not reorder the query or gallery manifests.
 
 The query image remains inside the global gallery.
-Do not remove it inside baseline code.
-The common evaluator will remove the query image during evaluation.
+Baseline code must not remove it.
+The common evaluator handles query-image exclusion.
 
-## 3. Checkpoints
+## Checkpoints
 
 Do not commit model weights to GitHub.
 
-All checkpoints must be stored under:
+Store checkpoints under:
 
     checkpoints/
 
-For every new checkpoint, add an entry to:
+Document every checkpoint in:
 
     checkpoints/README.md
 
-Example:
+Include the official source and expected local path.
 
-    ## Model Name
-
-    Source: <official source>
-
-    Expected path: checkpoints/model_name/checkpoint.pt
-
-## 4. Run a Baseline
-
-Each method may use its own Python environment and dependencies.
-
-Example:
-
-    pip install -r methods/simple/new_method/requirements.txt
-
-Run:
-
-    python methods/simple/new_method/run.py
-
-Published methods may use their official repositories and original dependencies.
-
-## 5. Required Output
+## Required Baseline Output
 
 Every baseline must create:
 
@@ -87,122 +97,75 @@ Every baseline must create:
     |-- scores.npy
     `-- run.json
 
-### scores.npy
-
-The score matrix must have shape:
+scores.npy must have shape:
 
     [num_queries, num_gallery]
 
-Definition:
-
-    scores[q, g]
-
-is the retrieval score assigned by query q to gallery image g.
+scores[q, g] is the retrieval score of gallery image g for query q.
 
 Higher score must mean a better match.
 
-The row order must exactly follow:
+Rows must follow:
 
     data/queries.jsonl
 
-The column order must exactly follow:
+Columns must follow:
 
     data/gallery.jsonl
 
-Do not reorder either manifest.
+## Evaluation
 
-## 6. run.json
-
-Example:
-
-    {
-      "method": "method_name",
-      "display_name": "Method Display Name",
-      "group": "Simple / Obvious Baselines",
-      "cpr_supervision": "No",
-      "checkpoint": "checkpoints/model_name/checkpoint.pt",
-      "num_queries": "<num_queries>",
-      "num_gallery": "<num_gallery>",
-      "scores": "runs/method_name/scores.npy",
-      "higher_is_better": true
-    }
-
-Allowed groups:
-
-    Simple / Obvious Baselines
-    Published / SOTA Baselines
-    Proposed
-
-CPR supervision:
-
-    No
-    Val only
-    Train
-
-## 7. Benchmark Rules
-
-1. Use the same gallery.jsonl.
-2. Use the same queries.jsonl.
-3. Do not create a different gallery for each method.
-4. Do not remove the query image inside baseline code.
-5. Do not compute final benchmark metrics independently.
-6. Export scores for the complete gallery.
-7. Higher score must mean better retrieval.
-8. Use official pretrained checkpoints whenever possible.
-9. Record checkpoint sources in checkpoints/README.md.
-10. Keep method-specific code inside its own method folder.
-
-Baseline implementation is independent.
-Evaluation protocol is shared.
-
-## 8. Naming Convention
-
-Simple baselines:
-
-    methods/simple/clip_image/
-    methods/simple/clip_text/
-    methods/simple/new_method/
-
-Published baselines:
-
-    methods/published/word4per_setmatch/
-    methods/published/fafa_setmatch/
-    methods/published/new_method/
-
-Output folders:
-
-    runs/clip_image/
-    runs/fafa_setmatch/
-    runs/new_method/
-
-## 9. Validate Baseline Output
+Do not compute final benchmark metrics separately inside each baseline.
 
 Run:
 
-    python - <<'PY'
-    import json
-    import numpy as np
+    python evaluate.py --method <method_name>
 
-    def count_jsonl(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return sum(1 for line in f if line.strip())
+This creates:
 
-    num_queries = count_jsonl("data/queries.jsonl")
-    num_gallery = count_jsonl("data/gallery.jsonl")
+    outputs/<method_name>/
+    |-- metrics.json
+    `-- run.json
 
-    scores = np.load(
-        "runs/<method_name>/scores.npy",
-        mmap_mode="r",
-    )
+## Build Benchmark Tables
 
-    print("shape:", scores.shape)
-    print("expected:", (num_queries, num_gallery))
-    print("dtype:", scores.dtype)
-    print("finite:", np.isfinite(scores).all())
+After evaluating one or more methods, run:
 
-    assert scores.shape == (num_queries, num_gallery)
-    PY
+    python build_tables.py
 
-Only valid score matrices should be passed to the common evaluator.
+Tables are generated under:
 
-# cpr_baseline_bench
+    tables/
+
+## Benchmark Rules
+
+1. Use the same gallery and query manifests.
+2. Score the complete gallery.
+3. Do not reorder queries or gallery images.
+4. Do not remove the query image inside baseline code.
+5. Higher score must mean better retrieval.
+6. Use official pretrained checkpoints whenever possible.
+7. Record checkpoint sources and runtime configuration.
+8. Use evaluate.py for final metrics.
+9. Use build_tables.py for benchmark tables.
+10. Do not commit checkpoints, raw score matrices, or gallery images.
+
+## Workflow
+
+    run baseline
+        |
+        v
+    runs/<method>/scores.npy
+        |
+        v
+    evaluate.py
+        |
+        v
+    outputs/<method>/metrics.json
+        |
+        v
+    build_tables.py
+        |
+        v
+    tables/
+
