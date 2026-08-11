@@ -1,0 +1,2 @@
+Method,CPR Supervision,ID-mAP,ID-R@1,ID-R@5,ID-R@10,Full-mAP,Full-R@1,Full-R@5,Full-R@10
+CLIP ViT-B/16 - Image-only,No,31.84,75.29,90.22,93.71,5.43,1.75,7.26,12.24
