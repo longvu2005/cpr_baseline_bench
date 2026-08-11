@@ -2,20 +2,9 @@
 checkpoints/*
 !checkpoints/README.md
 
-# Outputs
+# Raw experiment outputs
 runs/*
 !runs/.gitkeep
-
-tables/*.csv
-
-# Python
-__pycache__/
-*.pyc
-.venv/
-venv/
-
-# System
-.DS_Store
 
 # Large files
 *.pt
@@ -26,27 +15,22 @@ venv/
 *.npy
 *.npz
 
-.DS_Store
-**/.DS_Store
-._*
-__MACOSX/
-
 # Local gallery images
-data/gallery
+data/gallery/*
+!data/gallery/.gitkeep
 
-.DS_Store
-**/.DS_Store
-._*
-__MACOSX/
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
 
-.DS_Store
-**/.DS_Store
-._*
-**/._*
-__MACOSX/
-**/__MACOSX/
+# Jupyter
+.ipynb_checkpoints/
 
-# macOS junk
+# macOS
 .DS_Store
 **/.DS_Store
 ._*
