@@ -1,0 +1,22 @@
+method: clip_early_fusion
+
+model:
+  name: ViT-B/16
+  checkpoint: checkpoints/clip/ViT-B-16.pt
+
+cache:
+  gallery_features: runs/clip_image/gallery_features.npy
+
+fusion:
+  image_weight: 0.5
+  text_weight: 0.5
+
+runtime:
+  device: cuda
+  batch_size: 256
+  text_batch_size: 256
+  score_batch_size: 512
+  num_workers: 4
+
+output:
+  dir: runs/clip_early_fusion
