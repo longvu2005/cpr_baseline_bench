@@ -4,6 +4,9 @@ model:
   name: ViT-B/16
   checkpoint: checkpoints/clip/ViT-B-16.pt
 
+cache:
+  gallery_features: runs/clip_image/gallery_features.npy
+
 runtime:
   device: cuda
   batch_size: 256

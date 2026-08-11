@@ -45,7 +45,14 @@ class GalleryDataset(Dataset):
 
 
 @torch.no_grad()
-def encode_gallery(model, preprocess, rows, runtime, device):
+def gallery_features(model, preprocess, rows, cache, fallback, runtime, device):
+    if cache.is_file():
+        x = np.load(cache, mmap_mode="r")
+        if len(x) != len(rows):
+            raise ValueError(f"Wrong gallery cache size: {cache}")
+        print(f"Using gallery cache: {cache}")
+        return x, cache
+
     loader = DataLoader(
         GalleryDataset(rows, preprocess),
         batch_size=runtime["batch_size"],
@@ -53,14 +60,14 @@ def encode_gallery(model, preprocess, rows, runtime, device):
         num_workers=runtime["num_workers"],
         pin_memory=(device.type == "cuda"),
     )
-
     chunks = []
     for images in tqdm(loader, desc="Gallery"):
         x = model.encode_image(images.to(device)).float()
         x /= x.norm(dim=-1, keepdim=True).clamp_min(1e-12)
         chunks.append(x.cpu().numpy())
-
-    return np.concatenate(chunks).astype(np.float32)
+    x = np.concatenate(chunks).astype(np.float32)
+    np.save(fallback, x)
+    return np.load(fallback, mmap_mode="r"), fallback
 
 
 def setup():
@@ -71,13 +78,11 @@ def setup():
     config_path = Path(args.config)
     if not config_path.is_absolute():
         config_path = ROOT / config_path
-
     with config_path.open("r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
     output = ROOT / cfg["output"]["dir"]
     output.mkdir(parents=True, exist_ok=True)
-
     checkpoint = ROOT / cfg["model"]["checkpoint"]
     if not checkpoint.is_file():
         raise FileNotFoundError(checkpoint)
@@ -85,36 +90,22 @@ def setup():
     gallery = load_jsonl(ROOT / "data/gallery.jsonl")
     queries = load_jsonl(ROOT / "data/queries.jsonl")
     device = device_from(cfg["runtime"].get("device", "auto"))
-
     model, preprocess = clip.load(str(checkpoint), device=device, jit=False)
     model.eval()
     if device.type != "cuda":
         model.float()
 
-    return cfg, config_path, output, gallery, queries, device, model, preprocess
+    cache = ROOT / cfg["cache"]["gallery_features"]
+    gfeat, cache_used = gallery_features(
+        model, preprocess, gallery, cache, output / "gallery_features.npy",
+        cfg["runtime"], device
+    )
+    return cfg, config_path, output, gallery, queries, device, gfeat, cache_used
 
 
 @torch.no_grad()
 def main():
-    cfg, config_path, output, gallery, queries, device, model, preprocess = setup()
-
-    features_path = output / "gallery_features.npy"
-    if features_path.is_file():
-        features = np.load(features_path, mmap_mode="r")
-        if len(features) != len(gallery):
-            raise ValueError(f"Wrong gallery cache size: {features_path}")
-        print(f"Using gallery cache: {features_path}")
-    else:
-        features = encode_gallery(
-            model,
-            preprocess,
-            gallery,
-            cfg["runtime"],
-            device,
-        )
-        np.save(features_path, features)
-        features = np.load(features_path, mmap_mode="r")
-        print(f"Saved gallery cache: {features_path}")
+    cfg, config_path, output, gallery, queries, device, gfeat, cache_used = setup()
 
     gallery_index = {x["image_id"]: i for i, x in enumerate(gallery)}
     if len(gallery_index) != len(gallery):
@@ -130,20 +121,15 @@ def main():
 
     scores_path = output / "scores.npy"
     scores = np.lib.format.open_memmap(
-        scores_path,
-        "w+",
-        dtype=np.float32,
-        shape=(len(queries), len(gallery)),
+        scores_path, "w+", dtype=np.float32, shape=(len(queries), len(gallery))
     )
-
-    gallery_tensor = torch.from_numpy(np.asarray(features)).to(device)
+    gallery_tensor = torch.from_numpy(np.asarray(gfeat)).to(device)
     batch = cfg["runtime"]["score_batch_size"]
 
     for start in tqdm(range(0, len(queries), batch), desc="Scores"):
         end = min(start + batch, len(queries))
         query = gallery_tensor[query_idx[start:end]]
         scores[start:end] = (query @ gallery_tensor.T).cpu().numpy()
-
     scores.flush()
 
     run = {
@@ -153,14 +139,13 @@ def main():
         "cpr_supervision": "No",
         "model": cfg["model"],
         "runtime": cfg["runtime"],
-        "gallery_features": str(features_path.relative_to(ROOT)),
+        "gallery_features": str(cache_used.relative_to(ROOT)),
         "config": str(config_path.relative_to(ROOT)),
         "num_queries": len(queries),
         "num_gallery": len(gallery),
         "scores": str(scores_path.relative_to(ROOT)),
         "higher_is_better": True,
     }
-
     with (output / "run.json").open("w", encoding="utf-8") as f:
         json.dump(run, f, indent=2, ensure_ascii=False)
 
