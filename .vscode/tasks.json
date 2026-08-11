@@ -1,0 +1,21 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Clean macOS junk",
+      "type": "shell",
+      "command": "find . -name '.DS_Store' -delete; find . -name '._*' -delete; find . -type d -name '__MACOSX' -prune -exec rm -rf {} +",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "runOptions": {
+        "runOn": "folderOpen"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "never",
+        "panel": "shared"
+      }
+    }
+  ]
+}

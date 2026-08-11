@@ -1,0 +1,55 @@
+# Checkpoints
+checkpoints/*
+!checkpoints/README.md
+
+# Outputs
+runs/*
+!runs/.gitkeep
+
+tables/*.csv
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# System
+.DS_Store
+
+# Large files
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+*.npy
+*.npz
+
+.DS_Store
+**/.DS_Store
+._*
+__MACOSX/
+
+# Local gallery images
+data/gallery
+
+.DS_Store
+**/.DS_Store
+._*
+__MACOSX/
+
+.DS_Store
+**/.DS_Store
+._*
+**/._*
+__MACOSX/
+**/__MACOSX/
+
+# macOS junk
+.DS_Store
+**/.DS_Store
+._*
+**/._*
+__MACOSX/
+**/__MACOSX/
