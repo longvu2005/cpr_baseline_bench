@@ -120,7 +120,6 @@ avoid recomputing them.
 ```bash
 pip install -r methods/published/02_fafa_setmatch/requirements.txt
 
-# Download the official released FAFA weight (see checkpoints/fafa/README.md).
 python validate_data.py
 python methods/published/02_fafa_setmatch/run.py
 python evaluate.py --method fafa_setmatch

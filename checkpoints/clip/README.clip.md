@@ -1,7 +1,7 @@
-## OpenAI CLIP ViT-B/16
+## OpenAI CLIP ViT-L/14
 
 Model:  
-OpenAI CLIP ViT-B/16.
+OpenAI CLIP ViT-L/14.
 
 Official source:  
 https://github.com/openai/CLIP
@@ -9,34 +9,15 @@ https://github.com/openai/CLIP
 Paper:  
 *Learning Transferable Visual Models From Natural Language Supervision*, arXiv:2103.00020.
 
-Checkpoint availability:
+Checkpoint policy:
 
-- The official OpenAI CLIP repository provides the pretrained ViT-B/16 checkpoint.
-- The checkpoint is available through an official direct download URL.
-- The benchmark uses the original OpenAI pretrained checkpoint.
-- No training, fine-tuning, or hyperparameter tuning is performed on the CPR pilot.
-
-Benchmark policy:  
-Use the original OpenAI CLIP ViT-B/16 pretrained checkpoint directly for inference on the CPR benchmark.
-
-Do not train or tune on the CPR pilot.
-
-### Download
-
-Download the official OpenAI CLIP ViT-B/16 checkpoint:
-
-```bash
-mkdir -p checkpoints/clip
-
-wget \
-    https://openaipublic.azureedge.net/clip/models/5806e77cd80f8b59890b7e101eabd078d9fb84e6937f9e85e4ecb61988df416f/ViT-B-16.pt \
-    -O checkpoints/clip/ViT-B-16.pt
-```
+- Use the original OpenAI pretrained ViT-L/14 checkpoint.
+- No training, fine-tuning, or hyperparameter tuning is performed on the CPR benchmark.
 
 Expected checkpoint file:
 
 ```text
-checkpoints/clip/ViT-B-16.pt
+checkpoints/clip/ViT-L-14.pt
 ```
 
 Do not commit checkpoint files.

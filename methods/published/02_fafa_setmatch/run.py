@@ -214,10 +214,9 @@ def load_fafa(
     ckpt_cfg = cfg["checkpoint"]
     ckpt_path = (ROOT / ckpt_cfg["path"]).resolve()
     if not ckpt_path.is_file():
-        source_url = ckpt_cfg.get("source_url", "")
         raise FileNotFoundError(
             f"Missing official FAFA checkpoint: {ckpt_path}\n"
-            f"Download the released model documented by the authors: {source_url}"
+            "Run `python methods/published/02_fafa_setmatch/download_checkpoint.py` from the repository root."
         )
 
     model, _, txt_processors = load_model_and_preprocess(

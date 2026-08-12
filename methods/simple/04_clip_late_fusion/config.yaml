@@ -1,11 +1,11 @@
 method: clip_late_fusion
 
 model:
-  name: ViT-B/16
-  checkpoint: checkpoints/clip/ViT-B-16.pt
+  name: ViT-L/14
+  checkpoint: checkpoints/clip/ViT-L-14.pt
 
 cache:
-  gallery_features: runs/clip_image/gallery_features.npy
+  gallery_features: runs/clip_image/gallery_features_vit_l14.npy
 
 fusion:
   image_weight: 0.5
@@ -15,7 +15,7 @@ fusion:
 
 runtime:
   device: cuda
-  batch_size: 256
+  batch_size: 64
   text_batch_size: 256
   score_batch_size: 256
   num_workers: 4

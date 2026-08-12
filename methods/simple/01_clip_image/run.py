@@ -45,13 +45,19 @@ class GalleryDataset(Dataset):
 
 
 @torch.no_grad()
-def gallery_features(model, preprocess, rows, cache, fallback, runtime, device):
+def gallery_features(model, preprocess, rows, cache, runtime, device):
+    feature_dim = int(model.text_projection.shape[1])
+    expected_shape = (len(rows), feature_dim)
+
     if cache.is_file():
         x = np.load(cache, mmap_mode="r")
-        if len(x) != len(rows):
-            raise ValueError(f"Wrong gallery cache size: {cache}")
-        print(f"Using gallery cache: {cache}")
-        return x, cache
+        if x.shape == expected_shape:
+            print(f"Using gallery cache: {cache}")
+            return x, cache
+        print(
+            f"Ignoring incompatible gallery cache {cache}: "
+            f"got {x.shape}, expected {expected_shape}"
+        )
 
     loader = DataLoader(
         GalleryDataset(rows, preprocess),
@@ -66,8 +72,13 @@ def gallery_features(model, preprocess, rows, cache, fallback, runtime, device):
         x /= x.norm(dim=-1, keepdim=True).clamp_min(1e-12)
         chunks.append(x.cpu().numpy())
     x = np.concatenate(chunks).astype(np.float32)
-    np.save(fallback, x)
-    return np.load(fallback, mmap_mode="r"), fallback
+    if x.shape != expected_shape:
+        raise ValueError(
+            f"Encoded gallery has shape {x.shape}, expected {expected_shape}"
+        )
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    np.save(cache, x)
+    return np.load(cache, mmap_mode="r"), cache
 
 
 def setup():
@@ -85,7 +96,10 @@ def setup():
     output.mkdir(parents=True, exist_ok=True)
     checkpoint = ROOT / cfg["model"]["checkpoint"]
     if not checkpoint.is_file():
-        raise FileNotFoundError(checkpoint)
+        raise FileNotFoundError(
+            f"Missing CLIP checkpoint: {checkpoint}\n"
+            "Run `python methods/simple/01_clip_image/download_checkpoint.py` from the repository root."
+        )
 
     gallery = load_jsonl(ROOT / "data/gallery.jsonl")
     queries = load_jsonl(ROOT / "data/queries.jsonl")
@@ -97,8 +111,7 @@ def setup():
 
     cache = ROOT / cfg["cache"]["gallery_features"]
     gfeat, cache_used = gallery_features(
-        model, preprocess, gallery, cache, output / "gallery_features.npy",
-        cfg["runtime"], device
+        model, preprocess, gallery, cache, cfg["runtime"], device
     )
     return cfg, config_path, output, gallery, queries, device, gfeat, cache_used
 
@@ -134,7 +147,7 @@ def main():
 
     run = {
         "method": cfg["method"],
-        "display_name": "CLIP ViT-B/16 - Image-only",
+        "display_name": f"CLIP {cfg['model']['name']} - Image-only",
         "group": "Simple / Obvious Baselines",
         "cpr_supervision": "No",
         "model": cfg["model"],
