@@ -1,0 +1,5 @@
+Method,CPR Supervision,ID-mAP,ID-R@1,ID-R@5,ID-R@10,Full-mAP,Full-R@1,Full-R@5,Full-R@10
+CLIP ViT-L/14 - Image-only,No,34.70,78.55,91.83,94.92,5.68,1.61,7.90,13.78
+CLIP ViT-L/14 - Text-only,No,13.00,30.45,55.46,65.71,17.47,9.71,25.01,33.85
+CLIP ViT-L/14 - Early Fusion,No,36.12,77.71,92.20,95.80,10.16,3.13,15.33,25.28
+CLIP ViT-L/14 - Late Fusion,No,33.78,73.28,89.98,94.42,15.36,6.55,23.06,35.03

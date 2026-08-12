@@ -1,0 +1,23 @@
+{
+  "method": "clip_text",
+  "display_name": "CLIP ViT-L/14 - Text-only",
+  "group": "Simple / Obvious Baselines",
+  "cpr_supervision": "No",
+  "model": {
+    "name": "ViT-L/14",
+    "checkpoint": "checkpoints/clip/ViT-L-14.pt"
+  },
+  "runtime": {
+    "device": "cuda",
+    "batch_size": 64,
+    "text_batch_size": 256,
+    "score_batch_size": 512,
+    "num_workers": 4
+  },
+  "gallery_features": "runs/clip_image/gallery_features_vit_l14.npy",
+  "config": "methods/simple/02_clip_text/config.yaml",
+  "num_queries": 2975,
+  "num_gallery": 17000,
+  "scores": "runs/clip_text/scores.npy",
+  "higher_is_better": true
+}
