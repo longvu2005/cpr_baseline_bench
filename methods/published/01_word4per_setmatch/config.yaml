@@ -1,0 +1,57 @@
+method: word4per_setmatch
+display_name: Word4Per + SetMatch
+group: Published Baselines
+cpr_supervision: "No"
+
+paper:
+  title: "Word4Per: Zero-shot Composed Person Retrieval"
+  arxiv: "2311.16515"
+
+source:
+  repository: "https://github.com/Delong-liu-bupt/Composed_Person_Retrieval.git"
+  commit: "0cc16936f031f7ad166be4cce1be33d0b44b728e"
+  subdir: "old_project"
+  local_checkout: "runs/word4per_setmatch/official_source/Composed_Person_Retrieval"
+  auto_clone: true
+
+checkpoint:
+  # A final Stage-2 checkpoint is required for inference. The public official
+  # README documents a Stage-1 download, but does not document a final Stage-2
+  # best.pth download. Reproduce Stage 2 on CUHK-PEDES with the authors' recipe.
+  stage2: "checkpoints/word4per/word4per_cuhk_pedes_stage2_best.pth"
+  stage2_config: "checkpoints/word4per/word4per_cuhk_pedes_stage2_configs.yaml"
+  num_classes: 11003
+
+runtime:
+  device: cuda
+  image_batch_size: 256
+  query_batch_size: 128
+  num_workers: 4
+
+# The adapter resolves common manifest field names automatically. Override any
+# field here if your canonical manifests use different names. Dot paths are
+# supported (e.g. query.reference_image).
+data:
+  gallery_manifest: "data/gallery.jsonl"
+  query_manifest: "data/queries.jsonl"
+  gallery_image_root: "data/gallery"
+  query_image_root: "."
+  gallery_image_key: null
+  gallery_components_key: null
+  query_reference_image_key: null
+  query_text_key: null
+  query_case_key: null
+  query_components_key: null
+  component_image_key: null
+  component_text_key: null
+
+setmatch:
+  enabled: true
+  # Mean score of the maximum-weight one-to-one assignment. Missing gallery
+  # members are padded with this score so a candidate cannot satisfy multiple
+  # query people with the same gallery member.
+  unmatched_score: -1.0
+  max_vectorized_assignments: 4096
+
+output:
+  dir: "runs/word4per_setmatch"
