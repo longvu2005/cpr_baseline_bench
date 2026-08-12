@@ -1,7 +1,3 @@
-# Checkpoints
-checkpoints/*
-!checkpoints/README.md
-
 # Raw experiment outputs
 runs/*
 !runs/.gitkeep

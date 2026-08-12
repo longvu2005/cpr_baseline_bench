@@ -4,7 +4,6 @@ import csv
 import json
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parent
 OUTPUTS_DIR = ROOT / "outputs"
 TABLES_DIR = ROOT / "tables"
