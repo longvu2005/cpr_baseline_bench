@@ -1,0 +1,24 @@
+numpy
+pillow
+pyyaml
+torch
+torchvision
+tqdm
+scipy
+git+https://github.com/openai/CLIP.git
+
+# Official FAFA_SynCPR requirements at pinned source commit.
+pandas
+omegaconf
+iopath
+timm
+decord
+opencv-python
+transformers==4.39.3
+fairscale
+einops
+scikit-image
+spacy
+prettytable
+webdataset
+pycocoevalcap

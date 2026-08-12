@@ -1,0 +1,68 @@
+method: fafa_setmatch
+display_name: FAFA + SetMatch
+group: Published / SOTA Baselines
+cpr_supervision: "No"
+
+paper:
+  title: "Automatic Synthetic Data and Fine-grained Adaptive Feature Alignment for Composed Person Retrieval"
+  venue: "NeurIPS 2025"
+  arxiv: "2311.16515"
+
+source:
+  repository: "https://github.com/Delong-liu-bupt/Composed_Person_Retrieval.git"
+  commit: "0cc16936f031f7ad166be4cce1be33d0b44b728e"
+  subdir: "FAFA_SynCPR"
+  local_checkout: "runs/fafa_setmatch/official_source/Composed_Person_Retrieval"
+  auto_clone: true
+
+checkpoint:
+  # Official released FAFA/SynCPR weight linked from FAFA_SynCPR/README.md.
+  path: "checkpoints/fafa/tuned_recall_at1_step.pt"
+  source_url: "https://drive.google.com/file/d/1Bf2Ia7zmxx5k3Dj-nRr3CLbAqc_zkM0y/view?usp=sharing"
+  status: "OFFICIAL_RELEASED"
+  model_name: "blip2_fafa_cpr"
+  model_type: "pretrain"
+  fda_k: 6
+  fda_alpha: 0.5
+  fd_margin: 0.5
+  use_soft: true
+  transform: "squarepad"
+  image_size: 224
+  test_resize_hw: [384, 192]
+
+runtime:
+  device: cuda
+  detector_device: cuda
+  image_batch_size: 64
+  query_batch_size: 64
+  score_person_batch_size: 2048
+  score_query_batch_size: 128
+  num_workers: 4
+  gallery_feature_dtype: float16
+
+data:
+  gallery_manifest: "data/gallery.jsonl"
+  query_manifest: "data/queries.jsonl"
+
+localization:
+  # No GT PIPA boxes / identity-to-box mapping are used in the main benchmark.
+  detector:
+    backend: "torchvision_fasterrcnn_resnet50_fpn_v2"
+    score_threshold: 0.55
+    max_persons_per_image: 10
+    person_label: 1
+  query_selector:
+    backend: "openai_clip"
+    model: "ViT-B/32"
+    assignment: "hungarian"
+    # subjects[].select_text is the canonical target-selection cue.
+    fallback_order: ["select_text", "modify_text", "text"]
+
+setmatch:
+  enabled: true
+  assignment: "hungarian"
+  aggregation: "min"
+  unmatched_score: -1.0
+
+output:
+  dir: "runs/fafa_setmatch"
