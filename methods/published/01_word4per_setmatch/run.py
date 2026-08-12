@@ -24,6 +24,7 @@ from tqdm import tqdm
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "word4per_setmatch"
+ADAPTER_VERSION = "2026-08-12-v4-exact-cpr-schema"
 
 
 @dataclass(frozen=True)
@@ -130,39 +131,90 @@ def resolve_query_indices(
 
 
 def parse_query_components(query: dict[str, Any], qi: int) -> list[QueryComponent]:
-    raw = query.get("components")
+    """Parse the exact CPR benchmark query schema.
 
-    if raw is None:
-        text = query.get("modify_text")
-        if not isinstance(text, str) or not text.strip():
-            raise KeyError(
-                f"Query row {qi} has neither components nor usable modify_text"
+    Canonical query rows use:
+        image_id
+        path
+        case
+        subjects: [
+            {
+                subject_id,
+                identity_id,
+                select_text,
+                modify_text,
+            },
+            ...
+        ]
+        relation_text
+
+    The reference image is resolved separately from query["image_id"] through
+    gallery.jsonl. Subject objects never need an image/path field.
+
+    For RELATIONAL rows, some subjects intentionally have modify_text == "".
+    In that case relation_text is the only target-condition text available in
+    the manifest, so it is used as the deterministic fallback.
+    """
+    if "subjects" not in query:
+        raise KeyError(
+            f"Query row {qi} has no 'subjects' field. "
+            f"Keys={list(query.keys())}"
+        )
+
+    subjects = query["subjects"]
+    if not isinstance(subjects, list) or not subjects:
+        raise ValueError(
+            f"Query row {qi}: 'subjects' must be a non-empty list"
+        )
+
+    relation_text = query.get("relation_text")
+    if relation_text is None:
+        relation_text = ""
+    if not isinstance(relation_text, str):
+        raise TypeError(
+            f"Query row {qi}: relation_text must be str or null, "
+            f"got {type(relation_text).__name__}"
+        )
+    relation_text = relation_text.strip()
+
+    result: list[QueryComponent] = []
+
+    for si, subject in enumerate(subjects):
+        if not isinstance(subject, dict):
+            raise TypeError(
+                f"Query row {qi} subject {si} must be an object"
             )
-        return [QueryComponent(
-            modify_text=text.strip(),
-            subject_id=query.get("subject_id"),
-            identity_id=query.get("identity_id"),
-            select_text=query.get("select_text"),
-        )]
 
-    if not isinstance(raw, list) or not raw:
-        raise ValueError(f"Query row {qi}: 'components' must be a non-empty list")
-
-    result = []
-    for ci, comp in enumerate(raw):
-        if not isinstance(comp, dict):
-            raise TypeError(f"Query {qi} component {ci} must be an object")
-        text = comp.get("modify_text")
-        if not isinstance(text, str) or not text.strip():
-            raise KeyError(
-                f"Query {qi} component {ci} has no usable modify_text: {comp!r}"
+        modify_text = subject.get("modify_text", "")
+        if modify_text is None:
+            modify_text = ""
+        if not isinstance(modify_text, str):
+            raise TypeError(
+                f"Query row {qi} subject {si}: modify_text must be str"
             )
-        result.append(QueryComponent(
-            modify_text=text.strip(),
-            subject_id=comp.get("subject_id"),
-            identity_id=comp.get("identity_id"),
-            select_text=comp.get("select_text"),
-        ))
+        modify_text = modify_text.strip()
+
+        target_text = modify_text or relation_text
+
+        if not target_text:
+            raise KeyError(
+                f"Query row {qi} subject {si} has neither usable "
+                f"modify_text nor relation_text. Subject={subject!r}"
+            )
+
+        select_text = subject.get("select_text")
+        if select_text is not None and not isinstance(select_text, str):
+            select_text = str(select_text)
+
+        result.append(
+            QueryComponent(
+                modify_text=target_text,
+                subject_id=subject.get("subject_id"),
+                identity_id=subject.get("identity_id"),
+                select_text=select_text,
+            )
+        )
+
     return result
 
 
@@ -438,6 +490,7 @@ def validate_scores(scores_path: Path, nq: int, ng: int) -> None:
 
 
 def main() -> None:
+    print(f"Word4Per adapter: {ADAPTER_VERSION}")
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     cli = parser.parse_args()
@@ -513,8 +566,15 @@ def main() -> None:
         str(q.get("case_type", q.get("case", "UNKNOWN"))).upper() for q in queries
     )
     component_hist = Counter(len(x) for x in query_components)
+    relation_fallback_count = sum(
+        1
+        for q in queries
+        for subject in q["subjects"]
+        if not str(subject.get("modify_text") or "").strip()
+    )
 
     run = {
+        "adapter_version": ADAPTER_VERSION,
         "method": method,
         "display_name": cfg.get("display_name", "Word4Per + SetMatch"),
         "group": cfg.get("group", "Published Baselines"),
@@ -536,8 +596,8 @@ def main() -> None:
         "data_schema": {
             "gallery": "gallery.jsonl: image_id + path",
             "query_reference": "queries.jsonl image_id -> gallery.image_id",
-            "query_components": "components",
-            "component_text": "modify_text",
+            "query_components": "subjects",
+            "component_text": "modify_text; relation_text fallback when modify_text is empty",
             "select_text": "metadata only",
         },
         "setmatch": {
@@ -549,6 +609,7 @@ def main() -> None:
             ),
         },
         "query_case_counts": dict(case_counts),
+        "relation_text_fallback_subjects": relation_fallback_count,
         "query_component_count_histogram": {
             str(k): v for k, v in sorted(component_hist.items())
         },
@@ -569,6 +630,7 @@ def main() -> None:
             "The query image remains in the score matrix; evaluate.py handles exclusion.",
             "All components of a query share the query-level reference image resolved by image_id.",
             "select_text is not concatenated into the Word4Per modification prompt.",
+            "When a RELATIONAL subject has empty modify_text, relation_text is used as the target-condition fallback.",
             "No CPR-pilot training or tuning is performed.",
         ],
     }
