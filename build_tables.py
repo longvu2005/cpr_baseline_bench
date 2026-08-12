@@ -4,6 +4,7 @@ import csv
 import json
 from pathlib import Path
 
+
 ROOT = Path(__file__).resolve().parent
 OUTPUTS_DIR = ROOT / "outputs"
 TABLES_DIR = ROOT / "tables"
@@ -68,11 +69,16 @@ def collect_results():
         else:
             run = {}
 
+        method_id = (
+            run.get("method")
+            or metrics.get("method")
+            or method_dir.name
+        )
+
         method = (
             run.get("display_name")
             or metrics.get("display_name")
-            or metrics.get("method")
-            or method_dir.name
+            or method_id
         )
 
         group = (
@@ -89,6 +95,7 @@ def collect_results():
 
         results.append(
             {
+                "method_id": method_id,
                 "method": method,
                 "group": group,
                 "supervision": supervision,
@@ -270,9 +277,23 @@ def main():
         "Proposed": 2,
     }
 
+    method_order = {
+        "clip_image": 1,
+        "clip_text": 2,
+        "clip_early_fusion": 3,
+        "clip_late_fusion": 4,
+    }
+
     results.sort(
         key=lambda x: (
-            group_order.get(x["group"], 99),
+            group_order.get(
+                x["group"],
+                99,
+            ),
+            method_order.get(
+                x["method_id"],
+                999,
+            ),
             x["method"].lower(),
         )
     )
