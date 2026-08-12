@@ -1,6 +1,6 @@
 {
-  "method": "clip_image",
-  "display_name": "CLIP ViT-B/16 - Image-only",
+  "method": "clip_text",
+  "display_name": "CLIP ViT-B/16 - Text-only",
   "group": "Simple / Obvious Baselines",
   "cpr_supervision": "No",
   "model": {
@@ -10,13 +10,14 @@
   "runtime": {
     "device": "cuda",
     "batch_size": 256,
+    "text_batch_size": 256,
     "score_batch_size": 512,
     "num_workers": 4
   },
   "gallery_features": "runs/clip_image/gallery_features.npy",
-  "config": "methods/simple/01_clip_image/config.yaml",
+  "config": "methods/simple/02_clip_text/config.yaml",
   "num_queries": 2975,
   "num_gallery": 17000,
-  "scores": "runs/clip_image/scores.npy",
+  "scores": "runs/clip_text/scores.npy",
   "higher_is_better": true
 }
