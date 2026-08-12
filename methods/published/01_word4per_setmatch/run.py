@@ -8,9 +8,10 @@ import json
 import subprocess
 import sys
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import numpy as np
 import torch
