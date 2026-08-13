@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import json
 import os
 import re
@@ -40,6 +41,38 @@ CLIP_B32_URL = (
     f"{CLIP_B32_SHA256}/ViT-B-32.pt"
 )
 DETECTOR_HASH_PREFIX = "dd69338a"
+EXPECTED_RUNTIME_VERSIONS = {
+    "transformers": "4.39.3",
+    "tokenizers": "0.15.2",
+    "scikit-learn": "1.3.2",
+}
+
+
+def validate_runtime_versions() -> None:
+    problems: list[str] = []
+    resolved: list[str] = []
+    for package, expected in EXPECTED_RUNTIME_VERSIONS.items():
+        try:
+            actual = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            problems.append(f"{package}: missing (expected {expected})")
+            continue
+        resolved.append(f"{package}={actual}")
+        if actual != expected:
+            problems.append(f"{package}: found {actual}, expected {expected}")
+
+    if problems:
+        details = "\n".join(f"  - {item}" for item in problems)
+        raise RuntimeError(
+            "P3 dependency preflight failed. The active Python environment does not "
+            "match the pinned Instruct-ReID runtime:\n"
+            f"{details}\n"
+            "Re-run `python run_baseline.py instruct_reid_setmatch` without "
+            "`--skip-install`. On Python 3.12 the method requirements force binary "
+            "wheels for tokenizers/scikit-learn and must not compile tokenizers from source."
+        )
+
+    print(f"[ok] dependency preflight: {', '.join(resolved)}", flush=True)
 
 
 def resolve_path(value: str) -> Path:
@@ -382,6 +415,8 @@ def main() -> None:
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
+
+    validate_runtime_versions()
 
     config_path = resolve_path(args.config)
     cfg = load_yaml(config_path)

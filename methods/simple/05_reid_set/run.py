@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import json
 import math
 import os
@@ -41,7 +42,10 @@ from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "groundingdino_clipreid_set"
-ADAPTER_VERSION = "2026-08-13-v2-py312-source-setmatch"
+ADAPTER_VERSION = "2026-08-13-v4-clipreid-preflight-oomsafe"
+# Keep the detector-stage cache identity stable: this patch changes only the
+# CLIP-ReID adapter/config loading path, not Grounding DINO detections.
+DETECTION_ADAPTER_VERSION = "2026-08-13-v2-py312-source-setmatch"
 DETECTION_CACHE_SCHEMA = 1
 FEATURE_CACHE_SCHEMA = 1
 
@@ -262,6 +266,52 @@ def require_file(path: Path, label: str) -> Path:
     return path
 
 
+def _module_is_from_checkout(module: Any, source_root: Path) -> bool:
+    module_file = getattr(module, "__file__", None)
+    if not module_file:
+        return False
+    try:
+        return Path(module_file).resolve().is_relative_to(source_root.resolve())
+    except (OSError, ValueError):
+        return False
+
+
+def _purge_foreign_top_level_package(name: str, source_root: Path) -> None:
+    """Remove a same-named top-level package imported from outside CLIP-ReID.
+
+    CLIP-ReID uses generic top-level package names such as ``config`` and
+    ``model``.  In a benchmark process that already imported other projects,
+    Python may otherwise reuse an unrelated module from ``sys.modules`` even
+    after CLIP-ReID is put first on ``sys.path``.
+    """
+
+    current = sys.modules.get(name)
+    if current is None or _module_is_from_checkout(current, source_root):
+        return
+    for module_name in list(sys.modules):
+        if module_name == name or module_name.startswith(name + "."):
+            del sys.modules[module_name]
+
+
+def merge_clipreid_official_config(model_cfg: Any, config_path: Path) -> None:
+    """Merge the pinned config while handling its one known empty DATASETS node."""
+
+    from yacs.config import CfgNode as CN
+
+    raw = load_yaml(config_path)
+    if "DATASETS" not in raw or raw["DATASETS"] is not None:
+        raise RuntimeError(
+            "Pinned CLIP-ReID config no longer has the expected empty DATASETS "
+            "placeholder; refusing to apply the compatibility workaround silently"
+        )
+    sanitized = dict(raw)
+    sanitized.pop("DATASETS")
+    model_cfg.merge_from_other_cfg(CN(sanitized))
+    print(
+        "[compat] ignored exact pinned CLIP-ReID YAML placeholder: DATASETS",
+        flush=True,
+    )
+
 def configure_groundingdino_offline(cfg: dict[str, Any]) -> Path:
     cache_root = resolve_path(str(cfg["detector"]["runtime_cache"]))
     marker = resolve_path(str(cfg["detector"]["runtime_assets_marker"]))
@@ -318,7 +368,7 @@ def detection_fingerprint(
     detector_cfg = cfg["detector"]
     payload = {
         "schema": DETECTION_CACHE_SCHEMA,
-        "adapter_version": ADAPTER_VERSION,
+        "adapter_version": DETECTION_ADAPTER_VERSION,
         "config_sha256": sha256_file(config_path),
         "gallery_manifest_sha256": sha256_file(gallery_manifest),
         "groundingdino_source_commit": str(cfg["source"]["groundingdino"]["commit"]),
@@ -554,6 +604,55 @@ def compute_detections(
     return offsets, boxes, confidences
 
 
+def validate_clipreid_adapter_contract(model_cfg: Any, cfg: dict[str, Any]) -> None:
+    """Reject silent drift between the pinned official recipe and this adapter."""
+
+    expected_size = [int(x) for x in cfg["reid"]["input_size"]]
+    expected_mean = [float(x) for x in cfg["reid"]["pixel_mean"]]
+    expected_std = [float(x) for x in cfg["reid"]["pixel_std"]]
+    checks = {
+        "MODEL.NAME": (str(model_cfg.MODEL.NAME), "ViT-B-16"),
+        "MODEL.STRIDE_SIZE": (list(model_cfg.MODEL.STRIDE_SIZE), [16, 16]),
+        "INPUT.SIZE_TRAIN": (list(model_cfg.INPUT.SIZE_TRAIN), expected_size),
+        "INPUT.SIZE_TEST": (list(model_cfg.INPUT.SIZE_TEST), expected_size),
+        "INPUT.PIXEL_MEAN": (list(model_cfg.INPUT.PIXEL_MEAN), expected_mean),
+        "INPUT.PIXEL_STD": (list(model_cfg.INPUT.PIXEL_STD), expected_std),
+        "TEST.NECK_FEAT": (str(model_cfg.TEST.NECK_FEAT), "before"),
+        "MODEL.SIE_CAMERA": (bool(model_cfg.MODEL.SIE_CAMERA), False),
+        "MODEL.SIE_VIEW": (bool(model_cfg.MODEL.SIE_VIEW), False),
+    }
+    mismatches = [
+        f"{name}: official={actual!r}, adapter_expected={expected!r}"
+        for name, (actual, expected) in checks.items()
+        if actual != expected
+    ]
+    if int(cfg["reid"]["feature_dim"]) != 1280:
+        mismatches.append(
+            "reid.feature_dim: "
+            f"configured={int(cfg['reid']['feature_dim'])!r}, adapter_expected=1280"
+        )
+    if int(cfg["reid"]["num_classes"]) != 1041:
+        mismatches.append(
+            "reid.num_classes: "
+            f"configured={int(cfg['reid']['num_classes'])!r}, MSMT17_expected=1041"
+        )
+    if int(cfg["reid"]["camera_num"]) != 15:
+        mismatches.append(
+            "reid.camera_num: "
+            f"configured={int(cfg['reid']['camera_num'])!r}, MSMT17_expected=15"
+        )
+    if int(cfg["reid"]["view_num"]) != 1:
+        mismatches.append(
+            "reid.view_num: "
+            f"configured={int(cfg['reid']['view_num'])!r}, MSMT17_expected=1"
+        )
+    if mismatches:
+        raise RuntimeError(
+            "CLIP-ReID adapter contract mismatch; refusing expensive inference:\n  - "
+            + "\n  - ".join(mismatches)
+        )
+
+
 def load_clipreid_model(
     *,
     cfg: dict[str, Any],
@@ -571,15 +670,34 @@ def load_clipreid_model(
         torch.cuda.set_device(device)
 
     source_text = str(source_root)
-    if source_text not in sys.path:
-        sys.path.insert(0, source_text)
+    if source_text in sys.path:
+        sys.path.remove(source_text)
+    sys.path.insert(0, source_text)
 
-    # Import the exact pinned official config/model code from the local checkout.
-    from config import cfg as official_cfg  # type: ignore
-    import model.make_model_clipreid as make_model_module  # type: ignore
+    # CLIP-ReID deliberately uses generic top-level package names (``config``
+    # and ``model``). Make their origin deterministic instead of trusting the
+    # process-wide import cache.
+    _purge_foreign_top_level_package("config", source_root)
+    _purge_foreign_top_level_package("model", source_root)
+    config_module = importlib.import_module("config")
+    make_model_module = importlib.import_module("model.make_model_clipreid")
+    if not _module_is_from_checkout(config_module, source_root):
+        raise RuntimeError(
+            "CLIP-ReID config import did not resolve to the pinned checkout: "
+            f"{getattr(config_module, '__file__', None)}"
+        )
+    if not _module_is_from_checkout(make_model_module, source_root):
+        raise RuntimeError(
+            "CLIP-ReID model import did not resolve to the pinned checkout: "
+            f"{getattr(make_model_module, '__file__', None)}"
+        )
+    official_cfg = config_module.cfg
 
     model_cfg = official_cfg.clone()
-    model_cfg.merge_from_file(str(source_root / str(cfg["reid"]["official_config"])))
+    merge_clipreid_official_config(
+        model_cfg, source_root / str(cfg["reid"]["official_config"])
+    )
+    validate_clipreid_adapter_contract(model_cfg, cfg)
     model_cfg.DATASETS.NAMES = "msmt17"
     model_cfg.TEST.WEIGHT = str(checkpoint)
     model_cfg.freeze()
@@ -620,6 +738,41 @@ def load_clipreid_model(
     model.to(device)
     model.eval()
     return model
+
+
+@torch.no_grad()
+def validate_clipreid_forward(
+    *,
+    model: Any,
+    cfg: dict[str, Any],
+    device: torch.device,
+) -> tuple[int, ...]:
+    """Run one real CUDA forward pass and validate the adapter feature contract."""
+
+    height, width = [int(x) for x in cfg["reid"]["input_size"]]
+    feature_dim = int(cfg["reid"]["feature_dim"])
+    sample = torch.zeros((1, 3, height, width), device=device, dtype=torch.float32)
+    feature = model(sample, cam_label=None, view_label=None)
+    if feature.ndim != 2 or tuple(feature.shape) != (1, feature_dim):
+        raise RuntimeError(
+            "CLIP-ReID preflight returned an unexpected feature shape: "
+            f"{tuple(feature.shape)}, expected {(1, feature_dim)}"
+        )
+    if not torch.isfinite(feature).all():
+        raise RuntimeError("CLIP-ReID preflight produced non-finite features")
+    # CUDA kernels are asynchronous; force synchronization so latent device-side
+    # failures surface during the cheap preflight instead of during full encoding.
+    torch.cuda.synchronize(device)
+    shape = tuple(int(x) for x in feature.shape)
+    del feature, sample
+    return shape
+
+
+def _is_cuda_oom(error: RuntimeError) -> bool:
+    oom_type = getattr(torch.cuda, "OutOfMemoryError", ())
+    return (isinstance(error, oom_type) if oom_type else False) or (
+        "out of memory" in str(error).lower() and "cuda" in str(error).lower()
+    )
 
 
 def reid_transform(cfg: dict[str, Any]):
@@ -705,9 +858,10 @@ def compute_reid_features(
         device=device,
     )
     transform = reid_transform(cfg)
-    batch_size = int(cfg["runtime"]["reid_batch_size"])
-    if batch_size <= 0:
+    configured_batch_size = int(cfg["runtime"]["reid_batch_size"])
+    if configured_batch_size <= 0:
         raise ValueError("reid_batch_size must be > 0")
+    active_batch_size = configured_batch_size
 
     mmap = np.lib.format.open_memmap(
         temp, mode="w+", dtype=np_dtype, shape=(total_persons, feature_dim)
@@ -716,22 +870,51 @@ def compute_reid_features(
     write_cursor = 0
 
     def flush_batch() -> None:
-        nonlocal write_cursor, pending
+        nonlocal write_cursor, pending, active_batch_size
         if not pending:
             return
-        batch = torch.stack(pending, dim=0).to(device, non_blocking=True)
-        feature = model(batch, cam_label=None, view_label=None)
-        feature = F.normalize(feature.float(), dim=1, eps=1e-12)
-        if feature.ndim != 2 or feature.shape[1] != feature_dim:
-            raise RuntimeError(
-                f"CLIP-ReID returned shape {tuple(feature.shape)}, "
-                f"expected (*, {feature_dim})"
-            )
-        count = feature.shape[0]
-        mmap[write_cursor : write_cursor + count] = feature.cpu().numpy().astype(
-            np_dtype, copy=False
-        )
-        write_cursor += count
+
+        cpu_batch = torch.stack(pending, dim=0)
+        cursor = 0
+        while cursor < cpu_batch.shape[0]:
+            take = min(active_batch_size, int(cpu_batch.shape[0] - cursor))
+            device_batch = None
+            feature = None
+            try:
+                device_batch = cpu_batch[cursor : cursor + take].to(
+                    device, non_blocking=True
+                )
+                feature = model(device_batch, cam_label=None, view_label=None)
+                feature = F.normalize(feature.float(), dim=1, eps=1e-12)
+                if feature.ndim != 2 or feature.shape != (take, feature_dim):
+                    raise RuntimeError(
+                        f"CLIP-ReID returned shape {tuple(feature.shape)}, "
+                        f"expected {(take, feature_dim)}"
+                    )
+                if not torch.isfinite(feature).all():
+                    raise RuntimeError("CLIP-ReID returned non-finite features")
+                output = feature.cpu().numpy().astype(np_dtype, copy=False)
+            except RuntimeError as error:
+                if not _is_cuda_oom(error) or take <= 1:
+                    raise
+                new_batch_size = max(1, take // 2)
+                active_batch_size = min(active_batch_size, new_batch_size)
+                print(
+                    "[warn] CUDA OOM during CLIP-ReID encoding; retrying with "
+                    f"reid_batch_size={active_batch_size} (configured "
+                    f"{configured_batch_size})",
+                    flush=True,
+                )
+                # Drop any tensors retained by the failed CUDA call before retry.
+                del feature, device_batch
+                torch.cuda.empty_cache()
+                continue
+
+            mmap[write_cursor : write_cursor + take] = output
+            write_cursor += take
+            cursor += take
+            del output, feature, device_batch
+
         pending = []
 
     try:
@@ -754,7 +937,7 @@ def compute_reid_features(
                             f"Invalid cached crop for gallery row {gi}: {box.tolist()}"
                         )
                     pending.append(transform(image.crop((left, top, right, bottom))))
-                    if len(pending) >= batch_size:
+                    if len(pending) >= active_batch_size:
                         flush_batch()
         flush_batch()
         if write_cursor != total_persons:
@@ -898,12 +1081,30 @@ def validate_scores(scores: np.ndarray, num_queries: int, num_gallery: int) -> N
 
 
 def main() -> None:
-    tracker = PhaseTracker(METHOD_ID, total=6)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG))
+    parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help=(
+            "Validate CLIP-ReID import/config/checkpoint/forward and report whether "
+            "the Grounding DINO detection cache will be reused, without running "
+            "detection, feature extraction, scoring, or evaluation."
+        ),
+    )
+    parser.add_argument(
+        "--require-detection-cache",
+        action="store_true",
+        help=(
+            "Abort instead of launching Grounding DINO when the exact detection "
+            "cache is missing or stale. Useful for safe recovery after an expensive "
+            "detector pass has already completed."
+        ),
+    )
+    args = parser.parse_args()
+    tracker = PhaseTracker(METHOD_ID, total=1 if args.preflight_only else 6)
 
     with tracker.phase("Load config, manifests, and prepared artifacts"):
-        parser = argparse.ArgumentParser()
-        parser.add_argument("--config", default=str(DEFAULT_CONFIG))
-        args = parser.parse_args()
         config_path = resolve_path(args.config)
         cfg = load_yaml(config_path)
         if str(cfg.get("method")) != METHOD_ID:
@@ -950,14 +1151,24 @@ def main() -> None:
                 "implementation constructs the ViT backbone on CUDA."
             )
         gdino_attention_backend = configure_groundingdino_source(gdino_source)
-        output_dir = resolve_path(str(cfg["output"]["dir"]))
-        output_dir.mkdir(parents=True, exist_ok=True)
-        tracker.log(
-            f"gallery={len(gallery):,} queries={len(queries):,} device={device} "
-            f"gdino_attention={gdino_attention_backend} text_used=no"
-        )
 
-    with tracker.phase("Detect all persons with Grounding DINO"):
+        # Fail fast on CLIP-ReID config/import/checkpoint incompatibilities before
+        # launching the expensive all-gallery Grounding DINO pass. This preflight
+        # costs only model-load time and would have caught the YACS failure before
+        # the 17,000-image detector run.
+        preflight_model = load_clipreid_model(
+            cfg=cfg,
+            source_root=clipreid_source,
+            checkpoint=reid_checkpoint,
+            clip_backbone=clip_backbone,
+            device=device,
+        )
+        preflight_shape = validate_clipreid_forward(
+            model=preflight_model, cfg=cfg, device=device
+        )
+        del preflight_model
+        torch.cuda.empty_cache()
+
         detection_cache = resolve_path(str(cfg["cache"]["detections"]))
         detect_meta = detection_fingerprint(
             cfg=cfg,
@@ -967,8 +1178,47 @@ def main() -> None:
             detector_checkpoint=detector_checkpoint,
             attention_backend=gdino_attention_backend,
         )
+
+        if args.preflight_only:
+            cached = load_detection_cache(detection_cache, detect_meta, len(gallery))
+            if cached is None:
+                tracker.log(
+                    "preflight-only: clipreid_forward=ok "
+                    f"feature_shape={preflight_shape} detection_cache=MISS; "
+                    "a full run would execute Grounding DINO over the gallery"
+                )
+            else:
+                offsets, _boxes, _confidences = cached
+                counts = np.diff(offsets)
+                tracker.log(
+                    "preflight-only: clipreid_forward=ok "
+                    f"feature_shape={preflight_shape} detection_cache=HIT "
+                    f"persons={int(offsets[-1]):,} "
+                    f"images_with_person={int((counts > 0).sum()):,}/{len(gallery):,}"
+                )
+        else:
+            output_dir = resolve_path(str(cfg["output"]["dir"]))
+            output_dir.mkdir(parents=True, exist_ok=True)
+            tracker.log(
+                f"gallery={len(gallery):,} queries={len(queries):,} device={device} "
+                f"gdino_attention={gdino_attention_backend} clipreid_preflight=ok "
+                f"clipreid_feature_shape={preflight_shape} text_used=no"
+            )
+
+    if args.preflight_only:
+        tracker.finish()
+        return
+
+    with tracker.phase("Detect all persons with Grounding DINO"):
         cached = load_detection_cache(detection_cache, detect_meta, len(gallery))
         detection_cache_hit = cached is not None
+        if cached is None and args.require_detection_cache:
+            raise RuntimeError(
+                "Grounding DINO detection cache is missing/stale while "
+                "--require-detection-cache is set; refusing to launch the expensive "
+                "all-gallery detector pass. Run --preflight-only to inspect the cache "
+                "fingerprint first."
+            )
         if cached is None:
             offsets, boxes, confidences = compute_detections(
                 cfg=cfg,

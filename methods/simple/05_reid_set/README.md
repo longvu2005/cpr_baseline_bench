@@ -111,12 +111,38 @@ Grounding DINO's Hugging Face assets are stored in a repository-local cache. `ru
 
 The pinned official CLIP-ReID code normally downloads the OpenAI CLIP backbone during model construction. This adapter replaces only that download helper with the already-prepared local `ViT-B-16.pt`; the official CLIP builder, CLIP-ReID architecture, checkpoint, preprocessing, and evaluation feature are preserved.
 
+### CLIP-ReID config compatibility guard
+
+The pinned official `configs/person/vit_clipreid.yml` contains a bare `DATASETS:` placeholder. PyYAML parses that placeholder as `null`, while the official YACS defaults define `DATASETS` as a nested config node. Direct `merge_from_file()` therefore fails on current YACS with a `CfgNode`/`NoneType` mismatch.
+
+The adapter does **not** edit the pinned official checkout. It permits exactly the known top-level `DATASETS: null` placeholder from the pinned file, removes only that placeholder before the YACS merge, merges every real official setting unchanged, and then sets the MSMT17 dataset name required to construct the released model. Any drift from that exact placeholder shape fails immediately instead of being silently sanitized.
+
+`run.py` also performs a CLIP-ReID preflight before the expensive Grounding DINO pass. The preflight loads the exact pinned config/model/checkpoint, verifies that the adapter still matches the pinned official ViT-B/16 recipe (`256x128`, stride `16`, mean/std `0.5`, pre-BN evaluation feature, no SIE), runs one real CUDA forward pass, verifies the expected finite `1280`-D feature, and synchronizes CUDA so asynchronous kernel failures surface immediately. Import/config/checkpoint/forward incompatibilities therefore fail before person detection starts.
+
+The detector cache fingerprint remains tied to the unchanged detector adapter version, so applying this ReID-only compatibility fix does not invalidate an already completed `person_detections.npz` cache. ReID encoding also has CUDA-OOM backoff: it starts from the configured batch size and halves only the active runtime batch on OOM, without changing the config or detector-cache identity.
+
+Before an expensive rerun, use the explicit smoke test:
+
+```bash
+python methods/simple/05_reid_set/run.py --preflight-only
+```
+
+This command never runs Grounding DINO detection, full ReID feature extraction, SetMatch scoring, or evaluation. It reports whether the existing `person_detections.npz` will be a cache `HIT` under the exact current fingerprint. If it reports `MISS`, do not start the full baseline unless re-running detection is intentional.
+
+For recovery after a completed detector pass, the safest direct inference command is:
+
+```bash
+python methods/simple/05_reid_set/run.py --require-detection-cache
+```
+
+With this guard enabled, `run.py` aborts rather than silently spending GPU time on Grounding DINO if the exact cache becomes missing or stale. After direct inference, run the normal evaluator and table builder manually.
+
 ## Run
 
 From the repository root:
 
 ```bash
-python run_baseline.py groundingdino_clipreid_set
+python run_baseline.py reid_set
 ```
 
 The root runner will execute:
@@ -132,13 +158,13 @@ The root runner will execute:
 For a prepared environment only:
 
 ```bash
-python run_baseline.py groundingdino_clipreid_set --skip-install
+python run_baseline.py reid_set --skip-install
 ```
 
 To force public checkpoint/runtime-asset refresh:
 
 ```bash
-python run_baseline.py groundingdino_clipreid_set --force-checkpoint
+python run_baseline.py reid_set --force-checkpoint
 ```
 
 ## Expected benchmark outputs
