@@ -1,0 +1,67 @@
+{
+  "adapter_version": "2026-08-13-v1-fullscene-official-large",
+  "backbone": {
+    "hf_repo_id": "openai/clip-vit-large-patch14",
+    "hf_revision": "32bd64288804d66eefd0ccbe215aa642df71cc41",
+    "image_size": 224,
+    "local_snapshot": "checkpoints/lincir/hf/clip-vit-large-patch14",
+    "model_file": "model.safetensors",
+    "model_sha256": "a2bf730a0c7debf160f7a6b50b3aaf3703e7e88ac73de7a314903141db026dcb",
+    "projection_dim": 768,
+    "size": "large",
+    "text_hidden_size": 768
+  },
+  "checkpoint": {
+    "hf_repo_id": "navervision/zeroshot-cir-models",
+    "hf_revision": "5118df4683de6efa09f8e5336d86ca626ed21c44",
+    "path": "checkpoints/lincir/lincir_large.pt",
+    "sha256": "5ba98d52db7a5e9a78f9ba7436991235477b89544caf246e4659642bf9b409bd",
+    "status": "OFFICIAL_RELEASED"
+  },
+  "composition": {
+    "normalize_gallery": true,
+    "normalize_query": true,
+    "placeholder": "$",
+    "placeholder_token_id": 259,
+    "prompt_template": "a photo of $ that {modification}",
+    "text_field": "text"
+  },
+  "config": "methods/published/05_lincir/config.yaml",
+  "cpr_supervision": "No",
+  "display_name": "LinCIR",
+  "gallery_features": "runs/lincir/cache/gallery_features.npy",
+  "group": "Published / SOTA Baselines",
+  "higher_is_better": true,
+  "method": "lincir",
+  "num_gallery": 17000,
+  "num_queries": 2975,
+  "paper": {
+    "arxiv": "2312.01998",
+    "title": "Language-only Training of Zero-shot Composed Image Retrieval",
+    "venue": "CVPR 2024"
+  },
+  "phi": {
+    "dropout": 0.5,
+    "hidden_dim": 3072,
+    "input_dim": 768,
+    "l2_normalize_input": false,
+    "output_dim": 768
+  },
+  "prepared_marker_schema": 1,
+  "query_features": "runs/lincir/cache/query_features.npy",
+  "runtime": {
+    "device": "cuda",
+    "feature_cache_dtype": "float32",
+    "gallery_batch_size": 64,
+    "mixed_precision": "fp16",
+    "num_workers": 4,
+    "query_batch_size": 64,
+    "score_batch_size": 256
+  },
+  "scores": "runs/lincir/scores.npy",
+  "source": {
+    "checkout": "runs/lincir/official_source/lincir",
+    "commit": "1dec42d118da816be2a43fd43cc0746e05f63881",
+    "repository": "https://github.com/navervision/lincir.git"
+  }
+}

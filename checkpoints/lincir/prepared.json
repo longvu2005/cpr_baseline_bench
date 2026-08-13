@@ -1,0 +1,20 @@
+{
+  "backbone": {
+    "hf_repo_id": "openai/clip-vit-large-patch14",
+    "hf_revision": "32bd64288804d66eefd0ccbe215aa642df71cc41",
+    "model_sha256": "a2bf730a0c7debf160f7a6b50b3aaf3703e7e88ac73de7a314903141db026dcb",
+    "model_size": 1710540580,
+    "path": "checkpoints/lincir/hf/clip-vit-large-patch14"
+  },
+  "checkpoint": {
+    "hf_repo_id": "navervision/zeroshot-cir-models",
+    "hf_revision": "5118df4683de6efa09f8e5336d86ca626ed21c44",
+    "path": "checkpoints/lincir/lincir_large.pt",
+    "phi_tensors": 6,
+    "sha256": "5ba98d52db7a5e9a78f9ba7436991235477b89544caf246e4659642bf9b409bd",
+    "size": 56653151
+  },
+  "schema": 1,
+  "source_checkout": "runs/lincir/official_source/lincir",
+  "source_commit": "1dec42d118da816be2a43fd43cc0746e05f63881"
+}
