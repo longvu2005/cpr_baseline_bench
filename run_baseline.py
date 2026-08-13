@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Run one benchmark method end to end from a single method name.
+"""Run one benchmark baseline end to end from a single method name.
 
-Pipeline:
-    method-local checkpoint download -> inference -> evaluation -> tables
+Default pipeline:
+    install method requirements -> checkpoint preparation -> inference
+    -> official evaluation -> table rebuilding
 
 Examples:
     python run_baseline.py clip_image
     python run_baseline.py 01_clip_image
     python run_baseline.py fafa_setmatch --force-checkpoint
+    python run_baseline.py clip_image --skip-install
     python run_baseline.py --list
 """
 
@@ -39,6 +41,22 @@ class MethodSpec:
         return self.directory.relative_to(ROOT)
 
     @property
+    def config_path(self) -> Path:
+        return self.directory / "config.yaml"
+
+    @property
+    def requirements_path(self) -> Path:
+        return self.directory / "requirements.txt"
+
+    @property
+    def run_path(self) -> Path:
+        return self.directory / "run.py"
+
+    @property
+    def checkpoint_path(self) -> Path:
+        return self.directory / "download_checkpoint.py"
+
+    @property
     def aliases(self) -> tuple[str, ...]:
         names = {self.method_id, self.directory.name}
         match = NUMERIC_PREFIX_RE.match(self.directory.name)
@@ -48,7 +66,7 @@ class MethodSpec:
 
 
 def read_method_id(config_path: Path) -> str:
-    """Read the top-level `method:` value without adding a YAML dependency."""
+    """Read the top-level `method:` value without requiring PyYAML."""
     for raw_line in config_path.read_text(encoding="utf-8").splitlines():
         if not raw_line or raw_line[0].isspace():
             continue
@@ -67,6 +85,7 @@ def read_method_id(config_path: Path) -> str:
 def discover_methods() -> list[MethodSpec]:
     methods: list[MethodSpec] = []
     seen_ids: dict[str, Path] = {}
+    incomplete: list[str] = []
 
     for method_root in METHOD_ROOTS:
         if not method_root.is_dir():
@@ -74,8 +93,18 @@ def discover_methods() -> list[MethodSpec]:
 
         for directory in sorted(path for path in method_root.iterdir() if path.is_dir()):
             config_path = directory / "config.yaml"
-            run_path = directory / "run.py"
-            if not config_path.is_file() or not run_path.is_file():
+            if not config_path.is_file():
+                continue
+
+            missing = [
+                filename
+                for filename in ("requirements.txt", "run.py")
+                if not (directory / filename).is_file()
+            ]
+            if missing:
+                incomplete.append(
+                    f"{directory.relative_to(ROOT)}: missing {', '.join(missing)}"
+                )
                 continue
 
             method_id = read_method_id(config_path)
@@ -88,6 +117,14 @@ def discover_methods() -> list[MethodSpec]:
 
             seen_ids[method_id] = directory
             methods.append(MethodSpec(method_id=method_id, directory=directory))
+
+    if incomplete:
+        details = "\n".join(f"  - {item}" for item in incomplete)
+        raise RuntimeError(
+            "Incomplete benchmark method integration(s) found:\n"
+            f"{details}\n"
+            "Every configured method must provide requirements.txt and run.py."
+        )
 
     return methods
 
@@ -115,39 +152,71 @@ def run_step(index: int, total: int, title: str, command: list[str]) -> None:
     subprocess.run(command, cwd=ROOT, check=True)
 
 
-def run_pipeline(method: MethodSpec, force_checkpoint: bool) -> None:
+def print_skip(index: int, total: int, title: str, message: str) -> None:
+    print()
+    print(f"[{index}/{total}] {title}")
+    print(f"[skip] {message}")
+
+
+def run_pipeline(
+    method: MethodSpec,
+    force_checkpoint: bool,
+    skip_install: bool,
+) -> None:
+    total = 5
     print(f"Method : {method.method_id}")
     print(f"Path   : {method.relative_directory}")
 
-    downloader = method.directory / "download_checkpoint.py"
-    if downloader.is_file():
-        command = [sys.executable, str(downloader.relative_to(ROOT))]
+    if skip_install:
+        print_skip(
+            1,
+            total,
+            "Install requirements",
+            "requested by --skip-install; using the current environment as-is.",
+        )
+    else:
+        run_step(
+            1,
+            total,
+            "Install requirements",
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "-r",
+                str(method.requirements_path.relative_to(ROOT)),
+            ],
+        )
+
+    if method.checkpoint_path.is_file():
+        command = [sys.executable, str(method.checkpoint_path.relative_to(ROOT))]
         if force_checkpoint:
             command.append("--force")
-        run_step(1, 4, "Checkpoint", command)
+        run_step(2, total, "Prepare checkpoint", command)
     else:
-        print()
-        print("[1/4] Checkpoint")
-        print(
-            "[skip] This method has no download_checkpoint.py; "
-            "continuing with its existing checkpoint/source setup."
+        print_skip(
+            2,
+            total,
+            "Prepare checkpoint",
+            "this method has no download_checkpoint.py and declares no automated checkpoint preparation.",
         )
 
     run_step(
-        2,
-        4,
+        3,
+        total,
         "Inference",
-        [sys.executable, str((method.directory / "run.py").relative_to(ROOT))],
+        [sys.executable, str(method.run_path.relative_to(ROOT))],
     )
     run_step(
-        3,
         4,
-        "Evaluation",
+        total,
+        "Official evaluation",
         [sys.executable, "evaluate.py", "--method", method.method_id],
     )
     run_step(
-        4,
-        4,
+        5,
+        total,
         "Build benchmark tables",
         [sys.executable, "build_tables.py"],
     )
@@ -156,7 +225,9 @@ def run_pipeline(method: MethodSpec, force_checkpoint: bool) -> None:
     print("Done")
     print("----")
     print(f"runs/{method.method_id}/scores.npy")
+    print(f"runs/{method.method_id}/run.json")
     print(f"outputs/{method.method_id}/metrics.json")
+    print(f"outputs/{method.method_id}/run.json")
     print("tables/table1_main.csv")
     print("tables/table2_cases.csv")
 
@@ -177,8 +248,8 @@ def print_methods(methods: list[MethodSpec]) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Download a method checkpoint when supported, run inference, "
-            "evaluate it, and rebuild the benchmark tables."
+            "Install the selected method requirements, prepare its checkpoint when "
+            "supported, run inference, evaluate it, and rebuild benchmark tables."
         )
     )
     parser.add_argument(
@@ -192,16 +263,27 @@ def parse_args() -> argparse.Namespace:
         help="List discovered runnable methods and exit.",
     )
     parser.add_argument(
+        "--skip-install",
+        action="store_true",
+        help=(
+            "Skip the default `python -m pip install -r <method>/requirements.txt` "
+            "step. Use only when the active environment is already prepared."
+        ),
+    )
+    parser.add_argument(
         "--force-checkpoint",
         action="store_true",
-        help="Pass --force to the method-local checkpoint downloader.",
+        help="Pass --force to the method-local checkpoint preparer.",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    methods = discover_methods()
+    try:
+        methods = discover_methods()
+    except (RuntimeError, ValueError) as error:
+        raise SystemExit(str(error)) from error
 
     if args.list:
         print_methods(methods)
@@ -215,7 +297,7 @@ def main() -> None:
     except (KeyError, RuntimeError) as error:
         raise SystemExit(str(error)) from error
 
-    run_pipeline(method, args.force_checkpoint)
+    run_pipeline(method, args.force_checkpoint, args.skip_install)
 
 
 if __name__ == "__main__":

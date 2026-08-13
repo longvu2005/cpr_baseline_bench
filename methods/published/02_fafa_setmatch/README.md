@@ -113,18 +113,19 @@ The adapter:
 
 The adapter may also cache predicted person boxes and FAFA gallery-person
 features plus component-person FAFA scores under `runs/fafa_setmatch/cache/` to
-avoid recomputing them.
+avoid recomputing them. The cache directory is fingerprinted by adapter/config/data
+and checkpoint identities so changing a model/config does not silently reuse stale
+features.
 
 ## Run
 
-```bash
-pip install -r methods/published/02_fafa_setmatch/requirements.txt
+Normal end-to-end command:
 
-python validate_data.py
-python methods/published/02_fafa_setmatch/run.py
-python evaluate.py --method fafa_setmatch
-python build_tables.py
+```bash
+python run_baseline.py fafa_setmatch
 ```
+
+The root runner installs this method's `requirements.txt` first, pins the official source, downloads the released FAFA checkpoint plus CLIP/detector auxiliary weights, pre-warms FAFA's LAVIS/Transformers runtime assets into a repository-local cache, then runs inference, evaluation, and table rebuilding. Inference uses that cache in offline mode so a missing runtime artifact fails instead of downloading silently mid-benchmark.
 
 Expected benchmark outputs:
 

@@ -5,7 +5,8 @@ torch
 torchvision
 tqdm
 scipy
-git+https://github.com/openai/CLIP.git
+gdown>=5.2,<7
+git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33
 
 # Official FAFA_SynCPR requirements at pinned source commit.
 pandas

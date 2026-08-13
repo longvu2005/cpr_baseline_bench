@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
+CACHE_SCHEMA_VERSION = 2
 
 
 def load_jsonl(path):
@@ -31,6 +33,25 @@ def device_from(name):
     return torch.device("cpu")
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def build_gallery_cache_fingerprint(
+    checkpoint: Path, gallery_manifest: Path, model_name: str
+) -> dict:
+    return {
+        "schema": CACHE_SCHEMA_VERSION,
+        "model_name": model_name,
+        "checkpoint_sha256": sha256_file(checkpoint),
+        "gallery_manifest_sha256": sha256_file(gallery_manifest),
+    }
+
+
 class GalleryDataset(Dataset):
     def __init__(self, rows, preprocess):
         self.rows = rows
@@ -45,19 +66,25 @@ class GalleryDataset(Dataset):
 
 
 @torch.no_grad()
-def gallery_features(model, preprocess, rows, cache, runtime, device):
+def gallery_features(
+    model, preprocess, rows, cache, runtime, device, cache_fingerprint
+):
     feature_dim = int(model.text_projection.shape[1])
     expected_shape = (len(rows), feature_dim)
+    meta_path = cache.with_suffix(cache.suffix + ".meta.json")
 
-    if cache.is_file():
+    if cache.is_file() and meta_path.is_file():
         x = np.load(cache, mmap_mode="r")
-        if x.shape == expected_shape:
+        try:
+            cached_fingerprint = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            cached_fingerprint = None
+        if x.shape == expected_shape and cached_fingerprint == cache_fingerprint:
             print(f"Using gallery cache: {cache}")
             return x, cache
-        print(
-            f"Ignoring incompatible gallery cache {cache}: "
-            f"got {x.shape}, expected {expected_shape}"
-        )
+        print(f"Ignoring stale/incompatible gallery cache: {cache}")
+    elif cache.is_file():
+        print(f"Ignoring legacy gallery cache without fingerprint: {cache}")
 
     loader = DataLoader(
         GalleryDataset(rows, preprocess),
@@ -78,6 +105,10 @@ def gallery_features(model, preprocess, rows, cache, runtime, device):
         )
     cache.parent.mkdir(parents=True, exist_ok=True)
     np.save(cache, x)
+    meta_path.write_text(
+        json.dumps(cache_fingerprint, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     return np.load(cache, mmap_mode="r"), cache
 
 
@@ -112,8 +143,10 @@ def setup():
             "Run `python methods/simple/03_clip_early_fusion/download_checkpoint.py` from the repository root."
         )
 
-    gallery = load_jsonl(ROOT / "data/gallery.jsonl")
-    queries = load_jsonl(ROOT / "data/queries.jsonl")
+    gallery_manifest = ROOT / "data/gallery.jsonl"
+    query_manifest = ROOT / "data/queries.jsonl"
+    gallery = load_jsonl(gallery_manifest)
+    queries = load_jsonl(query_manifest)
     device = device_from(cfg["runtime"].get("device", "auto"))
     model, preprocess = clip.load(str(checkpoint), device=device, jit=False)
     model.eval()
@@ -121,8 +154,11 @@ def setup():
         model.float()
 
     cache = ROOT / cfg["cache"]["gallery_features"]
+    cache_fingerprint = build_gallery_cache_fingerprint(
+        checkpoint, gallery_manifest, str(cfg["model"]["name"])
+    )
     gfeat, cache_used = gallery_features(
-        model, preprocess, gallery, cache, cfg["runtime"], device
+        model, preprocess, gallery, cache, cfg["runtime"], device, cache_fingerprint
     )
     tfeat = text_features(
         model, [q["text"] for q in queries],
@@ -134,11 +170,30 @@ def setup():
 @torch.no_grad()
 def main():
     cfg, config_path, output, gallery, queries, device, gfeat, tfeat, cache_used = setup()
-    gallery_index = {x["image_id"]: i for i, x in enumerate(gallery)}
-    query_idx = np.asarray([gallery_index[q["image_id"]] for q in queries])
+    gallery_index: dict[object, int] = {}
+    for gi, row in enumerate(gallery):
+        image_id = row.get("image_id")
+        if image_id is None:
+            raise KeyError(f"Gallery row {gi} has no image_id")
+        if image_id in gallery_index:
+            raise ValueError(f"Duplicate gallery image_id: {image_id!r}")
+        gallery_index[image_id] = gi
+
+    query_indices: list[int] = []
+    for qi, query in enumerate(queries):
+        image_id = query.get("image_id")
+        if image_id not in gallery_index:
+            raise ValueError(f"Query {qi} image_id not found in gallery: {image_id!r}")
+        query_indices.append(gallery_index[image_id])
+    query_idx = np.asarray(query_indices, dtype=np.int64)
 
     iw = float(cfg["fusion"]["image_weight"])
     tw = float(cfg["fusion"]["text_weight"])
+    if not np.isfinite([iw, tw]).all() or iw < 0.0 or tw < 0.0 or iw + tw <= 0.0:
+        raise ValueError(
+            "fusion.image_weight and fusion.text_weight must be finite, non-negative, "
+            "and have a positive sum"
+        )
     iw, tw = iw / (iw + tw), tw / (iw + tw)
 
     scores_path = output / "scores.npy"

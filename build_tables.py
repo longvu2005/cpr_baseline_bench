@@ -63,16 +63,28 @@ def collect_results():
 
         metrics = load_json(metrics_path)
 
-        if run_path.is_file():
-            run = load_json(run_path)
-        else:
-            run = {}
+        if not run_path.is_file():
+            raise RuntimeError(
+                f"Missing evaluated run metadata next to {metrics_path.relative_to(ROOT)}: "
+                f"expected {run_path.relative_to(ROOT)}"
+            )
+        run = load_json(run_path)
 
-        method_id = (
-            run.get("method")
-            or metrics.get("method")
-            or method_dir.name
-        )
+        metric_method = metrics.get("method")
+        run_method = run.get("method")
+        if not isinstance(run_method, str) or not run_method:
+            raise ValueError(f"Missing method id in {run_path.relative_to(ROOT)}")
+        if metric_method != run_method:
+            raise ValueError(
+                f"Method mismatch for {method_dir.name}: metrics={metric_method!r}, "
+                f"run={run_method!r}"
+            )
+        if run_method != method_dir.name:
+            raise ValueError(
+                f"Output directory/method mismatch: {method_dir.name!r} vs {run_method!r}"
+            )
+
+        method_id = run_method
 
         method = (
             run.get("display_name")
@@ -273,6 +285,8 @@ def main():
     group_order = {
         "Simple / Obvious Baselines": 0,
         "Published / SOTA Baselines": 1,
+        # Backward-compatible alias for older run.json files.
+        "Published Baselines": 1,
         "Proposed": 2,
     }
 
@@ -281,6 +295,8 @@ def main():
         "clip_text": 2,
         "clip_early_fusion": 3,
         "clip_late_fusion": 4,
+        "word4per_setmatch": 1,
+        "fafa_setmatch": 2,
     }
 
     results.sort(

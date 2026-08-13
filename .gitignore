@@ -33,3 +33,10 @@ venv/
 **/._*
 __MACOSX/
 **/__MACOSX/
+
+# Reproduced checkpoint-side configs (must come from the same training run)
+checkpoints/word4per/word4per_cuhk_pedes_stage2_configs.yaml
+
+# Prepared runtime caches / markers
+checkpoints/fafa/runtime_cache/
+checkpoints/fafa/runtime_assets_ready.json

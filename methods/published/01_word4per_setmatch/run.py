@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""FAFA + SetMatch adapter for the CPR baseline benchmark.
+"""Word4Per + SetMatch adapter for the CPR baseline benchmark.
 
-The retrieval model/scoring path is imported from the official FAFA_SynCPR
-implementation. Person boxes and query-target localization are predicted; no GT
-identity-to-box mapping is consumed by this adapter.
+The Word4Per retrieval path is imported from the authors' pinned old_project
+implementation. Because the benchmark contains full scene images rather than
+person crops, person instances and query-target boxes are predicted. No GT
+identity-to-box mapping, target_ids, or positive labels are used for scoring.
 """
 
 from __future__ import annotations
@@ -11,11 +12,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
-import socket
 import subprocess
 import sys
-from contextlib import contextmanager
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -24,6 +22,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import yaml
 from PIL import Image
 from scipy.optimize import linear_sum_assignment
@@ -32,8 +31,8 @@ from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
-METHOD_ID = "fafa_setmatch"
-ADAPTER_VERSION = "2026-08-13-v2-offline-artifacts-setmatch"
+METHOD_ID = "word4per_setmatch"
+ADAPTER_VERSION = "2026-08-13-v5-predicted-person-setmatch"
 
 
 @dataclass(frozen=True)
@@ -181,8 +180,6 @@ def parse_query_targets(query: dict[str, Any], qi: int) -> list[QueryTarget]:
 
         select_text = str(subject.get("select_text") or "").strip()
         if not select_text:
-            # Only a localization fallback. This text is never used as FAFA's
-            # final retrieval caption when select_text is present.
             select_text = str(subject.get("modify_text") or "").strip() or query_text
         if not select_text:
             raise ValueError(f"Query {qi} subject {si}: no usable selection text")
@@ -203,12 +200,12 @@ def ensure_official_source(cfg: dict[str, Any]) -> Path:
     """Verify the source prepared by download_checkpoint.py without networking."""
     source = cfg["source"]
     checkout = resolve_config_path(str(source["local_checkout"]))
-    subdir = checkout / str(source.get("subdir", "FAFA_SynCPR"))
+    old_project = checkout / str(source.get("subdir", "old_project"))
     expected = str(source["commit"])
 
     if not checkout.is_dir():
         raise FileNotFoundError(
-            f"Missing pinned FAFA source: {rel(checkout)}. "
+            f"Missing pinned Word4Per source: {rel(checkout)}. "
             "Run the baseline through run_baseline.py first."
         )
     actual = subprocess.check_output(
@@ -225,168 +222,139 @@ def ensure_official_source(cfg: dict[str, Any]) -> Path:
     ).strip()
     if dirty:
         raise RuntimeError(
-            f"Pinned FAFA source has tracked local modifications: {rel(checkout)}\n{dirty}"
+            f"Pinned Word4Per source has tracked local modifications: {rel(checkout)}\n{dirty}"
         )
-    if not subdir.is_dir():
-        raise FileNotFoundError(subdir)
-    return subdir
+    if not old_project.is_dir():
+        raise FileNotFoundError(old_project)
+    return old_project
 
 
-def configure_runtime_cache(cfg: dict[str, Any]) -> Path:
-    ckpt = cfg["checkpoint"]
-    cache_root = resolve_config_path(str(ckpt["cache_root"]))
-    marker = resolve_config_path(str(ckpt["runtime_assets_marker"]))
-    if not marker.is_file():
+def import_official(old_project: Path):
+    sys.path.insert(0, str(old_project))
+    from datasets.bases import tokenize  # type: ignore
+    from datasets.build import build_transforms  # type: ignore
+    from model import build_model  # type: ignore
+    from model.word4per import IM2TEXT  # type: ignore
+    from utils.checkpoint import Checkpointer_Toword  # type: ignore
+    from utils.iotools import load_train_configs  # type: ignore
+    from utils.simple_tokenizer import SimpleTokenizer  # type: ignore
+
+    return (
+        tokenize,
+        build_transforms,
+        build_model,
+        IM2TEXT,
+        Checkpointer_Toword,
+        load_train_configs,
+        SimpleTokenizer,
+    )
+
+
+def validate_stage2_args(args, stage2_cfg: Path) -> None:
+    expected = {
+        "dataset_name": "CUHK-PEDES",
+        "loss_names": "sdm+id",
+        "toword_loss": "text",
+        "batch_size": 128,
+        "num_epoch": 60,
+    }
+    problems: list[str] = []
+    for key, value in expected.items():
+        if getattr(args, key, None) != value:
+            problems.append(
+                f"{key}: expected {value!r}, got {getattr(args, key, None)!r}"
+            )
+    if str(getattr(args, "optimizer", "")).lower() != "adamw":
+        problems.append(
+            f"optimizer: expected 'AdamW', got {getattr(args, 'optimizer', None)!r}"
+        )
+    try:
+        lr = float(getattr(args, "lr", None))
+    except (TypeError, ValueError):
+        lr = float("nan")
+    if not (abs(lr - 1e-4) <= 1e-12):
+        problems.append(f"lr: expected 0.0001, got {getattr(args, 'lr', None)!r}")
+    if bool(getattr(args, "MLM", False)):
+        problems.append("MLM: expected false for the documented Stage-2 recipe")
+    if problems:
+        details = "\n".join(f"  - {item}" for item in problems)
+        raise RuntimeError(
+            f"Word4Per Stage-2 config does not match the pinned official recipe: {rel(stage2_cfg)}\n"
+            f"{details}"
+        )
+
+
+def load_word4per(cfg: dict[str, Any], old_project: Path, device: torch.device):
+    (
+        tokenize,
+        build_transforms,
+        build_model,
+        IM2TEXT,
+        Checkpointer_Toword,
+        load_train_configs,
+        SimpleTokenizer,
+    ) = import_official(old_project)
+
+    stage2_cfg = (ROOT / cfg["checkpoint"]["stage2_config"]).resolve()
+    stage2_ckpt = (ROOT / cfg["checkpoint"]["stage2"]).resolve()
+    if not stage2_cfg.is_file():
+        raise FileNotFoundError(f"Missing Stage-2 config: {stage2_cfg}")
+    if not stage2_ckpt.is_file():
+        raise FileNotFoundError(f"Missing Stage-2 checkpoint: {stage2_ckpt}")
+
+    args = load_train_configs(str(stage2_cfg))
+    validate_stage2_args(args, stage2_cfg)
+    args.training = False
+    backbone = str(args.pretrain_choice)
+    configured_backbone = str(cfg["checkpoint"]["base_clip_model"])
+    if backbone != configured_backbone:
+        raise RuntimeError(
+            f"Word4Per Stage-2 backbone mismatch: {backbone!r} != {configured_backbone!r}"
+        )
+    base_clip_path = resolve_config_path(str(cfg["checkpoint"]["base_clip"]))
+    if not base_clip_path.is_file():
         raise FileNotFoundError(
-            f"Missing FAFA runtime-assets marker: {rel(marker)}. "
+            f"Missing Word4Per base CLIP checkpoint: {rel(base_clip_path)}. "
             "Run download_checkpoint.py first."
         )
-    try:
-        marker_data = json.loads(marker.read_text(encoding="utf-8"))
-    except Exception as error:
-        raise RuntimeError(f"Invalid FAFA runtime-assets marker: {rel(marker)}") from error
-    expected = {
-        "source_commit": str(cfg["source"]["commit"]),
-        "model_name": str(ckpt.get("model_name", "blip2_fafa_cpr")),
-        "model_type": str(ckpt.get("model_type", "pretrain")),
-        "cache_root": rel(cache_root),
-    }
-    if any(marker_data.get(key) != value for key, value in expected.items()):
-        raise RuntimeError(
-            f"Stale FAFA runtime-assets marker: {rel(marker)}. "
-            "Re-run download_checkpoint.py for the current config."
-        )
-    files = marker_data.get("files")
-    if not isinstance(files, list) or not files:
-        raise RuntimeError(
-            f"FAFA runtime-assets marker has no cache inventory: {rel(marker)}. "
-            "Re-run download_checkpoint.py."
-        )
-    for item in files:
-        if not isinstance(item, dict):
-            raise RuntimeError(f"Invalid FAFA cache inventory entry in {rel(marker)}")
-        rel_path = item.get("path")
-        size = item.get("size")
-        if not isinstance(rel_path, str) or not isinstance(size, int):
-            raise RuntimeError(f"Invalid FAFA cache inventory entry in {rel(marker)}")
-        asset = cache_root / rel_path
-        if not asset.is_file() or asset.stat().st_size != size:
-            raise RuntimeError(
-                f"Missing/stale FAFA runtime asset: {rel(asset)}. "
-                "Re-run download_checkpoint.py to repair the cache."
-            )
-    os.environ["TORCH_HOME"] = str(cache_root / "torch")
-    os.environ["HF_HOME"] = str(cache_root / "huggingface")
-    os.environ["XDG_CACHE_HOME"] = str(cache_root / "xdg")
-    os.environ["HF_HUB_OFFLINE"] = "1"
-    os.environ["TRANSFORMERS_OFFLINE"] = "1"
-    return marker
+    # old_project accepts a local OpenAI CLIP checkpoint path. Replacing the
+    # model name prevents build_model() from downloading weights at inference.
+    args.pretrain_choice = str(base_clip_path)
+    model = build_model(args, num_classes=int(cfg["checkpoint"].get("num_classes", 11003)))
+    args.pretrain_choice = backbone
 
+    if backbone == "ViT-L/14":
+        dim = 768
+    elif backbone.startswith("ViT-B"):
+        dim = 512
+    else:
+        raise ValueError(f"Unsupported Word4Per backbone: {backbone}")
 
-@contextmanager
-def block_network_during_model_load():
-    """Make missing FAFA runtime assets fail instead of downloading silently."""
-    original_connect = socket.socket.connect
-    original_connect_ex = socket.socket.connect_ex
-
-    def blocked_connect(self, address):  # noqa: ANN001
-        raise RuntimeError(
-            f"Network access blocked during FAFA inference model loading: {address!r}. "
-            "Run download_checkpoint.py to prepare every runtime asset first."
-        )
-
-    def blocked_connect_ex(self, address):  # noqa: ANN001
-        blocked_connect(self, address)
-        return 1
-
-    socket.socket.connect = blocked_connect
-    socket.socket.connect_ex = blocked_connect_ex
-    try:
-        yield
-    finally:
-        socket.socket.connect = original_connect
-        socket.socket.connect_ex = original_connect_ex
-
-
-def import_official(fafa_dir: Path):
-    src = fafa_dir / "src"
-    if not src.is_dir():
-        raise FileNotFoundError(src)
-    sys.path.insert(0, str(src))
-
-    from data_utils import squarepad_transform_test, targetpad_transform  # type: ignore
-    from lavis.models import load_model_and_preprocess  # type: ignore
-
-    return squarepad_transform_test, targetpad_transform, load_model_and_preprocess
-
-
-def load_fafa(
-    cfg: dict[str, Any], fafa_dir: Path, device: torch.device
-):
-    configure_runtime_cache(cfg)
-    squarepad_transform_test, targetpad_transform, load_model_and_preprocess = (
-        import_official(fafa_dir)
+    img2text = IM2TEXT(
+        embed_dim=dim,
+        middle_dim=512,
+        output_dim=dim,
+        n_layer=int(args.mlp_depth),
     )
-    ckpt_cfg = cfg["checkpoint"]
-    ckpt_path = (ROOT / ckpt_cfg["path"]).resolve()
-    if not ckpt_path.is_file():
-        raise FileNotFoundError(
-            f"Missing official FAFA checkpoint: {ckpt_path}\n"
-            "Run `python methods/published/02_fafa_setmatch/download_checkpoint.py` from the repository root."
-        )
+    Checkpointer_Toword(model, img2text).load(f=str(stage2_ckpt))
 
-    try:
-        with block_network_during_model_load():
-            model, _, txt_processors = load_model_and_preprocess(
-                name=str(ckpt_cfg.get("model_name", "blip2_fafa_cpr")),
-                model_type=str(ckpt_cfg.get("model_type", "pretrain")),
-                is_eval=True,
-                device=str(device),
-            )
-    except Exception as error:
-        raise RuntimeError(
-            "FAFA model construction failed in offline inference mode. "
-            "Re-run download_checkpoint.py to prepare the official LAVIS/Transformers assets."
-        ) from error
+    model.to(device).eval()
+    img2text.to(device).eval()
+    transform = build_transforms(img_size=args.img_size, is_train=False)
+    tokenizer = SimpleTokenizer()
+    split_ind = tokenize("*", tokenizer)[1]
 
-    checkpoint = torch.load(ckpt_path, map_location=device)
-    if isinstance(checkpoint, dict):
-        if "model" in checkpoint:
-            state_dict = checkpoint["model"]
-        elif "state_dict" in checkpoint:
-            state_dict = checkpoint["state_dict"]
-        else:
-            state_dict = checkpoint
-    else:
-        state_dict = checkpoint
-
-    incompatible = model.load_state_dict(state_dict, strict=False)
-    model = model.to(device).eval()
-
-    fda_k = int(ckpt_cfg.get("fda_k", 6))
-    fda_alpha = float(ckpt_cfg.get("fda_alpha", 0.5))
-    if hasattr(model, "fda_k"):
-        model.fda_k = fda_k
-    if hasattr(model, "fda_alpha"):
-        model.fda_alpha = fda_alpha
-    if hasattr(model, "use_soft"):
-        model.use_soft = bool(ckpt_cfg.get("use_soft", True))
-
-    transform_name = str(ckpt_cfg.get("transform", "squarepad")).lower()
-    image_size = int(ckpt_cfg.get("image_size", 224))
-    if transform_name == "squarepad":
-        resize_hw = tuple(int(x) for x in ckpt_cfg.get("test_resize_hw", [384, 192]))
-        preprocess = squarepad_transform_test(image_size, need_size=resize_hw)
-    elif transform_name == "targetpad":
-        preprocess = targetpad_transform(1.25, image_size)
-    else:
-        raise ValueError(f"Unsupported official FAFA transform: {transform_name}")
-
-    load_info = {
-        "missing_keys": list(incompatible.missing_keys),
-        "unexpected_keys": list(incompatible.unexpected_keys),
-    }
-    return model, txt_processors, preprocess, ckpt_path, load_info
+    return (
+        model,
+        img2text,
+        transform,
+        tokenizer,
+        tokenize,
+        split_ind,
+        args,
+        stage2_cfg,
+        stage2_ckpt,
+    )
 
 
 def load_detector(detector_cfg: dict[str, Any], device: torch.device):
@@ -533,13 +501,7 @@ def get_or_create_detection_cache(
     candidates: list[list[BoxCandidate]] = []
     for i, row in enumerate(tqdm(gallery, desc="Predict person boxes")):
         candidates.append(
-            detect_candidates(
-                detector,
-                weights,
-                image_path(row, i),
-                detector_cfg,
-                device,
-            )
+            detect_candidates(detector, weights, image_path(row, i), detector_cfg, device)
         )
     save_candidate_cache(cache_path, gallery, candidates)
     return candidates, str(weights)
@@ -607,12 +569,8 @@ def select_query_target_boxes(
         text_tokens = clip_module.tokenize([target.select_text for target in targets]).to(device)
         image_features = clip_model.encode_image(crop_batch).float()
         text_features = clip_model.encode_text(text_tokens).float()
-        image_features = image_features / image_features.norm(
-            dim=-1, keepdim=True
-        ).clamp_min(1e-12)
-        text_features = text_features / text_features.norm(
-            dim=-1, keepdim=True
-        ).clamp_min(1e-12)
+        image_features = F.normalize(image_features, p=2, dim=-1)
+        text_features = F.normalize(text_features, p=2, dim=-1)
         sim = (text_features @ image_features.T).cpu().numpy()
 
         rows, cols = linear_sum_assignment(-sim)
@@ -646,10 +604,10 @@ class GalleryPersonDataset(Dataset):
         self,
         gallery: Sequence[dict[str, Any]],
         selected_boxes: Sequence[Sequence[BoxCandidate]],
-        preprocess,
+        transform,
     ):
         self.gallery = gallery
-        self.preprocess = preprocess
+        self.transform = transform
         self.items: list[tuple[int, tuple[float, float, float, float]]] = []
         self.offsets = np.zeros(len(gallery) + 1, dtype=np.int64)
         for gi, boxes in enumerate(selected_boxes):
@@ -665,7 +623,7 @@ class GalleryPersonDataset(Dataset):
         path = image_path(self.gallery[gi], gi)
         with Image.open(path) as source:
             crop = source.convert("RGB").crop(box)
-            return self.preprocess(crop)
+            return self.transform(crop)
 
 
 @torch.no_grad()
@@ -675,18 +633,18 @@ def encode_gallery_persons(
     cache_path: Path,
     runtime: dict[str, Any],
     device: torch.device,
-) -> tuple[Path, np.ndarray, tuple[int, int]]:
+) -> tuple[Path, np.ndarray, int]:
     offsets_path = cache_path.with_name("gallery_person_offsets.npy")
     if cache_path.is_file() and offsets_path.is_file():
         offsets = np.load(offsets_path)
         features = np.load(cache_path, mmap_mode="r")
         if (
-            features.ndim == 3
+            features.ndim == 2
             and features.shape[0] == len(dataset)
             and offsets.shape == dataset.offsets.shape
             and np.array_equal(offsets, dataset.offsets)
         ):
-            return cache_path, offsets, (int(features.shape[1]), int(features.shape[2]))
+            return cache_path, offsets, int(features.shape[1])
 
     loader = DataLoader(
         dataset,
@@ -697,41 +655,39 @@ def encode_gallery_persons(
     )
 
     feature_memmap = None
-    token_dim: tuple[int, int] | None = None
+    feature_dim: int | None = None
     cursor = 0
-    output_dtype = str(runtime.get("gallery_feature_dtype", "float16"))
+    output_dtype = str(runtime.get("gallery_feature_dtype", "float16")).lower()
+    if output_dtype not in {"float16", "float32"}:
+        raise ValueError("runtime.gallery_feature_dtype must be float16 or float32")
     np_dtype = np.float16 if output_dtype == "float16" else np.float32
 
-    for images in tqdm(loader, desc="FAFA gallery persons"):
+    for images in tqdm(loader, desc="Word4Per gallery persons"):
         images = images.to(device, non_blocking=(device.type == "cuda"))
-        model_images = images.half() if device.type == "cuda" else images.float()
-        image_features, _ = model.extract_target_features(model_images, mode="mean")
-        image_features = image_features.float()
-        if image_features.ndim == 2:
-            image_features = image_features.unsqueeze(1)
-        if image_features.ndim != 3:
+        features = F.normalize(model.encode_image(images).float(), p=2, dim=-1)
+        if features.ndim != 2:
             raise RuntimeError(
-                f"Unexpected FAFA target feature shape: {tuple(image_features.shape)}"
+                f"Unexpected Word4Per gallery feature shape: {tuple(features.shape)}"
             )
 
         if feature_memmap is None:
-            token_dim = (int(image_features.shape[1]), int(image_features.shape[2]))
+            feature_dim = int(features.shape[1])
             feature_memmap = np.lib.format.open_memmap(
                 cache_path,
                 mode="w+",
                 dtype=np_dtype,
-                shape=(len(dataset), token_dim[0], token_dim[1]),
+                shape=(len(dataset), feature_dim),
             )
 
-        batch_np = image_features.cpu().numpy().astype(np_dtype, copy=False)
+        batch_np = features.cpu().numpy().astype(np_dtype, copy=False)
         feature_memmap[cursor : cursor + len(batch_np)] = batch_np
         cursor += len(batch_np)
 
-    if feature_memmap is None or token_dim is None:
+    if feature_memmap is None or feature_dim is None:
         raise RuntimeError("Gallery person dataset is empty")
     feature_memmap.flush()
     np.save(offsets_path, dataset.offsets)
-    return cache_path, dataset.offsets, token_dim
+    return cache_path, dataset.offsets, feature_dim
 
 
 class QueryTargetDataset(Dataset):
@@ -742,10 +698,10 @@ class QueryTargetDataset(Dataset):
         boxes: Sequence[Sequence[tuple[float, float, float, float]]],
         gallery: Sequence[dict[str, Any]],
         gallery_index: dict[Any, int],
-        preprocess,
+        transform,
     ):
         self.gallery = gallery
-        self.preprocess = preprocess
+        self.transform = transform
         self.items: list[tuple[int, tuple[float, float, float, float], str, int]] = []
         for qi, (query, query_targets, query_boxes) in enumerate(
             zip(queries, targets, boxes)
@@ -764,13 +720,17 @@ class QueryTargetDataset(Dataset):
         path = image_path(self.gallery[gi], gi)
         with Image.open(path) as source:
             crop = source.convert("RGB").crop(box)
-            return self.preprocess(crop), caption, owner
+            return self.transform(crop), caption, owner
 
 
 @torch.no_grad()
 def encode_query_targets(
     model,
-    txt_processors,
+    img2text,
+    tokenizer,
+    tokenize,
+    split_ind,
+    text_length: int,
     dataset: QueryTargetDataset,
     num_queries: int,
     runtime: dict[str, Any],
@@ -778,27 +738,42 @@ def encode_query_targets(
 ) -> list[np.ndarray]:
     loader = DataLoader(
         dataset,
-        batch_size=int(runtime.get("query_batch_size", 64)),
+        batch_size=int(runtime.get("query_batch_size", 128)),
         shuffle=False,
         num_workers=int(runtime.get("num_workers", 4)),
         pin_memory=(device.type == "cuda"),
     )
 
     grouped: list[list[np.ndarray]] = [[] for _ in range(num_queries)]
-    for images, captions, owners in tqdm(loader, desc="FAFA query targets"):
+    mapper_dtype = next(img2text.parameters()).dtype
+
+    for images, captions, owners in tqdm(loader, desc="Word4Per query targets"):
         images = images.to(device, non_blocking=(device.type == "cuda"))
-        model_images = images.half() if device.type == "cuda" else images.float()
-        processed = [txt_processors["eval"](str(caption)) for caption in captions]
-        features = model.extract_features(
-            {"image": model_images, "text_input": processed}
-        ).multimodal_embeds
-        features = features.float()
-        if features.ndim == 3 and features.shape[1] == 1:
-            features = features[:, 0]
+        raw = model.encode_image(images)
+        image_tokens = img2text(raw.to(dtype=mapper_dtype))
+        text_tokens = torch.stack(
+            [
+                tokenize(
+                    f"a * is , {str(caption)}",
+                    tokenizer=tokenizer,
+                    text_length=text_length,
+                    truncate=True,
+                )
+                for caption in captions
+            ]
+        ).to(device)
+        features = model.encode_text_img_retrieval(
+            text_tokens,
+            image_tokens,
+            split_ind=split_ind,
+            repeat=False,
+        )
+        features = F.normalize(features.float(), p=2, dim=-1)
         if features.ndim != 2:
             raise RuntimeError(
-                f"Unexpected FAFA query feature shape: {tuple(features.shape)}"
+                f"Unexpected Word4Per query feature shape: {tuple(features.shape)}"
             )
+
         features_np = features.cpu().numpy().astype(np.float32, copy=False)
         for feature, owner in zip(features_np, owners.numpy().tolist()):
             grouped[int(owner)].append(feature)
@@ -806,7 +781,7 @@ def encode_query_targets(
     result: list[np.ndarray] = []
     for qi, group in enumerate(grouped):
         if not group:
-            raise RuntimeError(f"Query {qi} has no FAFA target feature")
+            raise RuntimeError(f"Query {qi} has no Word4Per target feature")
         result.append(np.stack(group, axis=0).astype(np.float32, copy=False))
     return result
 
@@ -829,17 +804,10 @@ def compute_component_person_scores(
     component_features: np.ndarray,
     gallery_feature_path: Path,
     cache_path: Path,
-    fda_k: int,
     person_batch_size: int,
     query_batch_size: int,
     device: torch.device,
 ) -> Path:
-    """Cache official soft-FDA scores for every target component x gallery person.
-
-    Gallery person features are transferred once per person batch; all query
-    component blocks are then scored against that batch. This is much faster
-    than re-streaming the whole gallery once per benchmark query.
-    """
     gallery_features = np.load(gallery_feature_path, mmap_mode="r")
     expected_shape = (len(component_features), int(gallery_features.shape[0]))
     if cache_path.is_file():
@@ -859,7 +827,7 @@ def compute_component_person_scores(
 
     for p_start in tqdm(
         range(0, gallery_features.shape[0], person_batch_size),
-        desc="FAFA component-person scores",
+        desc="Word4Per component-person scores",
     ):
         p_end = min(p_start + person_batch_size, gallery_features.shape[0])
         g = torch.from_numpy(np.asarray(gallery_features[p_start:p_end])).to(
@@ -868,22 +836,15 @@ def compute_component_person_scores(
         for q_start in range(0, len(component_features), query_batch_size):
             q_end = min(q_start + query_batch_size, len(component_features))
             q = q_all[q_start:q_end]
-            # q: [Q,D], g: [P,K,D] -> [Q,P,K]
-            token_similarity = torch.einsum("qd,pkd->qpk", q, g)
-            k = min(fda_k, int(token_similarity.shape[-1]))
-            topk = torch.topk(token_similarity, k=k, dim=-1).values
             scores[q_start:q_end, p_start:p_end] = (
-                topk.mean(dim=-1).cpu().numpy().astype(np.float32, copy=False)
+                (q @ g.T).cpu().numpy().astype(np.float32, copy=False)
             )
     scores.flush()
     return cache_path
 
 
-def setmatch_image_score(
-    matrix: np.ndarray,
-    unmatched_score: float,
-) -> float:
-    """Maximum-weight Hungarian assignment followed by minimum matched score."""
+def setmatch_image_score(matrix: np.ndarray, unmatched_score: float) -> float:
+    """Maximum-weight one-to-one assignment followed by minimum assigned score."""
     num_targets, num_persons = matrix.shape
     if num_targets < 1:
         raise ValueError("SetMatch requires at least one target")
@@ -921,18 +882,12 @@ def setmatch_two_targets_all_images(
     counts: np.ndarray,
     unmatched_score: float,
 ) -> np.ndarray:
-    """Exact two-target specialization of maximum-weight Hungarian SetMatch.
-
-    The pilot MULTI/RELATIONAL schema has exactly two target subjects. For two
-    rows, the maximum-weight one-to-one assignment can be solved from each
-    row's best/second-best columns, yielding exactly the same assignment
-    objective as Hungarian while avoiding millions of tiny SciPy calls.
-    """
+    """Exact two-target specialization of maximum-weight Hungarian SetMatch."""
     if target_person_scores.shape[0] != 2:
         raise ValueError("Expected exactly two target rows")
 
     safe_index = np.where(person_index >= 0, person_index, 0)
-    values = target_person_scores[:, safe_index]  # [2, G, max_persons]
+    values = target_person_scores[:, safe_index]
     values = np.asarray(values, dtype=np.float32)
     values[:, person_index < 0] = -np.inf
     out = np.empty(len(counts), dtype=np.float32)
@@ -943,9 +898,6 @@ def setmatch_two_targets_all_images(
         best_real = np.maximum(
             target_person_scores[0, real_idx], target_person_scores[1, real_idx]
         )
-        # With one gallery person and two targets, the other target is forced
-        # onto the padded unmatched slot. This is the same padded-Hungarian
-        # rule used by setmatch_image_score().
         out[one] = np.minimum(best_real, unmatched_score)
 
     many = counts >= 2
@@ -961,8 +913,8 @@ def setmatch_two_targets_all_images(
             vals = np.take_along_axis(vals, order, axis=1)
             return vals[:, 0], idx[:, 0], vals[:, 1], idx[:, 1]
 
-        a1, ai1, a2, ai2 = top2(a)
-        b1, bi1, b2, bi2 = top2(b)
+        a1, ai1, a2, _ = top2(a)
+        b1, bi1, b2, _ = top2(b)
 
         b_excl_a = np.where(bi1 != ai1, b1, b2)
         a_excl_b = np.where(ai1 != bi1, a1, a2)
@@ -1004,16 +956,12 @@ def aggregate_component_scores(
         num_targets = end - start
 
         if num_targets == 1:
-            # One-target Hungarian == choose the best predicted person in each
-            # gallery image. Person crops are contiguous per image.
             scores[qi] = np.maximum.reduceat(target_scores[0], gallery_offsets[:-1])
         elif num_targets == 2:
             scores[qi] = setmatch_two_targets_all_images(
                 target_scores, person_index, counts, unmatched_score
             )
         else:
-            # Generic exact Hungarian fallback for future schemas with >2
-            # targets. Current pilot data never enters this branch.
             for gi in range(len(gallery_offsets) - 1):
                 p_start, p_end = int(gallery_offsets[gi]), int(gallery_offsets[gi + 1])
                 scores[qi, gi] = setmatch_image_score(
@@ -1028,7 +976,6 @@ def score_all_queries(
     offsets: np.ndarray,
     component_score_path: Path,
     scores_path: Path,
-    fda_k: int,
     person_batch_size: int,
     query_batch_size: int,
     unmatched_score: float,
@@ -1039,7 +986,6 @@ def score_all_queries(
         component_features=components,
         gallery_feature_path=gallery_feature_path,
         cache_path=component_score_path,
-        fda_k=fda_k,
         person_batch_size=person_batch_size,
         query_batch_size=query_batch_size,
         device=device,
@@ -1064,7 +1010,7 @@ def validate_scores(scores_path: Path, nq: int, ng: int) -> None:
 
 
 def main() -> None:
-    print(f"FAFA + SetMatch adapter: {ADAPTER_VERSION}")
+    print(f"Word4Per + SetMatch adapter: {ADAPTER_VERSION}")
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     args = parser.parse_args()
@@ -1087,8 +1033,9 @@ def main() -> None:
         raise RuntimeError("Canonical gallery/query manifests must be non-empty")
 
     ckpt_cfg = cfg["checkpoint"]
-    ckpt_path_for_cache = resolve_config_path(str(ckpt_cfg["path"]))
-    runtime_marker_for_cache = resolve_config_path(str(ckpt_cfg["runtime_assets_marker"]))
+    stage2_ckpt_for_cache = resolve_config_path(str(ckpt_cfg["stage2"]))
+    stage2_cfg_for_cache = resolve_config_path(str(ckpt_cfg["stage2_config"]))
+    base_clip_for_cache = resolve_config_path(str(ckpt_cfg["base_clip"]))
     selector_for_cache = resolve_config_path(
         str(cfg["localization"]["query_selector"]["checkpoint"])
     )
@@ -1100,8 +1047,9 @@ def main() -> None:
         gallery_path=gallery_path,
         queries_path=queries_path,
         checkpoint_paths=[
-            ckpt_path_for_cache,
-            runtime_marker_for_cache,
+            stage2_ckpt_for_cache,
+            stage2_cfg_for_cache,
+            base_clip_for_cache,
             selector_for_cache,
             detector_for_cache,
         ],
@@ -1114,17 +1062,13 @@ def main() -> None:
 
     runtime = cfg.get("runtime", {})
     device = device_from(str(runtime.get("device", "cuda")))
-    detector_device_name = str(runtime.get("detector_device", str(device)))
-    detector_device = device_from(detector_device_name)
+    detector_device = device_from(str(runtime.get("detector_device", str(device))))
 
     localization_cfg = cfg["localization"]
     detector_cfg = localization_cfg["detector"]
     candidate_cache_path = cache_dir / "person_candidates.jsonl"
     all_candidates, detector_weights = get_or_create_detection_cache(
-        gallery,
-        candidate_cache_path,
-        detector_cfg,
-        detector_device,
+        gallery, candidate_cache_path, detector_cfg, detector_device
     )
     if detector_device.type == "cuda":
         torch.cuda.empty_cache()
@@ -1147,16 +1091,22 @@ def main() -> None:
     if device.type == "cuda":
         torch.cuda.empty_cache()
 
-    # Load the large FAFA model only after detector/CLIP target localization to
-    # avoid keeping the auxiliary localization models resident on the GPU.
-    fafa_dir = ensure_official_source(cfg)
-    model, txt_processors, preprocess, ckpt_path, load_info = load_fafa(
-        cfg, fafa_dir, device
-    )
+    old_project = ensure_official_source(cfg)
+    (
+        model,
+        img2text,
+        transform,
+        tokenizer,
+        tokenize,
+        split_ind,
+        word4per_args,
+        stage2_cfg,
+        stage2_ckpt,
+    ) = load_word4per(cfg, old_project, device)
 
-    gallery_dataset = GalleryPersonDataset(gallery, gallery_boxes, preprocess)
+    gallery_dataset = GalleryPersonDataset(gallery, gallery_boxes, transform)
     gallery_feature_path = cache_dir / "gallery_person_features.npy"
-    gallery_feature_path, offsets, token_dim = encode_gallery_persons(
+    gallery_feature_path, offsets, feature_dim = encode_gallery_persons(
         model=model,
         dataset=gallery_dataset,
         cache_path=gallery_feature_path,
@@ -1170,20 +1120,22 @@ def main() -> None:
         boxes=selected_query_boxes,
         gallery=gallery,
         gallery_index=gallery_index,
-        preprocess=preprocess,
+        transform=transform,
     )
     query_features = encode_query_targets(
         model=model,
-        txt_processors=txt_processors,
+        img2text=img2text,
+        tokenizer=tokenizer,
+        tokenize=tokenize,
+        split_ind=split_ind,
+        text_length=int(word4per_args.text_length),
         dataset=query_dataset,
         num_queries=len(queries),
         runtime=runtime,
         device=device,
     )
 
-    ckpt_cfg = cfg["checkpoint"]
     setmatch_cfg = cfg["setmatch"]
-    fda_k = int(ckpt_cfg.get("fda_k", 6))
     unmatched_score = float(setmatch_cfg.get("unmatched_score", -1.0))
     scores_path = output / "scores.npy"
     component_score_path = cache_dir / "component_person_scores.npy"
@@ -1193,9 +1145,8 @@ def main() -> None:
         offsets=offsets,
         component_score_path=component_score_path,
         scores_path=scores_path,
-        fda_k=fda_k,
-        person_batch_size=int(runtime.get("score_person_batch_size", 2048)),
-        query_batch_size=int(runtime.get("score_query_batch_size", 128)),
+        person_batch_size=int(runtime.get("score_person_batch_size", 4096)),
+        query_batch_size=int(runtime.get("score_query_batch_size", 256)),
         unmatched_score=unmatched_score,
         device=device,
     )
@@ -1214,33 +1165,28 @@ def main() -> None:
     run = {
         "adapter_version": ADAPTER_VERSION,
         "method": method,
-        "display_name": cfg.get("display_name", "FAFA + SetMatch"),
+        "display_name": cfg.get("display_name", "Word4Per + SetMatch"),
         "group": cfg.get("group", "Published / SOTA Baselines"),
         "cpr_supervision": cfg.get("cpr_supervision", "No"),
         "paper": cfg.get("paper", {}),
         "official_source": {
             "repository": cfg["source"]["repository"],
             "commit": cfg["source"]["commit"],
-            "subdir": cfg["source"].get("subdir", "FAFA_SynCPR"),
+            "subdir": cfg["source"].get("subdir", "old_project"),
         },
         "checkpoint": {
-            "path": rel(ckpt_path),
-            "status": cfg["checkpoint"].get("status", "OFFICIAL_RELEASED"),
-            "source_url": cfg["checkpoint"].get("source_url"),
-            "model_name": cfg["checkpoint"].get("model_name", "blip2_fafa_cpr"),
-            "model_type": cfg["checkpoint"].get("model_type", "pretrain"),
-            "load_strict": False,
-            "missing_key_count": len(load_info["missing_keys"]),
-            "unexpected_key_count": len(load_info["unexpected_keys"]),
+            "stage2_checkpoint": rel(stage2_ckpt),
+            "stage2_config": rel(stage2_cfg),
+            "status": cfg["checkpoint"].get("status", "REPRODUCED"),
+            "training_dataset": cfg["checkpoint"].get("training_dataset", "CUHK-PEDES"),
         },
-        "fafa_scoring": {
-            "use_soft": bool(ckpt_cfg.get("use_soft", True)),
-            "fda_k": fda_k,
-            "fda_alpha": float(ckpt_cfg.get("fda_alpha", 0.5)),
-            "fd_margin": float(ckpt_cfg.get("fd_margin", 0.5)),
-            "definition": "top-k mean similarity between composed query feature and FAFA target feature tokens",
-            "target_token_count": token_dim[0],
-            "embedding_dim": token_dim[1],
+        "word4per": {
+            "pretrain_choice": str(word4per_args.pretrain_choice),
+            "img_size": list(word4per_args.img_size),
+            "text_length": int(word4per_args.text_length),
+            "mlp_depth": int(word4per_args.mlp_depth),
+            "prompt_template": "a * is , {relative_caption}",
+            "embedding_dim": feature_dim,
         },
         "localization": {
             "uses_gt_target_boxes": False,
@@ -1274,10 +1220,11 @@ def main() -> None:
             "device": str(device),
             "detector_device": str(detector_device),
             "image_batch_size": int(runtime.get("image_batch_size", 64)),
-            "query_batch_size": int(runtime.get("query_batch_size", 64)),
-            "score_person_batch_size": int(runtime.get("score_person_batch_size", 2048)),
-            "score_query_batch_size": int(runtime.get("score_query_batch_size", 128)),
+            "query_batch_size": int(runtime.get("query_batch_size", 128)),
+            "score_person_batch_size": int(runtime.get("score_person_batch_size", 4096)),
+            "score_query_batch_size": int(runtime.get("score_query_batch_size", 256)),
             "num_workers": int(runtime.get("num_workers", 4)),
+            "gallery_feature_dtype": str(runtime.get("gallery_feature_dtype", "float16")),
         },
         "config": rel(config_path),
         "cache": {
@@ -1287,17 +1234,14 @@ def main() -> None:
         },
         "num_queries": len(queries),
         "num_gallery": len(gallery),
-        "num_predicted_gallery_persons": int(offsets[-1]),
         "scores": rel(scores_path),
         "higher_is_better": True,
         "notes": [
             "Canonical gallery/query ordering is preserved.",
-            "The query image remains in the score matrix; evaluate.py handles exclusion.",
-            "FAFA is loaded from the authors' pinned official implementation and released checkpoint.",
+            "The query image remains in scores.npy; evaluate.py handles exclusion.",
+            "Person instances and query-target boxes are predicted; no GT boxes or identity labels are used for localization/scoring.",
+            "Word4Per is applied independently to each target subject and SetMatch enforces one-to-one person coverage.",
             "No CPR benchmark training, fine-tuning, checkpoint selection, or hyperparameter tuning is performed.",
-            "No GT PIPA target boxes or identity-to-box mapping are used in the main adapter.",
-            "SetMatch uses maximum-weight Hungarian matching followed by the minimum matched target score.",
-            "RELATIONAL text is not modeled jointly by native single-person FAFA; relation_text is only a per-target fallback when modify_text is empty.",
         ],
     }
 

@@ -1,10 +1,10 @@
 # Word4Per + SetMatch
 
-Published baseline adapter for **Word4Per: Zero-shot Composed Person Retrieval** (arXiv:2311.16515, v1-v3 method lineage).
+Published baseline adapter for the earlier **Word4Per / Word for Person** zero-shot CPR method associated with arXiv:2311.16515 (v1-v3 method lineage).
 
-## What is preserved from the authors' implementation
+## Official implementation preserved
 
-This baseline deliberately imports the official `old_project` code at pinned commit:
+The adapter imports the authors' pinned `old_project` implementation:
 
 ```text
 Delong-liu-bupt/Composed_Person_Retrieval
@@ -12,23 +12,27 @@ commit: 0cc16936f031f7ad166be4cce1be33d0b44b728e
 subdir: old_project
 ```
 
-The adapter uses the official:
+The retrieval path preserves the official Word4Per components used for Stage-2 inference:
 
-- `Word4Per` CLIP-based model;
+- the authors' CLIP-based person retrieval model;
 - `IM2TEXT` textual inversion network;
-- inference image transform (`384 x 128` by the released default config);
-- CLIP tokenizer;
-- composed prompt format `a * is , {relative_caption}`;
+- official inference transform from the reproduced Stage-2 config;
+- official tokenizer;
+- prompt template `a * is , {relative_caption}`;
 - `encode_text_img_retrieval(..., repeat=False)` composed-query encoder;
-- Stage-2 `best.pth` checkpoint structure (`model` + `img2text`).
+- Stage-2 checkpoint loading through `Checkpointer_Toword`.
 
-It does **not** replace Word4Per with a new fusion rule.
+The benchmark adapter does not replace Word4Per with an ad-hoc image/text fusion rule.
 
 ## Checkpoint status
 
-The current public `old_project/README.md` documents a downloadable **Stage-1** model. The released test script for Word4Per, however, loads the Stage-2 `best.pth` from the experiment output directory. A clearly documented public final Stage-2 download is not provided there.
+The public `old_project` README documents a downloadable Stage-1 model, while Stage-2 testing expects the experiment's final `best.pth`. A clearly documented public final Stage-2 download is not provided there.
 
-Therefore this benchmark records the final inference weight as **REPRODUCED**, not "official final checkpoint".
+Therefore this benchmark labels the final inference artifacts as:
+
+```text
+REPRODUCED
+```
 
 Expected local files:
 
@@ -37,66 +41,92 @@ checkpoints/word4per/word4per_cuhk_pedes_stage2_best.pth
 checkpoints/word4per/word4per_cuhk_pedes_stage2_configs.yaml
 ```
 
-Reproduce Stage 2 using the authors' `old_project` recipe on **CUHK-PEDES**, never on this benchmark CPR pilot.
+Reproduce Stage 2 using the authors' `old_project` recipe on **CUHK-PEDES**, never on the CPR benchmark data. The public recipe uses the Stage-1 model as initialization and then trains the textual inversion stage with the authors' Stage-2 settings, including:
 
-Official recipe:
-
-```bash
-python train_stage2.py \
-  --name word4per \
-  --root_dir /path/to/datasets \
-  --img_aug \
-  --batch_size 128 \
-  --MLM \
-  --lr 1e-4 \
-  --optimizer AdamW \
-  --dataset_name CUHK-PEDES \
-  --loss_names 'sdm+id+mlm' \
-  --toword_loss 'text' \
-  --num_epoch 60
+```text
+batch_size 128
+lr 1e-4
+optimizer AdamW
+dataset_name CUHK-PEDES
+loss_names 'sdm+id'
+toword_loss 'text'
+num_epoch 60
 ```
 
-Stage 2 itself starts from the Stage-1 model. The authors' repository contains both a Stage-1 training recipe and a Stage-1 download link.
+`download_checkpoint.py` intentionally does not invent an official final download. It validates that the reproduced Stage-2 checkpoint and its matching config are present and fails early with their exact expected paths when they are missing. After that validation it also pins the official source checkout and prepares the public auxiliary weights used at inference: the Stage-2 base OpenAI CLIP backbone, the CLIP query-person selector, and the torchvision person detector. `run.py` loads those assets from local paths rather than downloading them silently.
 
-## MULTI adaptation: SetMatch
+## Scene-to-person localization used by this adapter
 
-Word4Per is applied independently to each composed query component. If a benchmark query or gallery row contains multiple person components, the adapter builds a component-level cosine-similarity matrix and computes the maximum-weight **one-to-one** assignment. The score is the mean assigned score over query components.
+The benchmark uses full scene images, while Word4Per is natively a cropped-person CPR method. The normal benchmark therefore uses predicted person instances only:
 
-This prevents one gallery person from satisfying multiple query-person slots. If a candidate contains fewer gallery components than the query contains, missing slots receive `setmatch.unmatched_score` (default `-1.0`).
+1. torchvision Faster R-CNN ResNet-50-FPN-v2 predicts person candidates in every gallery/query scene;
+2. for each query target, OpenAI CLIP (`ViT-B/32`) scores `subjects[].select_text` against the predicted query-person crops;
+3. Hungarian assignment chooses one predicted reference crop per target subject;
+4. Word4Per is then applied to each selected reference person crop and its relative modification text.
 
-This is a benchmark adaptation, not a claim that SetMatch is part of the original Word4Per paper. The adaptation is recorded in `run.json`.
+The adapter does **not** use PIPA GT boxes, identity-to-box mappings, `target_ids`, or positive labels for localization or retrieval scoring.
 
-For ordinary singleton rows, this reduces exactly to Word4Per cosine similarity.
+## MULTI / RELATIONAL adaptation: SetMatch
 
-## Manifest fields
+Word4Per is applied independently to every target subject. Every predicted gallery person is encoded with Word4Per's image encoder, giving a target-by-gallery-person cosine-similarity matrix.
 
-The benchmark README fixes ordering and score shape but does not define field names. `run.py` therefore resolves common field names automatically and writes the resolved schema into `run.json`. If your manifest uses different fields, set the explicit `data.*_key` entries in `config.yaml`.
+For each gallery image:
 
-A set-valued query can be represented as a list of component objects. Each component needs a reference image; component text may be supplied per component or inherited from the parent query text.
+1. compute maximum-weight one-to-one Hungarian matching between target subjects and predicted gallery persons;
+2. if the gallery has fewer predicted persons than targets, pad missing slots with `setmatch.unmatched_score`;
+3. use the **minimum assigned target score** as the final image score.
 
-A set-valued gallery entry can be represented as a list of component image paths/objects.
+This is an AND-style SetMatch rule: every target must be supported, and one strong target cannot compensate for one weak/missing target.
+
+For SINGLE, this reduces to the best Word4Per score over predicted persons in the gallery image.
+
+SetMatch and predicted scene localization are benchmark adaptations; they are not claimed to be part of the original Word4Per paper.
+
+## Query text behavior
+
+Each target subject uses:
+
+```text
+subjects[].modify_text
+```
+
+as Word4Per's relative caption. If it is empty, `relation_text` is used; if both are empty, the query-level `text` is used.
+
+`subjects[].select_text` is used only for predicted target localization inside the query scene. It is not concatenated into Word4Per's final relative-caption prompt.
+
+RELATIONAL queries are therefore not claimed to be jointly relation-aware inside Word4Per itself: the method is applied independently per target and SetMatch enforces one-to-one target coverage.
+
+## Benchmark contract
+
+The adapter:
+
+- reads `data/gallery.jsonl` and `data/queries.jsonl` in exact order;
+- scores every query against the complete gallery;
+- leaves the exact query image in `scores.npy` for the common evaluator to remove;
+- writes finite scores with shape `(len(queries), len(gallery))`;
+- records checkpoint, source, localization, SetMatch, and runtime metadata in `run.json`;
+- performs no CPR benchmark training, fine-tuning, checkpoint selection, or tuning.
 
 ## Run
 
+Normal end-to-end command:
+
 ```bash
-pip install -r methods/published/01_word4per_setmatch/requirements.txt
-python validate_data.py
-python methods/published/01_word4per_setmatch/run.py
-python evaluate.py --method word4per_setmatch
-python build_tables.py
+python run_baseline.py word4per_setmatch
 ```
 
-The baseline scores the **complete gallery**. It does not remove the exact query image; that remains the common evaluator's job.
+The root runner installs this method's `requirements.txt` first, validates the reproduced Stage-2 artifacts, prepares the pinned source and auxiliary weights, runs inference, evaluates the method, and rebuilds the tables.
 
-## Expected raw output
+Expected raw output:
 
 ```text
 runs/word4per_setmatch/
 ├── scores.npy
-└── run.json
+├── run.json
+└── cache/
 ```
 
-The common evaluator should then create:
+Expected evaluated output:
 
 ```text
 outputs/word4per_setmatch/
