@@ -1,0 +1,26 @@
+# Core benchmark/runtime dependencies.
+numpy>=1.24,<2
+pillow
+pyyaml
+torch
+torchvision
+tqdm
+scipy>=1.10
+gdown>=5.2,<7
+yacs
+timm==0.9.16
+ftfy
+regex
+scikit-image
+ninja
+
+# Keep the Grounding DINO runtime reproducible and compatible with its pinned source.
+transformers==4.39.3
+supervision==0.22.0
+addict
+yapf==0.40.1
+opencv-python==4.10.0.84
+pycocotools
+
+# Official Grounding DINO package at the exact source commit used by this adapter.
+git+https://github.com/IDEA-Research/GroundingDINO.git@856dde20aee659246248e20734ef9ba5214f5e44
