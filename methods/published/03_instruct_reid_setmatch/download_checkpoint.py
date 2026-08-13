@@ -256,10 +256,37 @@ def choose_language_checkpoint(cfg: dict[str, Any]) -> tuple[str, str, list[str]
     entries = list_official_inference_folder(str(checkpoint_cfg["inference_folder_url"]))
     discovery = checkpoint_cfg["discovery"]
     checkpoint_re = re.compile(str(discovery["checkpoint_regex"]))
+    all_checkpoints = [item for item in entries if checkpoint_re.search(item["path"])]
+
+    # The official inference folder currently publishes the language-instructed
+    # model as `checkpoint_li.pth.tar`. Prefer an exact configured basename so
+    # the adapter cannot silently switch tasks if upstream adds similarly named
+    # checkpoints. The regex path is retained only for backward compatibility
+    # with configs that predate `expected_filename`.
+    expected_filename = str(discovery.get("expected_filename") or "").strip()
+    if expected_filename:
+        candidates = [
+            item
+            for item in all_checkpoints
+            if Path(item["path"].replace("\\", "/")).name == expected_filename
+        ]
+        if len(candidates) != 1:
+            discovered = [item["path"] for item in all_checkpoints]
+            raise RuntimeError(
+                "Could not find the configured official language-instructed Instruct-ReID checkpoint.\n"
+                f"Expected exact filename: {expected_filename!r}\n"
+                f"Exact matches ({len(candidates)}): {[item['path'] for item in candidates]}\n"
+                f"All checkpoint-like files in the official folder: {discovered}\n"
+                "This adapter refuses to guess or substitute another ReID task. "
+                "If the official release is renamed, verify the upstream folder and update "
+                "checkpoint.discovery.expected_filename (or set checkpoint.direct_file_url "
+                "to that exact official file)."
+            )
+        chosen = candidates[0]
+        return chosen["url"], chosen["path"], [item["path"] for item in all_checkpoints]
+
     required_re = re.compile(str(discovery["required_regex"]))
     exclude_re = re.compile(str(discovery["exclude_regex"]))
-
-    all_checkpoints = [item for item in entries if checkpoint_re.search(item["path"])]
     candidates = [
         item
         for item in all_checkpoints

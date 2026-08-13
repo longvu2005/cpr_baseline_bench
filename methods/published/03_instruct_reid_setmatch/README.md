@@ -38,7 +38,7 @@ P3 uses the **official final inference model for the language-instructed / `attr
 
 At inference the official model constructor still expects a local BERT directory. Therefore `download_checkpoint.py` prepares BERT only as a runtime/bootstrap dependency, then loads the official task checkpoint over the constructed model exactly as the official testing path does.
 
-Because the official README links a Drive **folder**, not a stable single-file URL, the preparer uses `gdown --folder --json` to inspect the folder without downloading it all. It selects exactly one checkpoint whose Drive path identifies the language/attribute task. If zero or multiple candidates match, it fails and prints the discovered checkpoint paths rather than guessing. `checkpoint.direct_file_url` in `config.yaml` may be filled with the exact official file URL if the upstream folder naming changes.
+Because the official README links a Drive **folder**, not a stable single-file URL, the preparer uses `gdown --folder --json` to inspect the folder without downloading it all. The released language-instructed model is named `checkpoint_li.pth.tar`, so P3 pins that exact basename through `checkpoint.discovery.expected_filename`. It refuses to substitute another task checkpoint if the file is absent or duplicated. `checkpoint.direct_file_url` may be filled with the exact verified official file URL if the upstream release is renamed.
 
 ## Official inference path preserved
 

@@ -22,7 +22,10 @@ checkpoint:
   inference_folder_url: https://drive.google.com/drive/folders/1QBJ-GTI3Luvv-9c7_QJbhlx3ljo2t5kb?usp=drive_link
   direct_file_url: null
   discovery:
-    required_regex: '(?i)(attr|language|li[-_ ]?reid|real2)'
+    # Official inference-folder basename for the language-instructed (LI) model.
+    # Pin the exact released filename instead of inferring the task from loose regexes.
+    expected_filename: checkpoint_li.pth.tar
+    required_regex: '(?i)(attr|language|checkpoint[_ -]?li(?:\.|$)|li[-_ ]?reid|real2)'
     checkpoint_regex: '(?i)\.(pth|pt)(\.tar)?$'
     exclude_regex: '(?i)(t2i|cuhk|market|msmt|ltcc|prcc|vc[_ -]?clothes|llcm|ctcc)'
   prepared_marker: checkpoints/instruct_reid/inference_language_reid.prepared.json
