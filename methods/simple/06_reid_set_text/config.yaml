@@ -5,8 +5,8 @@ cpr_supervision: 'Val only'
 
 base_set:
   method: groundingdino_clipreid_set
-  method_dir: methods/simple/05_groundingdino_clipreid_set
-  config: methods/simple/05_groundingdino_clipreid_set/config.yaml
+  method_dir: methods/simple/05_reid_set
+  config: methods/simple/05_reid_set/config.yaml
 
 clip_text:
   name: ViT-L/14

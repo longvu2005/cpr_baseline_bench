@@ -17,7 +17,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-S5_PREPARER = ROOT / "methods/simple/05_groundingdino_clipreid_set/download_checkpoint.py"
+S5_PREPARER = ROOT / "methods/simple/05_reid_set/download_checkpoint.py"
 CHECKPOINT_PATH = ROOT / "checkpoints/clip/ViT-L-14.pt"
 CHECKPOINT_SHA256 = "b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836"
 CHECKPOINT_URL = (

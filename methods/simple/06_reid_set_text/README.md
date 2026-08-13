@@ -31,7 +31,7 @@ S6 reuses the exact S5 adapter and its caches:
 - strict minimum over assigned similarities;
 - unmatched score `-1.0` when the gallery has fewer detected persons than the query set.
 
-S6 intentionally imports `methods/simple/05_groundingdino_clipreid_set/run.py` instead of cloning the S5 implementation. This keeps person detection, embedding, matching, and cache semantics identical between S5 and S6.
+S6 intentionally imports `methods/simple/05_reid_set/run.py` instead of cloning the S5 implementation. This keeps person detection, embedding, matching, and cache semantics identical between S5 and S6.
 
 ### Text branch
 
