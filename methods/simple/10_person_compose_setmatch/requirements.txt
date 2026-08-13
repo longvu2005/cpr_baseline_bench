@@ -1,27 +1,4 @@
-# Core runtime.
-numpy>=1.24,<2
-pillow
-pyyaml
-torch
-torchvision
-tqdm
-scipy>=1.10
+-r ../05_reid_set/requirements.txt
 
-# For reusing the pinned Grounding DINO shared protocol from S5.
-gdown>=5.2,<7
-yacs
-timm==0.9.16
-ftfy
-regex
-scikit-image
-ninja
-transformers==4.39.3
-supervision==0.22.0
-addict
-yapf==0.40.1
-opencv-python==4.10.0.84
-pycocotools
-
-# Official packages pinned exactly as used by existing baselines.
-git+https://github.com/IDEA-Research/GroundingDINO.git@856dde20aee659246248e20734ef9ba5214f5e44
+# OpenAI CLIP used for target-person localization and per-person composition.
 git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33

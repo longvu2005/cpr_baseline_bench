@@ -28,7 +28,7 @@ from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "per_person_clip_compose_setmatch"
-ADAPTER_VERSION = "2026-08-13-v1-person-compose-setmatch"
+ADAPTER_VERSION = "2026-08-14-v2-py312-s5-sync-fixed-alpha"
 PERSON_FEATURE_SCHEMA = 1
 ALPHA_SCHEMA = 1
 
@@ -180,6 +180,7 @@ def image_path(row: dict[str, Any], index: int) -> Path:
     return path
 
 
+@torch.no_grad()
 def compute_person_features(*, gallery: Sequence[dict[str, Any]], offsets: np.ndarray, boxes: np.ndarray, model, preprocess, cache_path: Path, cache_meta: dict[str, Any], batch_size: int, device: torch.device, np_dtype: np.dtype) -> np.ndarray:
     total_persons = int(offsets[-1])
     feature_dim = int(model.text_projection.shape[1])
@@ -245,6 +246,7 @@ def compute_person_features(*, gallery: Sequence[dict[str, Any]], offsets: np.nd
     return np.load(cache_path, mmap_mode="r", allow_pickle=False)
 
 
+@torch.no_grad()
 def clip_text_features(model, texts: list[str], batch_size: int, device: torch.device) -> np.ndarray:
     chunks: list[np.ndarray] = []
     for start in range(0, len(texts), batch_size):
@@ -490,11 +492,31 @@ def main() -> None:
         main_gallery = load_jsonl(main_gallery_manifest)
         main_queries = load_jsonl(main_query_manifest)
 
-        val_gallery_manifest = resolve_path(str(cfg["composition"]["alpha_selection"]["validation"]["gallery_manifest"]))
-        val_query_manifest = resolve_path(str(cfg["composition"]["alpha_selection"]["validation"]["query_manifest"]))
-        ensure_validation_split(main_gallery_manifest, main_query_manifest, val_gallery_manifest, val_query_manifest)
-        val_gallery = load_jsonl(val_gallery_manifest)
-        val_queries = load_jsonl(val_query_manifest)
+        selection_cfg = cfg["composition"]["alpha_selection"]
+        alpha_mode = str(selection_cfg.get("mode", "fixed")).strip().lower()
+        if alpha_mode not in {"fixed", "validation"}:
+            raise ValueError("composition.alpha_selection.mode must be 'fixed' or 'validation'")
+
+        alpha = None
+        val_gallery_manifest = None
+        val_query_manifest = None
+        val_gallery = None
+        val_queries = None
+        if alpha_mode == "fixed":
+            try:
+                alpha = float(selection_cfg["fixed_alpha"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError("composition.alpha_selection.fixed_alpha must be numeric") from error
+            if not math.isfinite(alpha) or not 0.0 <= alpha <= 1.0:
+                raise ValueError("composition.alpha_selection.fixed_alpha must be in [0, 1]")
+            cpr_supervision = "No"
+        else:
+            val_gallery_manifest = resolve_path(str(selection_cfg["validation"]["gallery_manifest"]))
+            val_query_manifest = resolve_path(str(selection_cfg["validation"]["query_manifest"]))
+            ensure_validation_split(main_gallery_manifest, main_query_manifest, val_gallery_manifest, val_query_manifest)
+            val_gallery = load_jsonl(val_gallery_manifest)
+            val_queries = load_jsonl(val_query_manifest)
+            cpr_supervision = "Val only"
 
         s5_method_dir = resolve_path(str(cfg["shared_protocol"]["method_dir"]))
         s5_config_path = resolve_path(str(cfg["shared_protocol"]["config"]))
@@ -502,17 +524,21 @@ def main() -> None:
         s5 = load_module(s5_method_dir, "cpr_s10_source_s5")
 
         main_shape = (len(main_queries), len(main_gallery))
-        tracker.log(f"main_gallery={len(main_gallery):,} main_queries={len(main_queries):,} val_gallery={len(val_gallery):,} val_queries={len(val_queries):,}")
+        if alpha_mode == "validation":
+            tracker.log(f"main_gallery={len(main_gallery):,} main_queries={len(main_queries):,} val_gallery={len(val_gallery):,} val_queries={len(val_queries):,} alpha_mode=validation")
+        else:
+            tracker.log(f"main_gallery={len(main_gallery):,} main_queries={len(main_queries):,} alpha_mode=fixed alpha={alpha:.2f}")
 
     with tracker.phase("Prepare shared/person detections"):
         device = s5.device_from(str(s5_cfg["runtime"]["device"]))
         gd_checkout = s5.ensure_clean_pinned_source(s5_cfg["source"]["groundingdino"], "Grounding DINO")
-        detector_config = gd_checkout / str(s5_cfg["detector"]["config"])
+        detector_config = s5.require_file(gd_checkout / str(s5_cfg["detector"]["config"]), "Grounding DINO config")
         detector_checkpoint = s5.require_file(resolve_path(str(s5_cfg["detector"]["checkpoint"])), "Grounding DINO checkpoint")
         s5.configure_groundingdino_offline(s5_cfg)
+        gdino_attention_backend = s5.configure_groundingdino_source(gd_checkout)
 
         main_det_cache = resolve_path(str(cfg["cache"]["main"]["detections"]))
-        main_det_meta = s5.detection_fingerprint(cfg=s5_cfg, config_path=s5_config_path, gallery_manifest=main_gallery_manifest, detector_config=detector_config, detector_checkpoint=detector_checkpoint)
+        main_det_meta = s5.detection_fingerprint(cfg=s5_cfg, config_path=s5_config_path, gallery_manifest=main_gallery_manifest, detector_config=detector_config, detector_checkpoint=detector_checkpoint, attention_backend=gdino_attention_backend)
         loaded = s5.load_detection_cache(main_det_cache, main_det_meta, len(main_gallery))
         if loaded is None:
             main_offsets, main_boxes, _main_conf = s5.compute_detections(cfg=s5_cfg, gallery=main_gallery, detector_config=detector_config, detector_checkpoint=detector_checkpoint, device=device)
@@ -520,14 +546,18 @@ def main() -> None:
         else:
             main_offsets, main_boxes, _main_conf = loaded
 
-        val_det_cache = resolve_path(str(cfg["cache"]["validation"]["detections"]))
-        val_det_meta = s5.detection_fingerprint(cfg=s5_cfg, config_path=s5_config_path, gallery_manifest=val_gallery_manifest, detector_config=detector_config, detector_checkpoint=detector_checkpoint)
-        loaded = s5.load_detection_cache(val_det_cache, val_det_meta, len(val_gallery))
-        if loaded is None:
-            val_offsets, val_boxes, _val_conf = s5.compute_detections(cfg=s5_cfg, gallery=val_gallery, detector_config=detector_config, detector_checkpoint=detector_checkpoint, device=device)
-            s5.save_detection_cache(val_det_cache, val_det_meta, val_offsets, val_boxes, _val_conf)
-        else:
-            val_offsets, val_boxes, _val_conf = loaded
+        val_det_cache = None
+        val_offsets = None
+        val_boxes = None
+        if alpha_mode == "validation":
+            val_det_cache = resolve_path(str(cfg["cache"]["validation"]["detections"]))
+            val_det_meta = s5.detection_fingerprint(cfg=s5_cfg, config_path=s5_config_path, gallery_manifest=val_gallery_manifest, detector_config=detector_config, detector_checkpoint=detector_checkpoint, attention_backend=gdino_attention_backend)
+            loaded = s5.load_detection_cache(val_det_cache, val_det_meta, len(val_gallery))
+            if loaded is None:
+                val_offsets, val_boxes, _val_conf = s5.compute_detections(cfg=s5_cfg, gallery=val_gallery, detector_config=detector_config, detector_checkpoint=detector_checkpoint, device=device)
+                s5.save_detection_cache(val_det_cache, val_det_meta, val_offsets, val_boxes, _val_conf)
+            else:
+                val_offsets, val_boxes, _val_conf = loaded
 
     with tracker.phase("Load CLIP ViT-L/14"):
         device = device_from(str(cfg["runtime"]["device"]))
@@ -554,22 +584,31 @@ def main() -> None:
         if main_person_features is None:
             main_person_features = compute_person_features(gallery=main_gallery, offsets=main_offsets, boxes=main_boxes, model=model, preprocess=preprocess, cache_path=main_feature_cache, cache_meta=main_feature_meta, batch_size=int(cfg["runtime"]["clip_image_batch_size"]), device=device, np_dtype=np_dtype)
 
-        val_feature_cache = resolve_path(str(cfg["cache"]["validation"]["person_features"]))
-        val_feature_meta = person_feature_fingerprint(config_path=config_path, detection_cache=val_det_cache, clip_checkpoint=checkpoint, clip_name=str(cfg["clip"]["name"]))
-        val_expected_shape = (int(val_offsets[-1]), feature_dim)
-        val_person_features = load_cached_person_features(val_feature_cache, val_feature_meta, val_expected_shape)
-        if val_person_features is None:
-            val_person_features = compute_person_features(gallery=val_gallery, offsets=val_offsets, boxes=val_boxes, model=model, preprocess=preprocess, cache_path=val_feature_cache, cache_meta=val_feature_meta, batch_size=int(cfg["runtime"]["clip_image_batch_size"]), device=device, np_dtype=np_dtype)
+        val_person_features = None
+        if alpha_mode == "validation":
+            val_feature_cache = resolve_path(str(cfg["cache"]["validation"]["person_features"]))
+            val_feature_meta = person_feature_fingerprint(config_path=config_path, detection_cache=val_det_cache, clip_checkpoint=checkpoint, clip_name=str(cfg["clip"]["name"]))
+            val_expected_shape = (int(val_offsets[-1]), feature_dim)
+            val_person_features = load_cached_person_features(val_feature_cache, val_feature_meta, val_expected_shape)
+            if val_person_features is None:
+                val_person_features = compute_person_features(gallery=val_gallery, offsets=val_offsets, boxes=val_boxes, model=model, preprocess=preprocess, cache_path=val_feature_cache, cache_meta=val_feature_meta, batch_size=int(cfg["runtime"]["clip_image_batch_size"]), device=device, np_dtype=np_dtype)
 
     with tracker.phase("Prepare query-localized person compositions"):
         main_query_indices = query_gallery_indices(main_queries, build_gallery_index(main_gallery))
-        val_query_indices = query_gallery_indices(val_queries, build_gallery_index(val_gallery))
         main_prepared_queries = prepare_query_data(queries=main_queries, query_indices=main_query_indices, person_features=main_person_features, offsets=main_offsets, model=model, device=device, text_batch_size=int(cfg["runtime"]["clip_text_batch_size"]))
-        val_prepared_queries = prepare_query_data(queries=val_queries, query_indices=val_query_indices, person_features=val_person_features, offsets=val_offsets, model=model, device=device, text_batch_size=int(cfg["runtime"]["clip_text_batch_size"]))
 
-    with tracker.phase("Select composition alpha on validation"):
-        alpha, alpha_payload = select_alpha(cfg=cfg, config_path=config_path, main_gallery_manifest=main_gallery_manifest, main_query_manifest=main_query_manifest, val_gallery_manifest=val_gallery_manifest, val_query_manifest=val_query_manifest, val_gallery=val_gallery, val_queries=val_queries, prepared_val_queries=val_prepared_queries, val_person_features=val_person_features, val_offsets=val_offsets)
-        tracker.log(f"selected_alpha={alpha:.2f} best_full_map={alpha_payload.get('best_full_map'):.6f}")
+        val_prepared_queries = None
+        if alpha_mode == "validation":
+            val_query_indices = query_gallery_indices(val_queries, build_gallery_index(val_gallery))
+            val_prepared_queries = prepare_query_data(queries=val_queries, query_indices=val_query_indices, person_features=val_person_features, offsets=val_offsets, model=model, device=device, text_batch_size=int(cfg["runtime"]["clip_text_batch_size"]))
+
+    with tracker.phase("Resolve composition alpha"):
+        if alpha_mode == "validation":
+            alpha, alpha_payload = select_alpha(cfg=cfg, config_path=config_path, main_gallery_manifest=main_gallery_manifest, main_query_manifest=main_query_manifest, val_gallery_manifest=val_gallery_manifest, val_query_manifest=val_query_manifest, val_gallery=val_gallery, val_queries=val_queries, prepared_val_queries=val_prepared_queries, val_person_features=val_person_features, val_offsets=val_offsets)
+            tracker.log(f"selected_alpha={alpha:.2f} best_full_map={alpha_payload.get('best_full_map'):.6f}")
+        else:
+            alpha_payload = {"selection_mode": "fixed", "selected_alpha": float(alpha), "selected_full_map": None}
+            tracker.log(f"alpha={alpha:.2f} fixed; no CPR labels used for alpha selection")
 
     with tracker.phase("Compute final benchmark scores"):
         output_dir = resolve_path(str(cfg["output"]["dir"]))
@@ -586,11 +625,15 @@ def main() -> None:
             "method": cfg["method"],
             "display_name": cfg["display_name"],
             "group": cfg["group"],
-            "cpr_supervision": cfg["cpr_supervision"],
+            "cpr_supervision": cpr_supervision,
+            "adapter_version": ADAPTER_VERSION,
             "alpha": float(alpha),
+            "alpha_selection_mode": alpha_mode,
             "composition_formula": cfg["composition"]["formula"],
-            "alpha_selection": rel(resolve_path(str(cfg["composition"]["alpha_selection"]["result"]))),
+            "alpha_selection": rel(resolve_path(str(selection_cfg["result"]))) if alpha_mode == "validation" else None,
+            "alpha_selection_details": alpha_payload,
             "shared_protocol": str(cfg["shared_protocol"]["method"]),
+            "groundingdino_attention_backend": gdino_attention_backend,
             "clip": cfg["clip"],
             "config": rel(config_path),
             "num_queries": len(main_queries),

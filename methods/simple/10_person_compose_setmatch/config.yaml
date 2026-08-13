@@ -1,12 +1,12 @@
 method: per_person_clip_compose_setmatch
 display_name: Per-Person CLIP Compose + SetMatch
 group: Simple / Obvious Baselines
-cpr_supervision: 'Val only'
+cpr_supervision: 'No'
 
 shared_protocol:
   method: groundingdino_clipreid_set
-  method_dir: methods/simple/05_groundingdino_clipreid_set
-  config: methods/simple/05_groundingdino_clipreid_set/config.yaml
+  method_dir: methods/simple/05_reid_set
+  config: methods/simple/05_reid_set/config.yaml
 
 clip:
   name: ViT-L/14
@@ -16,6 +16,8 @@ clip:
 composition:
   formula: normalize(alpha * target_crop_image + (1 - alpha) * modification_text)
   alpha_selection:
+    mode: fixed
+    fixed_alpha: 0.50
     metric: Full-mAP
     grid:
       - 0.00
