@@ -1,0 +1,112 @@
+{
+  "method": "groundingdino_clipreid_set",
+  "display_name": "Grounding DINO + CLIP-ReID - Set",
+  "group": "Simple / Obvious Baselines",
+  "cpr_supervision": "No",
+  "adapter_version": "2026-08-13-v4-clipreid-preflight-oomsafe",
+  "config": "methods/simple/05_reid_set/config.yaml",
+  "sources": {
+    "groundingdino": {
+      "repository": "https://github.com/IDEA-Research/GroundingDINO.git",
+      "commit": "856dde20aee659246248e20734ef9ba5214f5e44",
+      "checkout": "runs/groundingdino_clipreid_set/official_source/GroundingDINO"
+    },
+    "clip_reid": {
+      "repository": "https://github.com/Syliz517/CLIP-ReID.git",
+      "commit": "eb1898b72c882875f478bebfc6d41644eece0a5d",
+      "checkout": "runs/groundingdino_clipreid_set/official_source/CLIP-ReID"
+    }
+  },
+  "detector": {
+    "name": "Grounding DINO Swin-T",
+    "config": "groundingdino/config/GroundingDINO_SwinT_OGC.py",
+    "checkpoint": "checkpoints/groundingdino/groundingdino_swint_ogc.pth",
+    "checkpoint_url": "https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth",
+    "checkpoint_status": "OFFICIAL_RELEASED",
+    "text_prompt": "person",
+    "box_threshold": 0.35,
+    "text_threshold": 0.25,
+    "nms_iou_threshold": 0.5,
+    "min_box_size_px": 4,
+    "max_persons_per_image": null,
+    "runtime_cache": "checkpoints/groundingdino/runtime_cache",
+    "runtime_assets_marker": "checkpoints/groundingdino/runtime_assets_ready.json",
+    "config_path": "runs/groundingdino_clipreid_set/official_source/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py",
+    "checkpoint_sha256": "3b3ca2563c77c69f651d7bd133e97139c186df06231157a64c507099c52bc799",
+    "attention_backend": "official_pytorch_fallback",
+    "source_import_mode": "pinned_checkout_direct"
+  },
+  "reid": {
+    "name": "CLIP-ReID ViT-B/16",
+    "training_dataset": "MSMT17",
+    "official_config": "configs/person/vit_clipreid.yml",
+    "checkpoint": "checkpoints/clip_reid/msmt17/ViT-B-16_60.pth",
+    "checkpoint_drive_id": "1BVaZo93kOksYLjFNH3Gf7JxIbPlWSkcO",
+    "checkpoint_source_url": "https://drive.google.com/file/d/1BVaZo93kOksYLjFNH3Gf7JxIbPlWSkcO/view?usp=share_link",
+    "checkpoint_status": "OFFICIAL_RELEASED",
+    "openai_clip_checkpoint": "checkpoints/clip_reid/openai/ViT-B-16.pt",
+    "num_classes": 1041,
+    "camera_num": 15,
+    "view_num": 1,
+    "feature_dim": 1280,
+    "input_size": [
+      256,
+      128
+    ],
+    "pixel_mean": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "pixel_std": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "checkpoint_sha256": "9974ef57c418e8c88e59581f66f3f53fbe02f879311f7438009f84fd150b1c63",
+    "openai_clip_checkpoint_sha256": "5806e77cd80f8b59890b7e101eabd078d9fb84e6937f9e85e4ecb61988df416f",
+    "feature_semantics": "official CLIP-ReID eval feature: concat pre-BN ViT feature (768) and projected CLIP feature (512), L2-normalized for cosine scoring"
+  },
+  "setmatch": {
+    "assignment": "hungarian_max_sum",
+    "aggregation": "strict_minimum",
+    "unmatched_score": -1.0,
+    "query_person_set": "all_predicted_persons",
+    "gallery_person_set": "all_predicted_persons"
+  },
+  "benchmark_adaptation": {
+    "purpose": "Test whether scene-level CPR can be reduced to person detection plus ReID.",
+    "query_person_construction": "All Grounding DINO person detections in the query/reference image.",
+    "gallery_person_construction": "All Grounding DINO person detections in each gallery image.",
+    "pair_score": "cosine similarity between L2-normalized CLIP-ReID person embeddings",
+    "assignment": "maximum-weight one-to-one Hungarian matching",
+    "aggregation": "strict minimum over assigned pair similarities",
+    "missing_person_behavior": "score=-1.0 when gallery has fewer detected persons than the query set or the query set is empty",
+    "text_used": false,
+    "forbidden_cpr_labels_used": false,
+    "query_image_removed_inside_method": false
+  },
+  "runtime": {
+    "device": "cuda",
+    "reid_batch_size": 256,
+    "feature_cache_dtype": "float16",
+    "score_feature_chunk_size": 65536
+  },
+  "cache": {
+    "detections": "runs/groundingdino_clipreid_set/cache/person_detections.npz",
+    "detections_hit": false,
+    "reid_features": "runs/groundingdino_clipreid_set/cache/person_features.npy",
+    "reid_features_hit": false
+  },
+  "detection_statistics": {
+    "total_persons": 90948,
+    "images_with_person": 16989,
+    "images_without_person": 11,
+    "mean_persons_per_image": 5.349882352941177,
+    "max_persons_per_image": 83
+  },
+  "num_queries": 2975,
+  "num_gallery": 17000,
+  "scores": "runs/groundingdino_clipreid_set/scores.npy",
+  "higher_is_better": true
+}

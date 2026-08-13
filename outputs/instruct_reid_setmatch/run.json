@@ -1,0 +1,131 @@
+{
+  "adapter_semantics": {
+    "gallery_instruction_is_fixed_native_neutral_instruction": true,
+    "gt_target_boxes_used": false,
+    "pairwise_geometry_preserves_official_squared_euclidean": true,
+    "positive_labels_used": false,
+    "predicted_person_instances": true,
+    "query_image_removed_inside_method": false,
+    "target_ids_used": false
+  },
+  "cache": {
+    "detections": "runs/instruct_reid_setmatch/cache/person_detections.npz",
+    "gallery_features": "runs/instruct_reid_setmatch/cache/gallery_instruct_features.npy",
+    "query_features": "runs/instruct_reid_setmatch/cache/query_target_features.npz",
+    "selector_features": "runs/instruct_reid_setmatch/cache/selector_person_features.npy"
+  },
+  "checkpoint": {
+    "official_source_path": "checkpoint_li.pth.tar",
+    "official_source_url": "https://drive.google.com/uc?id=1ZF2ZwiboaBv5qaIE32Yz3oNnXgIg8ucr",
+    "path": "checkpoints/instruct_reid/inference_language_reid.pth.tar",
+    "sha256": "05046581850c3920a4aa4f7b7a3b84694c0105e21300a6e2746be0bf5ae797f1",
+    "status": "OFFICIAL_RELEASED",
+    "task": "language_instructed_reid"
+  },
+  "config": "methods/published/03_instruct_reid_setmatch/config.yaml",
+  "cpr_supervision": "No",
+  "display_name": "Instruct-ReID + SetMatch",
+  "group": "Published / SOTA Baselines",
+  "higher_is_better": true,
+  "instruction_adapter": {
+    "gallery_instruction": "Do not change clothes.",
+    "gallery_instruction_source": "native_traditional_reid_instruction_from_paper",
+    "query_instruction": {
+      "ordinary": "subject.modify_text_then_query_text",
+      "relational": "full_query_text_when_relation_text_present"
+    }
+  },
+  "localization": {
+    "detector": {
+      "backend": "torchvision_fasterrcnn_resnet50_fpn_v2",
+      "checkpoint": "checkpoints/torchvision/fasterrcnn_resnet50_fpn_v2_coco-dd69338a.pth",
+      "checkpoint_url": "https://download.pytorch.org/models/fasterrcnn_resnet50_fpn_v2_coco-dd69338a.pth",
+      "max_persons_per_image": 10,
+      "person_label": 1,
+      "score_threshold": 0.55
+    },
+    "query_selector": {
+      "assignment": "hungarian_max_sum",
+      "backend": "openai_clip",
+      "checkpoint": "checkpoints/clip/ViT-B-32.pt",
+      "fallback_order": [
+        "select_text",
+        "modify_text",
+        "text"
+      ],
+      "model": "ViT-B/32"
+    }
+  },
+  "method": "instruct_reid_setmatch",
+  "model": {
+    "architecture": "PASS_Transformer_DualAttn_joint",
+    "args": {
+      "attn_type": "dual_attn",
+      "dropout_clo": 0.0,
+      "fusion_branch": "bio+clot",
+      "fusion_loss": "all",
+      "patch_size_bio": 16,
+      "patch_size_clo": 16,
+      "pool_clo": false,
+      "stride_size_bio": 16,
+      "stride_size_clo": 16,
+      "test_feat_type": "f",
+      "vit_fusion_layer": 2,
+      "vit_type": "base"
+    },
+    "feature_dim": 1536,
+    "image_size": [
+      256,
+      128
+    ],
+    "normalization_mean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "normalization_std": [
+      0.229,
+      0.224,
+      0.225
+    ],
+    "official_text_max_words": 50,
+    "official_token_max_length": 70,
+    "test_task_type": "attr",
+    "validate_feat": "fusion"
+  },
+  "num_gallery": 17000,
+  "num_queries": 2975,
+  "paper": {
+    "arxiv": "2306.07520",
+    "title": "Instruct-ReID: A Multi-purpose Person Re-identification Task with Instructions",
+    "venue": "CVPR 2024"
+  },
+  "runtime_assets": {
+    "bert_weight": "checkpoints/instruct_reid/bert-base-uncased/pytorch_model.bin",
+    "bert_weight_sha256": "097417381d6c7230bd9e3557456d726de6e83245ec8b24f529f60198a67b203a",
+    "config_bert": "checkpoints/instruct_reid/config_bert.json",
+    "config_bert_sha256": "e20759eceda36082f9880ead487083abdd55de7d2161a0fcec3683570a4235f5"
+  },
+  "scores": "runs/instruct_reid_setmatch/scores.npy",
+  "setmatch": {
+    "aggregation": "strict_minimum",
+    "assignment": "hungarian_max_sum",
+    "enabled": true,
+    "pairwise_metric": "negative_squared_euclidean",
+    "unmatched_score": -1000000.0
+  },
+  "source": {
+    "checkout": "runs/instruct_reid_setmatch/official_source/Instruct-ReID",
+    "commit": "8250f44a301a50d8afcd2e09a46c3e96bf52090d",
+    "repository": "https://github.com/hwz-zju/Instruct-ReID.git"
+  },
+  "statistics": {
+    "detected_persons": 81396,
+    "failed_localization_reasons": {
+      "too_few_predicted_persons": 10
+    },
+    "failed_query_localization": 10,
+    "images_without_person": 12,
+    "localized_queries": 2965
+  }
+}
