@@ -7,8 +7,10 @@ Final score:
 The ReID-Set branch is exactly the S5 adapter (same Grounding DINO detections,
 CLIP-ReID MSMT17 embeddings, Hungarian assignment and strict-min aggregation).
 The semantic branch is global OpenAI CLIP ViT-L/14 text-to-gallery similarity.
-Alpha is selected strictly on a separate validation manifest by Full-mAP.
-No test/evaluation positive labels are used for alpha selection.
+By default alpha is fixed, so the baseline is label-free and runnable from a
+clean benchmark checkout. An optional validation mode can select alpha by
+Full-mAP on a genuinely separate validation manifest. Test/evaluation positive
+labels are never used for alpha selection.
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "groundingdino_clipreid_set_text"
-ADAPTER_VERSION = "2026-08-13-v1-val-fullmap-fusion"
+ADAPTER_VERSION = "2026-08-14-v2-fixed-or-val-fusion"
 CLIP_CACHE_SCHEMA = 2
 SCORE_CACHE_SCHEMA = 1
 ALPHA_SCHEMA = 1
@@ -637,23 +639,50 @@ def main() -> None:
         if not gallery or not queries:
             raise ValueError("Canonical gallery/query manifests must be non-empty")
 
-        val_cfg = cfg["fusion"]["alpha_selection"]["validation"]
-        val_gallery_manifest = resolve_path(str(val_cfg["gallery_manifest"]))
-        val_query_manifest = resolve_path(str(val_cfg["query_manifest"]))
-        if not val_gallery_manifest.is_file() or not val_query_manifest.is_file():
-            raise FileNotFoundError(
-                "S6 requires a separate validation manifest to select alpha without test leakage.\n"
-                f"Expected: {rel(val_gallery_manifest)} and {rel(val_query_manifest)}\n"
-                "Do not point these paths at the canonical evaluation manifests."
+        selection_cfg = cfg["fusion"]["alpha_selection"]
+        alpha_mode = str(selection_cfg.get("mode", "fixed")).strip().lower()
+        if alpha_mode not in {"fixed", "validation"}:
+            raise ValueError(
+                "fusion.alpha_selection.mode must be 'fixed' or 'validation', "
+                f"got {alpha_mode!r}"
             )
-        if (
-            sha256_file(val_gallery_manifest) == sha256_file(gallery_manifest)
-            and sha256_file(val_query_manifest) == sha256_file(query_manifest)
-        ):
-            raise RuntimeError(
-                "Validation manifests are identical to canonical evaluation manifests; "
-                "refusing to tune alpha on the evaluation set."
-            )
+
+        alpha = None
+        val_gallery_manifest = None
+        val_query_manifest = None
+
+        if alpha_mode == "fixed":
+            try:
+                alpha = float(selection_cfg["fixed_alpha"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError(
+                    "fusion.alpha_selection.fixed_alpha must be a numeric value in [0, 1]"
+                ) from error
+            if not math.isfinite(alpha) or not 0.0 <= alpha <= 1.0:
+                raise ValueError(
+                    f"fusion.alpha_selection.fixed_alpha must be in [0, 1], got {alpha}"
+                )
+        else:
+            val_cfg = selection_cfg["validation"]
+            val_gallery_manifest = resolve_path(str(val_cfg["gallery_manifest"]))
+            val_query_manifest = resolve_path(str(val_cfg["query_manifest"]))
+            if not val_gallery_manifest.is_file() or not val_query_manifest.is_file():
+                raise FileNotFoundError(
+                    "S6 alpha_selection.mode='validation' requires separate validation "
+                    "manifests to avoid test leakage.\n"
+                    f"Expected: {rel(val_gallery_manifest)} and {rel(val_query_manifest)}\n"
+                    "Do not point these paths at the canonical evaluation manifests."
+                )
+            if (
+                sha256_file(val_gallery_manifest) == sha256_file(gallery_manifest)
+                and sha256_file(val_query_manifest) == sha256_file(query_manifest)
+            ):
+                raise RuntimeError(
+                    "Validation manifests are identical to canonical evaluation manifests; "
+                    "refusing to tune alpha on the evaluation set."
+                )
+
+        cpr_supervision = "Val only" if alpha_mode == "validation" else "No"
 
         device = device_from(str(cfg["runtime"].get("device", "cuda")))
         if device.type != "cuda":
@@ -672,73 +701,124 @@ def main() -> None:
             )
         output_dir = resolve_path(str(cfg["output"]["dir"]))
         output_dir.mkdir(parents=True, exist_ok=True)
+        validation_status = "separate" if alpha_mode == "validation" else "not-required"
         tracker.log(
-            f"main={len(queries):,}x{len(gallery):,} validation_manifests=separate device={device}"
+            f"main={len(queries):,}x{len(gallery):,} alpha_mode={alpha_mode} "
+            f"validation_manifests={validation_status} device={device}"
         )
 
     with tracker.phase("Load OpenAI CLIP ViT-L/14"):
         model, preprocess = clip.load(str(clip_checkpoint), device=device, jit=False)
         model.eval()
 
+    val_cache = None
+    val_reid_scores = None
+    val_clip_scores = None
+    val_s5_stats = None
+    val_clip_gallery_hit = None
+    val_clip_scores_hit = None
+    alpha_meta = None
+    alpha_cache_hit = False
+
     with tracker.phase("Prepare validation ReID-Set branch"):
-        val_cache = cfg["cache"]["validation"]
-        val_reid_scores, val_s5_stats = prepare_s5_scores(
-            s5=s5,
-            s5_cfg=s5_cfg,
-            s5_cfg_path=s5_cfg_path,
-            gallery_manifest=val_gallery_manifest,
-            query_manifest=val_query_manifest,
-            detection_cache=resolve_path(str(val_cache["detections"])),
-            feature_cache=resolve_path(str(val_cache["reid_features"])),
-            score_cache=resolve_path(str(val_cache["reid_set_scores"])),
-            device=device,
-        )
-        tracker.log(f"validation_s5_cache={val_s5_stats}")
+        if alpha_mode == "validation":
+            if val_gallery_manifest is None or val_query_manifest is None:
+                raise RuntimeError("Internal error: validation manifests were not resolved")
+            val_cache = cfg["cache"]["validation"]
+            val_reid_scores, val_s5_stats = prepare_s5_scores(
+                s5=s5,
+                s5_cfg=s5_cfg,
+                s5_cfg_path=s5_cfg_path,
+                gallery_manifest=val_gallery_manifest,
+                query_manifest=val_query_manifest,
+                detection_cache=resolve_path(str(val_cache["detections"])),
+                feature_cache=resolve_path(str(val_cache["reid_features"])),
+                score_cache=resolve_path(str(val_cache["reid_set_scores"])),
+                device=device,
+            )
+            tracker.log(f"validation_s5_cache={val_s5_stats}")
+        else:
+            tracker.log("skipped: alpha_selection.mode=fixed")
 
     with tracker.phase("Prepare validation CLIP text branch"):
-        val_gallery = load_jsonl(val_gallery_manifest)
-        val_queries = load_jsonl(val_query_manifest)
-        val_clip_gallery, val_clip_gallery_hit = prepare_clip_gallery_features(
-            model=model,
-            preprocess=preprocess,
-            gallery=val_gallery,
-            gallery_manifest=val_gallery_manifest,
-            checkpoint=clip_checkpoint,
-            cache_path=resolve_path(str(val_cache["clip_gallery_features"])),
-            cfg=cfg,
-            device=device,
-        )
-        val_clip_scores, val_clip_scores_hit = compute_clip_text_scores(
-            cfg=cfg,
-            model=model,
-            gallery_features=val_clip_gallery,
-            queries=val_queries,
-            gallery_manifest=val_gallery_manifest,
-            query_manifest=val_query_manifest,
-            checkpoint=clip_checkpoint,
-            output_path=resolve_path(str(val_cache["clip_text_scores"])),
-            device=device,
-        )
-        tracker.log(
-            f"validation_clip_gallery_hit={val_clip_gallery_hit} "
-            f"validation_clip_scores_hit={val_clip_scores_hit}"
-        )
+        if alpha_mode == "validation":
+            if (
+                val_gallery_manifest is None
+                or val_query_manifest is None
+                or val_cache is None
+            ):
+                raise RuntimeError("Internal error: validation state is incomplete")
+            val_gallery = load_jsonl(val_gallery_manifest)
+            val_queries = load_jsonl(val_query_manifest)
+            val_clip_gallery, val_clip_gallery_hit = prepare_clip_gallery_features(
+                model=model,
+                preprocess=preprocess,
+                gallery=val_gallery,
+                gallery_manifest=val_gallery_manifest,
+                checkpoint=clip_checkpoint,
+                cache_path=resolve_path(str(val_cache["clip_gallery_features"])),
+                cfg=cfg,
+                device=device,
+            )
+            val_clip_scores, val_clip_scores_hit = compute_clip_text_scores(
+                cfg=cfg,
+                model=model,
+                gallery_features=val_clip_gallery,
+                queries=val_queries,
+                gallery_manifest=val_gallery_manifest,
+                query_manifest=val_query_manifest,
+                checkpoint=clip_checkpoint,
+                output_path=resolve_path(str(val_cache["clip_text_scores"])),
+                device=device,
+            )
+            tracker.log(
+                f"validation_clip_gallery_hit={val_clip_gallery_hit} "
+                f"validation_clip_scores_hit={val_clip_scores_hit}"
+            )
+        else:
+            tracker.log("skipped: alpha_selection.mode=fixed")
 
     with tracker.phase("Select alpha on validation Full-mAP"):
-        alpha, alpha_meta, alpha_cache_hit = select_alpha(
-            cfg=cfg,
-            config_path=config_path,
-            s5_cfg_path=s5_cfg_path,
-            val_gallery_path=val_gallery_manifest,
-            val_query_path=val_query_manifest,
-            clip_checkpoint=clip_checkpoint,
-            reid_scores=val_reid_scores,
-            clip_scores=val_clip_scores,
-        )
-        tracker.log(
-            f"alpha={alpha:.2f} validation_Full-mAP={alpha_meta['selected_full_map']:.6f} "
-            f"cache_hit={alpha_cache_hit}"
-        )
+        if alpha_mode == "validation":
+            if (
+                val_gallery_manifest is None
+                or val_query_manifest is None
+                or val_reid_scores is None
+                or val_clip_scores is None
+            ):
+                raise RuntimeError("Internal error: validation scores are incomplete")
+            alpha, alpha_meta, alpha_cache_hit = select_alpha(
+                cfg=cfg,
+                config_path=config_path,
+                s5_cfg_path=s5_cfg_path,
+                val_gallery_path=val_gallery_manifest,
+                val_query_path=val_query_manifest,
+                clip_checkpoint=clip_checkpoint,
+                reid_scores=val_reid_scores,
+                clip_scores=val_clip_scores,
+            )
+            tracker.log(
+                f"alpha={alpha:.2f} "
+                f"validation_Full-mAP={alpha_meta['selected_full_map']:.6f} "
+                f"cache_hit={alpha_cache_hit}"
+            )
+        else:
+            if alpha is None:
+                raise RuntimeError("Internal error: fixed alpha was not resolved")
+            alpha_meta = {
+                "method": METHOD_ID,
+                "selection_mode": "fixed",
+                "selection_split": None,
+                "selection_metric": None,
+                "selected_alpha": float(alpha),
+                "selected_full_map": None,
+            }
+            tracker.log(
+                f"alpha={alpha:.2f} fixed; no CPR labels used for fusion selection"
+            )
+
+    if alpha is None or alpha_meta is None:
+        raise RuntimeError("Internal error: alpha selection did not produce a usable value")
 
     with tracker.phase("Prepare canonical ReID-Set branch"):
         main_cache = cfg["cache"]["main"]
@@ -791,7 +871,7 @@ def main() -> None:
             "method": METHOD_ID,
             "display_name": str(cfg.get("display_name")),
             "group": str(cfg.get("group")),
-            "cpr_supervision": str(cfg.get("cpr_supervision")),
+            "cpr_supervision": cpr_supervision,
             "adapter_version": ADAPTER_VERSION,
             "config": rel(config_path),
             "components": {
@@ -815,18 +895,32 @@ def main() -> None:
                 "formula": "alpha * ReID-Set + (1-alpha) * CLIP-text",
                 "score_normalization": "none",
                 "selected_alpha": alpha,
-                "selection_split": "validation",
-                "selection_metric": "Full-mAP",
-                "selection_result": rel(resolve_path(str(cfg["fusion"]["alpha_selection"]["result"]))),
-                "validation_full_map": float(alpha_meta["selected_full_map"]),
-                "grid": [float(x) for x in cfg["fusion"]["alpha_selection"]["grid"]],
+                "selection_mode": alpha_mode,
+                "fixed_alpha": float(alpha) if alpha_mode == "fixed" else None,
+                "selection_split": "validation" if alpha_mode == "validation" else None,
+                "selection_metric": "Full-mAP" if alpha_mode == "validation" else None,
+                "selection_result": (
+                    rel(resolve_path(str(selection_cfg["result"])))
+                    if alpha_mode == "validation"
+                    else None
+                ),
+                "validation_full_map": (
+                    float(alpha_meta["selected_full_map"])
+                    if alpha_mode == "validation"
+                    else None
+                ),
+                "grid": (
+                    [float(x) for x in selection_cfg["grid"]]
+                    if alpha_mode == "validation"
+                    else None
+                ),
             },
             "benchmark_adaptation": {
                 "purpose": (
                     "Strong conventional baseline: CLIP-ReID answers WHO at person-set level; "
                     "global CLIP text similarity answers WHAT at scene level."
                 ),
-                "validation_labels_used_only_for_alpha_selection": True,
+                "validation_labels_used_only_for_alpha_selection": alpha_mode == "validation",
                 "evaluation_labels_used_for_alpha_selection": False,
                 "query_image_removed_inside_method": False,
                 "score_direction": "higher_is_better",
@@ -834,12 +928,20 @@ def main() -> None:
             "runtime": cfg["runtime"],
             "cache": {
                 "main_s5": main_s5_stats,
-                "validation_s5": val_s5_stats,
-                "alpha_selection_hit": alpha_cache_hit,
+                "validation_s5": (
+                    val_s5_stats if alpha_mode == "validation" else None
+                ),
+                "alpha_selection_hit": (
+                    alpha_cache_hit if alpha_mode == "validation" else False
+                ),
                 "main_clip_gallery_hit": main_clip_gallery_hit,
                 "main_clip_scores_hit": main_clip_scores_hit,
-                "validation_clip_gallery_hit": val_clip_gallery_hit,
-                "validation_clip_scores_hit": val_clip_scores_hit,
+                "validation_clip_gallery_hit": (
+                    val_clip_gallery_hit if alpha_mode == "validation" else None
+                ),
+                "validation_clip_scores_hit": (
+                    val_clip_scores_hit if alpha_mode == "validation" else None
+                ),
             },
             "num_queries": len(queries),
             "num_gallery": len(gallery),

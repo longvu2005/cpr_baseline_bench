@@ -34,7 +34,7 @@ DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "pic2word"
 ADAPTER_VERSION = "2026-08-13-v1-full-scene-full-text"
 GALLERY_CACHE_SCHEMA = 1
-QUERY_CACHE_SCHEMA = 1
+QUERY_CACHE_SCHEMA = 2
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -187,6 +187,61 @@ def torch_load_full(path: Path) -> Any:
         return torch.load(path, map_location="cpu")
 
 
+def ensure_pic2word_tokenizer_compat(tokenizer_module, model, placeholder: str) -> int:
+    """Repair the pinned official tokenizer's special-token naming mismatch.
+
+    The pinned Pic2Word clip.py expects <start_of_text>/<end_of_text>, but its
+    bundled SimpleTokenizer exposes <|startoftext|>/<|endoftext|>. Add runtime
+    aliases only; do not modify the pinned official checkout on disk.
+    """
+    tokenizer = getattr(tokenizer_module, "_tokenizer", None)
+    encoder = getattr(tokenizer, "encoder", None)
+    encode = getattr(tokenizer, "encode", None)
+    if tokenizer is None or not isinstance(encoder, dict) or not callable(encode):
+        raise RuntimeError(
+            "Pinned Pic2Word tokenizer API is incompatible with this adapter"
+        )
+
+    aliases = {
+        "<start_of_text>": "<|startoftext|>",
+        "<end_of_text>": "<|endoftext|>",
+    }
+    for expected_name, canonical_name in aliases.items():
+        if expected_name in encoder:
+            continue
+        if canonical_name not in encoder:
+            raise RuntimeError(
+                "Pinned Pic2Word tokenizer is missing both special-token names: "
+                f"{expected_name!r} and {canonical_name!r}"
+            )
+        encoder[expected_name] = int(encoder[canonical_name])
+
+    eot_token = int(encoder["<end_of_text>"])
+    if eot_token != int(model.end_id):
+        raise RuntimeError(
+            "Pic2Word tokenizer/model EOT mismatch: "
+            f"tokenizer={eot_token}, model.end_id={int(model.end_id)}"
+        )
+
+    placeholder_ids = tokenizer.encode(placeholder)
+    if len(placeholder_ids) != 1:
+        raise RuntimeError(
+            f"Pic2Word placeholder {placeholder!r} must tokenize to exactly one token, "
+            f"got {placeholder_ids}"
+        )
+
+    # Exercise the official tokenize() now, before the expensive gallery pass.
+    probe = tokenizer_module.tokenize([placeholder])
+    split_ind = int(placeholder_ids[0])
+    if probe.shape[0] != 1 or probe.shape[1] < 3:
+        raise RuntimeError(f"Unexpected Pic2Word token tensor shape: {tuple(probe.shape)}")
+    if int(probe[0, 0]) != int(encoder["<start_of_text>"]):
+        raise RuntimeError("Pic2Word tokenizer preflight produced an invalid SOT token")
+    if int(probe[0, 1]) != split_ind or int(probe[0, 2]) != eot_token:
+        raise RuntimeError("Pic2Word tokenizer preflight produced unexpected token ids")
+    return split_ind
+
+
 def load_official_model(cfg: dict[str, Any], source_root: Path, checkpoint: Path, clip_checkpoint: Path, device: torch.device):
     source_str = str(source_root)
     if source_str not in sys.path:
@@ -235,6 +290,12 @@ def load_official_model(cfg: dict[str, Any], source_root: Path, checkpoint: Path
     img2text.load_state_dict(mapper, strict=True)
     model.to(device).float().eval()
     img2text.to(device).float().eval()
+    split_ind = ensure_pic2word_tokenizer_compat(
+        pic2word_clip,
+        model,
+        str(cfg["composition"]["placeholder"]),
+    )
+    print(f"[ok] Pic2Word tokenizer preflight split_ind={split_ind}", flush=True)
     return model, img2text, preprocess_val, pic2word_clip
 
 
@@ -398,8 +459,7 @@ def encode_queries(model, img2text, tokenizer_module, preprocess, gallery, queri
 
     prompts = build_prompts(cfg, queries)
     placeholder = str(cfg["composition"]["placeholder"])
-    placeholder_tokens = tokenizer_module.tokenize([placeholder])
-    split_ind = int(placeholder_tokens[0, 1].item())
+    split_ind = ensure_pic2word_tokenizer_compat(tokenizer_module, model, placeholder)
 
     loader = DataLoader(
         QueryImageDataset(gallery, query_indices, preprocess),
@@ -415,8 +475,8 @@ def encode_queries(model, img2text, tokenizer_module, preprocess, gallery, queri
         batch_prompts = prompts[offset : offset + batch_size]
         text_tokens = tokenizer_module.tokenize(batch_prompts).to(device, non_blocking=True)
         # The placeholder is intentionally early in the fixed template; truncation therefore cannot remove it.
-        if not (text_tokens == split_ind).any(dim=1).all():
-            raise RuntimeError("Pic2Word placeholder token missing after tokenization")
+        if not (text_tokens == split_ind).sum(dim=1).eq(1).all():
+            raise RuntimeError("Pic2Word placeholder must occur exactly once after tokenization")
         image_features = model.encode_image(images.to(device, non_blocking=True)).float()
         pseudo_words = img2text(image_features)
         composed = model.encode_text_img_retrieval(

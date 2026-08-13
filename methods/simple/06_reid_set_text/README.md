@@ -13,7 +13,7 @@ The final score is
 final_score = alpha * ReID_Set_score + (1 - alpha) * CLIP_text_score
 ```
 
-No score normalization is inserted between the two branches. Both branches are cosine-style similarities and `alpha` is selected on validation Full-mAP.
+No score normalization is inserted between the two branches. Both branches are cosine-style similarities. By default `alpha=0.50` is fixed, which keeps the baseline label-free. An optional validation mode can select `alpha` on a separate validation Full-mAP split.
 
 ## Components
 
@@ -49,9 +49,32 @@ runs/clip_image/gallery_features_vit_l14.npy
 
 ## Alpha selection and CPR supervision
 
-`alpha` is **not** tuned on the canonical evaluation queries.
+The default configuration is:
 
-S6 requires separate validation manifests configured as:
+```yaml
+fusion:
+  alpha_selection:
+    mode: fixed
+    fixed_alpha: 0.50
+```
+
+This requires no CPR labels and is reported as:
+
+```text
+CPR Supervision: No
+```
+
+To tune `alpha`, explicitly switch to:
+
+```yaml
+fusion:
+  alpha_selection:
+    mode: validation
+```
+
+Validation mode is **never** allowed to tune on the canonical evaluation queries.
+
+It requires separate manifests configured as:
 
 ```text
 data/validation/gallery.jsonl
@@ -76,13 +99,13 @@ runs/groundingdino_clipreid_set_text/alpha_selection.json
 
 The result is fingerprinted by the S6 config, S5 config, validation manifests, CLIP checkpoint, alpha grid and adapter version. A stale selection is recomputed.
 
-Therefore benchmark supervision is:
+In validation mode benchmark supervision is:
 
 ```text
 CPR Supervision: Val only
 ```
 
-The adapter explicitly refuses to tune if the validation manifests are byte-identical to the canonical evaluation manifests.
+The adapter explicitly refuses to tune if the validation manifests are byte-identical to the canonical evaluation manifests. Runtime metadata derives `cpr_supervision` from the active mode, so switching modes cannot silently leave a stale supervision label.
 
 ## Data contract
 
@@ -101,7 +124,7 @@ scores.shape == (len(queries), len(gallery))
 
 The query image is not removed inside S6. `evaluate.py` remains responsible for self-image exclusion.
 
-CPR labels from the canonical evaluation queries are never used to tune alpha. Validation `full_positive_ids` are used only in the alpha-selection stage.
+CPR labels from the canonical evaluation queries are never used to tune alpha. In fixed mode no CPR labels are used for fusion selection. In validation mode, validation `full_positive_ids` are used only in the alpha-selection stage.
 
 ## Checkpoint preparation
 
@@ -124,13 +147,13 @@ runs/groundingdino_clipreid_set_text/cache/
   val_clip_text_scores.npy
 ```
 
-Each cache has a metadata fingerprint. Shape-only validation is not accepted.
+Each cache has a metadata fingerprint. Shape-only validation is not accepted. The `val_*` caches are only used when `alpha_selection.mode: validation`.
 
 ## Run
 
 S5 must already be present in the repository because S6 imports its implementation.
 
-After separate validation manifests are available, the normal command remains:
+With the default fixed-alpha configuration, a clean checkout can run directly:
 
 ```bash
 python run_baseline.py groundingdino_clipreid_set_text
@@ -141,7 +164,7 @@ The root runner will:
 ```text
 1. install S6 requirements
 2. run S6 checkpoint preparation
-3. run S6 inference, including validation-only alpha selection
+3. run S6 inference using fixed alpha, or validation-only selection when explicitly enabled
 4. run the official evaluator
 5. rebuild benchmark tables
 ```

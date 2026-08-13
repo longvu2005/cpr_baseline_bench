@@ -1,7 +1,7 @@
 method: groundingdino_clipreid_set_text
 display_name: Grounding DINO + CLIP-ReID - Set + Text
 group: Simple / Obvious Baselines
-cpr_supervision: 'Val only'
+cpr_supervision: 'No'
 
 base_set:
   method: groundingdino_clipreid_set
@@ -18,6 +18,8 @@ fusion:
   formula: alpha * reid_set + (1 - alpha) * clip_text
   score_normalization: none
   alpha_selection:
+    mode: fixed
+    fixed_alpha: 0.50
     metric: Full-mAP
     grid:
       - 0.00
