@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 import clip
@@ -11,9 +12,12 @@ import torch
 import yaml
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
-from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 CACHE_SCHEMA_VERSION = 2
 
@@ -94,7 +98,7 @@ def gallery_features(
         pin_memory=(device.type == "cuda"),
     )
     chunks = []
-    for images in tqdm(loader, desc="Gallery"):
+    for images in progress_bar(loader, desc="Encode gallery", total=len(loader), unit="batch"):
         x = model.encode_image(images.to(device)).float()
         x /= x.norm(dim=-1, keepdim=True).clamp_min(1e-12)
         chunks.append(x.cpu().numpy())
@@ -115,7 +119,12 @@ def gallery_features(
 @torch.no_grad()
 def text_features(model, texts, batch_size, device):
     chunks = []
-    for start in tqdm(range(0, len(texts), batch_size), desc="Text"):
+    for start in progress_bar(
+        range(0, len(texts), batch_size),
+        desc="Encode query text",
+        total=(len(texts) + batch_size - 1) // batch_size,
+        unit="batch",
+    ):
         tokens = clip.tokenize(texts[start:start + batch_size], truncate=True).to(device)
         x = model.encode_text(tokens).float()
         x /= x.norm(dim=-1, keepdim=True).clamp_min(1e-12)
@@ -123,111 +132,143 @@ def text_features(model, texts, batch_size, device):
     return np.concatenate(chunks).astype(np.float32)
 
 
-def setup():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default=str(DEFAULT_CONFIG))
-    args = parser.parse_args()
 
-    config_path = Path(args.config)
-    if not config_path.is_absolute():
-        config_path = ROOT / config_path
-    with config_path.open("r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
+def setup(tracker: PhaseTracker):
+    with tracker.phase("Load config and manifests"):
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--config", default=str(DEFAULT_CONFIG))
+        args = parser.parse_args()
 
-    output = ROOT / cfg["output"]["dir"]
-    output.mkdir(parents=True, exist_ok=True)
-    checkpoint = ROOT / cfg["model"]["checkpoint"]
-    if not checkpoint.is_file():
-        raise FileNotFoundError(
-            f"Missing CLIP checkpoint: {checkpoint}\n"
-            "Run `python methods/simple/03_clip_early_fusion/download_checkpoint.py` from the repository root."
+        config_path = Path(args.config)
+        if not config_path.is_absolute():
+            config_path = ROOT / config_path
+        with config_path.open("r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+
+        output = ROOT / cfg["output"]["dir"]
+        output.mkdir(parents=True, exist_ok=True)
+        checkpoint = ROOT / cfg["model"]["checkpoint"]
+        if not checkpoint.is_file():
+            raise FileNotFoundError(
+                f"Missing CLIP checkpoint: {checkpoint}\n"
+                "Run `python methods/simple/03_clip_early_fusion/download_checkpoint.py` from the repository root."
+            )
+
+        gallery_manifest = ROOT / "data/gallery.jsonl"
+        query_manifest = ROOT / "data/queries.jsonl"
+        gallery = load_jsonl(gallery_manifest)
+        queries = load_jsonl(query_manifest)
+        device = device_from(cfg["runtime"].get("device", "auto"))
+        tracker.log(
+            f"gallery={len(gallery):,} queries={len(queries):,} device={device} "
+            f"image_batch={cfg['runtime']['batch_size']} text_batch={cfg['runtime']['text_batch_size']}"
         )
 
-    gallery_manifest = ROOT / "data/gallery.jsonl"
-    query_manifest = ROOT / "data/queries.jsonl"
-    gallery = load_jsonl(gallery_manifest)
-    queries = load_jsonl(query_manifest)
-    device = device_from(cfg["runtime"].get("device", "auto"))
-    model, preprocess = clip.load(str(checkpoint), device=device, jit=False)
-    model.eval()
-    if device.type != "cuda":
-        model.float()
+    with tracker.phase("Load CLIP model", f"{cfg['model']['name']} on {device}"):
+        model, preprocess = clip.load(str(checkpoint), device=device, jit=False)
+        model.eval()
+        if device.type != "cuda":
+            model.float()
 
-    cache = ROOT / cfg["cache"]["gallery_features"]
-    cache_fingerprint = build_gallery_cache_fingerprint(
-        checkpoint, gallery_manifest, str(cfg["model"]["name"])
-    )
-    gfeat, cache_used = gallery_features(
-        model, preprocess, gallery, cache, cfg["runtime"], device, cache_fingerprint
-    )
-    tfeat = text_features(
-        model, [q["text"] for q in queries],
-        cfg["runtime"]["text_batch_size"], device
-    )
+    with tracker.phase("Prepare gallery image features"):
+        cache = ROOT / cfg["cache"]["gallery_features"]
+        cache_fingerprint = build_gallery_cache_fingerprint(
+            checkpoint, gallery_manifest, str(cfg["model"]["name"])
+        )
+        gfeat, cache_used = gallery_features(
+            model, preprocess, gallery, cache, cfg["runtime"], device, cache_fingerprint
+        )
+        tracker.log(f"gallery_features={gfeat.shape} cache={cache_used.relative_to(ROOT)}")
+
+    with tracker.phase("Encode query text"):
+        tfeat = text_features(
+            model,
+            [q["text"] for q in queries],
+            cfg["runtime"]["text_batch_size"],
+            device,
+        )
+        tracker.log(f"query_text_features={tfeat.shape}")
+
     return cfg, config_path, output, gallery, queries, device, gfeat, tfeat, cache_used
 
 
 @torch.no_grad()
 def main():
-    cfg, config_path, output, gallery, queries, device, gfeat, tfeat, cache_used = setup()
-    gallery_index: dict[object, int] = {}
-    for gi, row in enumerate(gallery):
-        image_id = row.get("image_id")
-        if image_id is None:
-            raise KeyError(f"Gallery row {gi} has no image_id")
-        if image_id in gallery_index:
-            raise ValueError(f"Duplicate gallery image_id: {image_id!r}")
-        gallery_index[image_id] = gi
+    tracker = PhaseTracker("clip_early_fusion", total=6)
+    cfg, config_path, output, gallery, queries, device, gfeat, tfeat, cache_used = setup(tracker)
 
-    query_indices: list[int] = []
-    for qi, query in enumerate(queries):
-        image_id = query.get("image_id")
-        if image_id not in gallery_index:
-            raise ValueError(f"Query {qi} image_id not found in gallery: {image_id!r}")
-        query_indices.append(gallery_index[image_id])
-    query_idx = np.asarray(query_indices, dtype=np.int64)
+    with tracker.phase("Fuse query features and score gallery"):
+        gallery_index: dict[object, int] = {}
+        for gi, row in enumerate(gallery):
+            image_id = row.get("image_id")
+            if image_id is None:
+                raise KeyError(f"Gallery row {gi} has no image_id")
+            if image_id in gallery_index:
+                raise ValueError(f"Duplicate gallery image_id: {image_id!r}")
+            gallery_index[image_id] = gi
 
-    iw = float(cfg["fusion"]["image_weight"])
-    tw = float(cfg["fusion"]["text_weight"])
-    if not np.isfinite([iw, tw]).all() or iw < 0.0 or tw < 0.0 or iw + tw <= 0.0:
-        raise ValueError(
-            "fusion.image_weight and fusion.text_weight must be finite, non-negative, "
-            "and have a positive sum"
+        query_indices: list[int] = []
+        for qi, query in enumerate(queries):
+            image_id = query.get("image_id")
+            if image_id not in gallery_index:
+                raise ValueError(f"Query {qi} image_id not found in gallery: {image_id!r}")
+            query_indices.append(gallery_index[image_id])
+        query_idx = np.asarray(query_indices, dtype=np.int64)
+
+        iw = float(cfg["fusion"]["image_weight"])
+        tw = float(cfg["fusion"]["text_weight"])
+        if not np.isfinite([iw, tw]).all() or iw < 0.0 or tw < 0.0 or iw + tw <= 0.0:
+            raise ValueError(
+                "fusion.image_weight and fusion.text_weight must be finite, non-negative, "
+                "and have a positive sum"
+            )
+        iw, tw = iw / (iw + tw), tw / (iw + tw)
+        tracker.log(f"normalized fusion weights: image={iw:.4f} text={tw:.4f}")
+
+        scores_path = output / "scores.npy"
+        scores = np.lib.format.open_memmap(
+            scores_path, "w+", dtype=np.float32, shape=(len(queries), len(gallery))
         )
-    iw, tw = iw / (iw + tw), tw / (iw + tw)
+        gallery_tensor = torch.from_numpy(np.asarray(gfeat)).to(device)
+        batch = cfg["runtime"]["score_batch_size"]
+        score_steps = (len(queries) + batch - 1) // batch
+        for start in progress_bar(
+            range(0, len(queries), batch),
+            desc="Fuse + score queries",
+            total=score_steps,
+            unit="batch",
+        ):
+            end = min(start + batch, len(queries))
+            image_q = gallery_tensor[query_idx[start:end]]
+            text_q = torch.from_numpy(tfeat[start:end]).to(device)
+            query = iw * image_q + tw * text_q
+            query /= query.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+            scores[start:end] = (query @ gallery_tensor.T).cpu().numpy()
+        scores.flush()
 
-    scores_path = output / "scores.npy"
-    scores = np.lib.format.open_memmap(
-        scores_path, "w+", dtype=np.float32, shape=(len(queries), len(gallery))
-    )
-    gallery_tensor = torch.from_numpy(np.asarray(gfeat)).to(device)
-    batch = cfg["runtime"]["score_batch_size"]
-    for start in tqdm(range(0, len(queries), batch), desc="Scores"):
-        end = min(start + batch, len(queries))
-        image_q = gallery_tensor[query_idx[start:end]]
-        text_q = torch.from_numpy(tfeat[start:end]).to(device)
-        query = iw * image_q + tw * text_q
-        query /= query.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-        scores[start:end] = (query @ gallery_tensor.T).cpu().numpy()
-    scores.flush()
+    with tracker.phase("Write run metadata and outputs"):
+        run = {
+            "method": cfg["method"],
+            "display_name": f"CLIP {cfg['model']['name']} - Early Fusion",
+            "group": "Simple / Obvious Baselines",
+            "cpr_supervision": "No",
+            "model": cfg["model"],
+            "fusion": {"image_weight": iw, "text_weight": tw},
+            "runtime": cfg["runtime"],
+            "gallery_features": str(cache_used.relative_to(ROOT)),
+            "config": str(config_path.relative_to(ROOT)),
+            "num_queries": len(queries),
+            "num_gallery": len(gallery),
+            "scores": str(scores_path.relative_to(ROOT)),
+            "higher_is_better": True,
+        }
+        run_path = output / "run.json"
+        with run_path.open("w", encoding="utf-8") as f:
+            json.dump(run, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        tracker.log(f"scores={scores_path.relative_to(ROOT)} run={run_path.relative_to(ROOT)}")
 
-    run = {
-        "method": cfg["method"],
-        "display_name": f"CLIP {cfg['model']['name']} - Early Fusion",
-        "group": "Simple / Obvious Baselines",
-        "cpr_supervision": "No",
-        "model": cfg["model"],
-        "fusion": {"image_weight": iw, "text_weight": tw},
-        "runtime": cfg["runtime"],
-        "gallery_features": str(cache_used.relative_to(ROOT)),
-        "config": str(config_path.relative_to(ROOT)),
-        "num_queries": len(queries),
-        "num_gallery": len(gallery),
-        "scores": str(scores_path.relative_to(ROOT)),
-        "higher_is_better": True,
-    }
-    with (output / "run.json").open("w", encoding="utf-8") as f:
-        json.dump(run, f, indent=2, ensure_ascii=False)
+    tracker.finish()
 
 
 if __name__ == "__main__":

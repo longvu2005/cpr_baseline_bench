@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 import clip
@@ -11,9 +12,12 @@ import torch
 import yaml
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
-from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 CACHE_SCHEMA_VERSION = 2
 
@@ -94,7 +98,7 @@ def gallery_features(
         pin_memory=(device.type == "cuda"),
     )
     chunks = []
-    for images in tqdm(loader, desc="Gallery"):
+    for images in progress_bar(loader, desc="Encode gallery", total=len(loader), unit="batch"):
         x = model.encode_image(images.to(device)).float()
         x /= x.norm(dim=-1, keepdim=True).clamp_min(1e-12)
         chunks.append(x.cpu().numpy())
@@ -112,91 +116,115 @@ def gallery_features(
     return np.load(cache, mmap_mode="r"), cache
 
 
-def setup():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default=str(DEFAULT_CONFIG))
-    args = parser.parse_args()
 
-    config_path = Path(args.config)
-    if not config_path.is_absolute():
-        config_path = ROOT / config_path
-    with config_path.open("r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
+def setup(tracker: PhaseTracker):
+    with tracker.phase("Load config and manifests"):
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--config", default=str(DEFAULT_CONFIG))
+        args = parser.parse_args()
 
-    output = ROOT / cfg["output"]["dir"]
-    output.mkdir(parents=True, exist_ok=True)
-    checkpoint = ROOT / cfg["model"]["checkpoint"]
-    if not checkpoint.is_file():
-        raise FileNotFoundError(
-            f"Missing CLIP checkpoint: {checkpoint}\n"
-            "Run `python methods/simple/01_clip_image/download_checkpoint.py` from the repository root."
+        config_path = Path(args.config)
+        if not config_path.is_absolute():
+            config_path = ROOT / config_path
+        with config_path.open("r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+
+        output = ROOT / cfg["output"]["dir"]
+        output.mkdir(parents=True, exist_ok=True)
+        checkpoint = ROOT / cfg["model"]["checkpoint"]
+        if not checkpoint.is_file():
+            raise FileNotFoundError(
+                f"Missing CLIP checkpoint: {checkpoint}\n"
+                "Run `python methods/simple/01_clip_image/download_checkpoint.py` from the repository root."
+            )
+
+        gallery_manifest = ROOT / "data/gallery.jsonl"
+        query_manifest = ROOT / "data/queries.jsonl"
+        gallery = load_jsonl(gallery_manifest)
+        queries = load_jsonl(query_manifest)
+        device = device_from(cfg["runtime"].get("device", "auto"))
+        tracker.log(
+            f"gallery={len(gallery):,} queries={len(queries):,} device={device} "
+            f"batch={cfg['runtime']['batch_size']} score_batch={cfg['runtime']['score_batch_size']}"
         )
 
-    gallery_manifest = ROOT / "data/gallery.jsonl"
-    query_manifest = ROOT / "data/queries.jsonl"
-    gallery = load_jsonl(gallery_manifest)
-    queries = load_jsonl(query_manifest)
-    device = device_from(cfg["runtime"].get("device", "auto"))
-    model, preprocess = clip.load(str(checkpoint), device=device, jit=False)
-    model.eval()
-    if device.type != "cuda":
-        model.float()
+    with tracker.phase("Load CLIP model", f"{cfg['model']['name']} on {device}"):
+        model, preprocess = clip.load(str(checkpoint), device=device, jit=False)
+        model.eval()
+        if device.type != "cuda":
+            model.float()
 
-    cache = ROOT / cfg["cache"]["gallery_features"]
-    cache_fingerprint = build_gallery_cache_fingerprint(
-        checkpoint, gallery_manifest, str(cfg["model"]["name"])
-    )
-    gfeat, cache_used = gallery_features(
-        model, preprocess, gallery, cache, cfg["runtime"], device, cache_fingerprint
-    )
+    with tracker.phase("Prepare gallery image features"):
+        cache = ROOT / cfg["cache"]["gallery_features"]
+        cache_fingerprint = build_gallery_cache_fingerprint(
+            checkpoint, gallery_manifest, str(cfg["model"]["name"])
+        )
+        gfeat, cache_used = gallery_features(
+            model, preprocess, gallery, cache, cfg["runtime"], device, cache_fingerprint
+        )
+        tracker.log(f"gallery_features={gfeat.shape} cache={cache_used.relative_to(ROOT)}")
+
     return cfg, config_path, output, gallery, queries, device, gfeat, cache_used
 
 
 @torch.no_grad()
 def main():
-    cfg, config_path, output, gallery, queries, device, gfeat, cache_used = setup()
+    tracker = PhaseTracker("clip_image", total=5)
+    cfg, config_path, output, gallery, queries, device, gfeat, cache_used = setup(tracker)
 
-    gallery_index = {x["image_id"]: i for i, x in enumerate(gallery)}
-    if len(gallery_index) != len(gallery):
-        raise ValueError("Duplicate gallery image_id")
+    with tracker.phase("Compute query-gallery score matrix"):
+        gallery_index = {x["image_id"]: i for i, x in enumerate(gallery)}
+        if len(gallery_index) != len(gallery):
+            raise ValueError("Duplicate gallery image_id")
 
-    query_idx = []
-    for query in queries:
-        image_id = query["image_id"]
-        if image_id not in gallery_index:
-            raise ValueError(f"Query image missing from gallery: {image_id}")
-        query_idx.append(gallery_index[image_id])
-    query_idx = np.asarray(query_idx, dtype=np.int64)
+        query_idx = []
+        for query in queries:
+            image_id = query["image_id"]
+            if image_id not in gallery_index:
+                raise ValueError(f"Query image missing from gallery: {image_id}")
+            query_idx.append(gallery_index[image_id])
+        query_idx = np.asarray(query_idx, dtype=np.int64)
 
-    scores_path = output / "scores.npy"
-    scores = np.lib.format.open_memmap(
-        scores_path, "w+", dtype=np.float32, shape=(len(queries), len(gallery))
-    )
-    gallery_tensor = torch.from_numpy(np.asarray(gfeat)).to(device)
-    batch = cfg["runtime"]["score_batch_size"]
+        scores_path = output / "scores.npy"
+        scores = np.lib.format.open_memmap(
+            scores_path, "w+", dtype=np.float32, shape=(len(queries), len(gallery))
+        )
+        gallery_tensor = torch.from_numpy(np.asarray(gfeat)).to(device)
+        batch = cfg["runtime"]["score_batch_size"]
+        score_steps = (len(queries) + batch - 1) // batch
+        for start in progress_bar(
+            range(0, len(queries), batch),
+            desc="Score queries",
+            total=score_steps,
+            unit="batch",
+        ):
+            end = min(start + batch, len(queries))
+            query = gallery_tensor[query_idx[start:end]]
+            scores[start:end] = (query @ gallery_tensor.T).cpu().numpy()
+        scores.flush()
 
-    for start in tqdm(range(0, len(queries), batch), desc="Scores"):
-        end = min(start + batch, len(queries))
-        query = gallery_tensor[query_idx[start:end]]
-        scores[start:end] = (query @ gallery_tensor.T).cpu().numpy()
-    scores.flush()
+    with tracker.phase("Write run metadata and outputs"):
+        run = {
+            "method": cfg["method"],
+            "display_name": f"CLIP {cfg['model']['name']} - Image-only",
+            "group": "Simple / Obvious Baselines",
+            "cpr_supervision": "No",
+            "model": cfg["model"],
+            "runtime": cfg["runtime"],
+            "gallery_features": str(cache_used.relative_to(ROOT)),
+            "config": str(config_path.relative_to(ROOT)),
+            "num_queries": len(queries),
+            "num_gallery": len(gallery),
+            "scores": str(scores_path.relative_to(ROOT)),
+            "higher_is_better": True,
+        }
+        run_path = output / "run.json"
+        with run_path.open("w", encoding="utf-8") as f:
+            json.dump(run, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        tracker.log(f"scores={scores_path.relative_to(ROOT)} run={run_path.relative_to(ROOT)}")
 
-    run = {
-        "method": cfg["method"],
-        "display_name": f"CLIP {cfg['model']['name']} - Image-only",
-        "group": "Simple / Obvious Baselines",
-        "cpr_supervision": "No",
-        "model": cfg["model"],
-        "runtime": cfg["runtime"],
-        "gallery_features": str(cache_used.relative_to(ROOT)),
-        "config": str(config_path.relative_to(ROOT)),
-        "num_queries": len(queries),
-        "num_gallery": len(gallery),
-        "scores": str(scores_path.relative_to(ROOT)),
-        "higher_is_better": True,
-    }
-    with (output / "run.json").open("w", encoding="utf-8") as f:
-        json.dump(run, f, indent=2, ensure_ascii=False)
+    tracker.finish()
 
 
 if __name__ == "__main__":

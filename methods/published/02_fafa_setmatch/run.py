@@ -28,9 +28,12 @@ import yaml
 from PIL import Image
 from scipy.optimize import linear_sum_assignment
 from torch.utils.data import DataLoader, Dataset
-from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "fafa_setmatch"
 ADAPTER_VERSION = "2026-08-13-v2-offline-artifacts-setmatch"
@@ -527,11 +530,16 @@ def get_or_create_detection_cache(
 ) -> tuple[list[list[BoxCandidate]], str]:
     cached = load_candidate_cache(cache_path, gallery)
     if cached is not None:
+        print(f"[cache] person candidates: {rel(cache_path)}", flush=True)
         return cached, "cache"
 
     detector, weights = load_detector(detector_cfg, device)
     candidates: list[list[BoxCandidate]] = []
-    for i, row in enumerate(tqdm(gallery, desc="Predict person boxes")):
+    for i, row in enumerate(
+        progress_bar(
+            gallery, desc="Detect gallery persons", total=len(gallery), unit="image"
+        )
+    ):
         candidates.append(
             detect_candidates(
                 detector,
@@ -580,7 +588,12 @@ def select_query_target_boxes(
     full_scene_fallback_slots = 0
 
     for qi, (query, targets) in enumerate(
-        tqdm(zip(queries, query_targets), total=len(queries), desc="Select query targets")
+        progress_bar(
+            zip(queries, query_targets),
+            total=len(queries),
+            desc="Select query targets",
+            unit="query",
+        )
     ):
         image_id = query.get("image_id")
         if image_id not in gallery_index:
@@ -686,6 +699,7 @@ def encode_gallery_persons(
             and offsets.shape == dataset.offsets.shape
             and np.array_equal(offsets, dataset.offsets)
         ):
+            print(f"[cache] gallery person features: {rel(cache_path)}", flush=True)
             return cache_path, offsets, (int(features.shape[1]), int(features.shape[2]))
 
     loader = DataLoader(
@@ -702,7 +716,9 @@ def encode_gallery_persons(
     output_dtype = str(runtime.get("gallery_feature_dtype", "float16"))
     np_dtype = np.float16 if output_dtype == "float16" else np.float32
 
-    for images in tqdm(loader, desc="FAFA gallery persons"):
+    for images in progress_bar(
+        loader, desc="Encode FAFA gallery persons", total=len(loader), unit="batch"
+    ):
         images = images.to(device, non_blocking=(device.type == "cuda"))
         model_images = images.half() if device.type == "cuda" else images.float()
         image_features, _ = model.extract_target_features(model_images, mode="mean")
@@ -785,7 +801,9 @@ def encode_query_targets(
     )
 
     grouped: list[list[np.ndarray]] = [[] for _ in range(num_queries)]
-    for images, captions, owners in tqdm(loader, desc="FAFA query targets"):
+    for images, captions, owners in progress_bar(
+        loader, desc="Encode FAFA query targets", total=len(loader), unit="batch"
+    ):
         images = images.to(device, non_blocking=(device.type == "cuda"))
         model_images = images.half() if device.type == "cuda" else images.float()
         processed = [txt_processors["eval"](str(caption)) for caption in captions]
@@ -845,6 +863,7 @@ def compute_component_person_scores(
     if cache_path.is_file():
         cached = np.load(cache_path, mmap_mode="r")
         if cached.shape == expected_shape and cached.dtype == np.float32:
+            print(f"[cache] component-person scores: {rel(cache_path)}", flush=True)
             return cache_path
 
     scores = np.lib.format.open_memmap(
@@ -857,9 +876,11 @@ def compute_component_person_scores(
         device=device, dtype=torch.float32
     )
 
-    for p_start in tqdm(
+    for p_start in progress_bar(
         range(0, gallery_features.shape[0], person_batch_size),
         desc="FAFA component-person scores",
+        total=(gallery_features.shape[0] + person_batch_size - 1) // person_batch_size,
+        unit="person-batch",
     ):
         p_end = min(p_start + person_batch_size, gallery_features.shape[0])
         g = torch.from_numpy(np.asarray(gallery_features[p_start:p_end])).to(
@@ -998,7 +1019,12 @@ def aggregate_component_scores(
         shape=(len(query_offsets) - 1, len(gallery_offsets) - 1),
     )
 
-    for qi in tqdm(range(len(query_offsets) - 1), desc="SetMatch aggregation"):
+    for qi in progress_bar(
+        range(len(query_offsets) - 1),
+        desc="SetMatch aggregation",
+        total=len(query_offsets) - 1,
+        unit="query",
+    ):
         start, end = int(query_offsets[qi]), int(query_offsets[qi + 1])
         target_scores = np.asarray(component_scores[start:end], dtype=np.float32)
         num_targets = end - start
@@ -1064,7 +1090,9 @@ def validate_scores(scores_path: Path, nq: int, ng: int) -> None:
 
 
 def main() -> None:
-    print(f"FAFA + SetMatch adapter: {ADAPTER_VERSION}")
+    tracker = PhaseTracker(METHOD_ID, total=9)
+    tracker.advance("Load config, manifests, and cache identity")
+    print(f"FAFA + SetMatch adapter: {ADAPTER_VERSION}", flush=True)
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     args = parser.parse_args()
@@ -1116,7 +1144,13 @@ def main() -> None:
     device = device_from(str(runtime.get("device", "cuda")))
     detector_device_name = str(runtime.get("detector_device", str(device)))
     detector_device = device_from(detector_device_name)
+    tracker.log(
+        f"gallery={len(gallery):,} queries={len(queries):,} "
+        f"targets={sum(len(x) for x in query_targets):,} device={device} "
+        f"detector_device={detector_device} cache={cache_key}"
+    )
 
+    tracker.advance("Detect gallery person candidates")
     localization_cfg = cfg["localization"]
     detector_cfg = localization_cfg["detector"]
     candidate_cache_path = cache_dir / "person_candidates.jsonl"
@@ -1134,7 +1168,12 @@ def main() -> None:
         choose_person_boxes(candidates, threshold, min_required=1)
         for candidates in all_candidates
     ]
+    tracker.log(
+        f"person candidates ready: {sum(len(x) for x in gallery_boxes):,} crops "
+        f"across {len(gallery_boxes):,} gallery images (source={detector_weights})"
+    )
 
+    tracker.advance("Select query target persons with CLIP + Hungarian")
     selected_query_boxes, selector_stats = select_query_target_boxes(
         queries=queries,
         query_targets=query_targets,
@@ -1146,14 +1185,24 @@ def main() -> None:
     )
     if device.type == "cuda":
         torch.cuda.empty_cache()
+    tracker.log(
+        f"query localization ready: mean_clip={selector_stats.get('mean_assigned_clip_similarity')} "
+        f"fallback_slots={selector_stats.get('full_scene_fallback_slots')}"
+    )
 
+    tracker.advance("Load pinned FAFA model and released checkpoint")
     # Load the large FAFA model only after detector/CLIP target localization to
     # avoid keeping the auxiliary localization models resident on the GPU.
     fafa_dir = ensure_official_source(cfg)
     model, txt_processors, preprocess, ckpt_path, load_info = load_fafa(
         cfg, fafa_dir, device
     )
+    tracker.log(
+        f"FAFA model loaded from {rel(ckpt_path)}; missing_keys={len(load_info['missing_keys'])} "
+        f"unexpected_keys={len(load_info['unexpected_keys'])}"
+    )
 
+    tracker.advance("Encode predicted gallery persons")
     gallery_dataset = GalleryPersonDataset(gallery, gallery_boxes, preprocess)
     gallery_feature_path = cache_dir / "gallery_person_features.npy"
     gallery_feature_path, offsets, token_dim = encode_gallery_persons(
@@ -1163,7 +1212,12 @@ def main() -> None:
         runtime=runtime,
         device=device,
     )
+    tracker.log(
+        f"gallery person features ready: persons={int(offsets[-1]):,} "
+        f"tokens={token_dim[0]} dim={token_dim[1]} path={rel(gallery_feature_path)}"
+    )
 
+    tracker.advance("Encode composed query targets")
     query_dataset = QueryTargetDataset(
         queries=queries,
         targets=query_targets,
@@ -1180,7 +1234,11 @@ def main() -> None:
         runtime=runtime,
         device=device,
     )
+    tracker.log(
+        f"query target features ready: {sum(len(x) for x in query_features):,} target components"
+    )
 
+    tracker.advance("Compute component-person scores and SetMatch aggregation")
     ckpt_cfg = cfg["checkpoint"]
     setmatch_cfg = cfg["setmatch"]
     fda_k = int(ckpt_cfg.get("fda_k", 6))
@@ -1199,6 +1257,9 @@ def main() -> None:
         unmatched_score=unmatched_score,
         device=device,
     )
+    tracker.log(f"raw score matrix written: {rel(scores_path)}")
+
+    tracker.advance("Validate scores and summarize benchmark metadata")
     validate_scores(scores_path, len(queries), len(gallery))
 
     case_counts = Counter(str(q.get("case", "UNKNOWN")).upper() for q in queries)
@@ -1301,14 +1362,20 @@ def main() -> None:
         ],
     }
 
+    tracker.log(
+        f"score validation passed: shape=({len(queries):,}, {len(gallery):,}); cases={dict(case_counts)}"
+    )
+
+    tracker.advance("Write run metadata and final outputs")
     run_path = output / "run.json"
     with run_path.open("w", encoding="utf-8") as f:
         json.dump(run, f, indent=2, ensure_ascii=False)
         f.write("\n")
 
-    print(f"Saved: {scores_path}  shape=({len(queries)}, {len(gallery)})")
-    print(f"Saved: {run_path}")
-    print(f"Evaluate: python evaluate.py --method {method}")
+    print(f"Saved: {scores_path}  shape=({len(queries)}, {len(gallery)})", flush=True)
+    print(f"Saved: {run_path}", flush=True)
+    print(f"Evaluate: python evaluate.py --method {method}", flush=True)
+    tracker.finish()
 
 
 if __name__ == "__main__":

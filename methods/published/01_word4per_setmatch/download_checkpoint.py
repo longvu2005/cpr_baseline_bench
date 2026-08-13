@@ -14,6 +14,7 @@ import argparse
 import hashlib
 import os
 import subprocess
+import sys
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,10 @@ from typing import Any
 import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from benchmark_progress import PhaseTracker, byte_progress  # noqa: E402
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 
 CLIP_ASSETS = {
@@ -116,12 +121,16 @@ def download_with_sha256(
 
     try:
         with urllib.request.urlopen(request) as response, temp.open("wb") as handle:
-            while True:
-                chunk = response.read(8 * 1024 * 1024)
-                if not chunk:
-                    break
-                handle.write(chunk)
-                digest.update(chunk)
+            total_header = response.headers.get("Content-Length")
+            total = int(total_header) if total_header else None
+            with byte_progress(desc=f"Download {path.name}", total=total) as bar:
+                while True:
+                    chunk = response.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    digest.update(chunk)
+                    bar.update(len(chunk))
         actual = digest.hexdigest()
         if expected_sha256 is not None and actual != expected_sha256:
             raise RuntimeError(
@@ -267,16 +276,24 @@ def validate_reproduced_stage2(cfg: dict[str, Any]) -> tuple[Path, Path]:
 
 
 def prepare(config_path: Path, force: bool) -> None:
+    tracker = PhaseTracker("word4per_prepare", total=5)
+
+    tracker.advance("Validate reproduced Word4Per Stage-2 artifacts")
     cfg = load_yaml(config_path)
     validate_reproduced_stage2(cfg)
+
+    tracker.advance("Pin official Word4Per source checkout")
     prepare_source(cfg)
 
+    tracker.advance("Prepare Word4Per base CLIP checkpoint")
     ckpt = cfg["checkpoint"]
     prepare_clip(str(ckpt["base_clip_model"]), resolve_path(str(ckpt["base_clip"])), force)
 
+    tracker.advance("Prepare CLIP query-selector checkpoint")
     selector = cfg["localization"]["query_selector"]
     prepare_clip(str(selector["model"]), resolve_path(str(selector["checkpoint"])), force)
 
+    tracker.advance("Prepare person-detector checkpoint")
     detector = cfg["localization"]["detector"]
     download_with_sha256(
         url=DETECTOR_URL,
@@ -284,7 +301,8 @@ def prepare(config_path: Path, force: bool) -> None:
         expected_hash_prefix=DETECTOR_HASH_PREFIX,
         force=force,
     )
-    print("[status] Word4Per inference artifacts are ready")
+    print("[status] Word4Per inference artifacts are ready", flush=True)
+    tracker.finish()
 
 
 def parse_args() -> argparse.Namespace:

@@ -24,6 +24,10 @@ from typing import Any
 import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from benchmark_progress import PhaseTracker, byte_progress  # noqa: E402
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 GOOGLE_DRIVE_ID = "1Bf2Ia7zmxx5k3Dj-nRr3CLbAqc_zkM0y"
 CLIP_B32_SHA256 = "40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af"
@@ -94,12 +98,16 @@ def download_with_hash(
     print(f"[download] {rel(path)}")
     try:
         with urllib.request.urlopen(request) as response, temp.open("wb") as handle:
-            while True:
-                chunk = response.read(8 * 1024 * 1024)
-                if not chunk:
-                    break
-                handle.write(chunk)
-                digest.update(chunk)
+            total_header = response.headers.get("Content-Length")
+            total = int(total_header) if total_header else None
+            with byte_progress(desc=f"Download {path.name}", total=total) as bar:
+                while True:
+                    chunk = response.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    digest.update(chunk)
+                    bar.update(len(chunk))
         actual = digest.hexdigest()
         if expected_sha256 is not None and actual != expected_sha256:
             raise RuntimeError(
@@ -288,11 +296,17 @@ def prewarm_fafa_runtime_assets(
 
 
 def prepare(config_path: Path, force: bool) -> None:
+    tracker = PhaseTracker("fafa_prepare", total=5)
     cfg = load_yaml(config_path)
     ckpt = cfg["checkpoint"]
+
+    tracker.advance("Pin official FAFA source checkout")
     fafa_dir = prepare_source(cfg)
+
+    tracker.advance("Prepare released FAFA checkpoint")
     download_fafa_checkpoint(resolve_path(str(ckpt["path"])), force)
 
+    tracker.advance("Prepare CLIP query-selector checkpoint")
     selector = cfg["localization"]["query_selector"]
     if str(selector["model"]) != "ViT-B/32":
         raise ValueError("FAFA query selector currently supports only OpenAI CLIP ViT-B/32")
@@ -303,6 +317,7 @@ def prepare(config_path: Path, force: bool) -> None:
         force=force,
     )
 
+    tracker.advance("Prepare person-detector checkpoint")
     detector = cfg["localization"]["detector"]
     download_with_hash(
         url=DETECTOR_URL,
@@ -311,10 +326,12 @@ def prepare(config_path: Path, force: bool) -> None:
         force=force,
     )
 
+    tracker.advance("Pre-warm FAFA/LAVIS runtime assets")
     cache_root = resolve_path(str(ckpt["cache_root"]))
     marker = resolve_path(str(ckpt["runtime_assets_marker"]))
     prewarm_fafa_runtime_assets(cfg, fafa_dir, marker, cache_root, force)
-    print("[status] FAFA inference artifacts are ready")
+    print("[status] FAFA inference artifacts are ready", flush=True)
+    tracker.finish()
 
 
 def parse_args() -> argparse.Namespace:

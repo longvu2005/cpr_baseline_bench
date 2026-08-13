@@ -16,6 +16,7 @@ runs/
 outputs/
 tables/
 run_baseline.py
+benchmark_progress.py
 evaluate.py
 build_tables.py
 validate_data.py
@@ -48,6 +49,14 @@ python -m pip install -r methods/<group>/<method>/requirements.txt
 ```
 
 This prevents checkpoint or inference scripts from silently depending on packages that have not been installed yet.
+
+All Python subprocesses launched by the root runner are unbuffered, so phase messages and progress bars appear immediately instead of being held until a process exits. Each `run.py` should use the shared `benchmark_progress.py` helpers for phase-level status and batch-level progress:
+
+```python
+from benchmark_progress import PhaseTracker, progress_bar
+```
+
+Use `PhaseTracker` for coarse stages such as model loading, gallery encoding, query encoding, scoring, validation, and output writing. Use `progress_bar` only around meaningful repeated work such as image, batch, query, or person-batch loops. Progress reporting must not change ordering, batching semantics, scores, caching rules, or benchmark outputs.
 
 Use a dedicated virtual/conda environment for a baseline when its dependencies may conflict with another method.
 
@@ -197,6 +206,8 @@ Never label a reproduced or third-party checkpoint as an official released check
 Every Python package needed by any method-local stage must be declared there, including packages needed only by `download_checkpoint.py`.
 
 Do not make checkpoint or inference scripts install their own missing packages at runtime. The root runner installs the method requirements before those scripts are executed.
+
+`run.py` must also expose meaningful progress for long-running work. At minimum, report major phases and add a progress bar to any potentially long gallery/query/batch loop. Cache hits should be stated explicitly so a fast skipped phase is distinguishable from a missing computation.
 
 Likewise, `run.py` must not silently download model weights, tokenizers, detector weights, official source code, or other runtime artifacts. Networked preparation belongs in `download_checkpoint.py`; inference should consume already prepared local artifacts and fail clearly when one is missing.
 
@@ -416,6 +427,9 @@ A baseline integration is complete only when:
 [ ] no evaluation labels are used for hidden training/tuning/localization
 [ ] the method appears in `python run_baseline.py --list`
 [ ] dependency installation succeeds before checkpoint/inference work
+[ ] runner/subprocess output is unbuffered and visible while the baseline is running
+[ ] run.py reports major phases and progress for long gallery/query/batch loops
+[ ] cache hits are reported clearly rather than looking like skipped/missing work
 [ ] checkpoint preparation succeeds or fails early with a truthful actionable message
 [ ] inference performs no silent network download of model/runtime artifacts
 [ ] model-dependent caches are invalidated when their inputs change

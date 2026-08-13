@@ -10,6 +10,8 @@ from typing import Any
 
 import numpy as np
 
+from benchmark_progress import PhaseTracker, progress_bar
+
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 RUNS_DIR = ROOT / "runs"
@@ -72,6 +74,8 @@ def measure(scores: np.ndarray, positives: set[int]) -> dict[str, float]:
 
 
 def main() -> None:
+    tracker = PhaseTracker("evaluate", total=4)
+    tracker.advance("Load manifests and validate score artifacts")
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--method",
@@ -107,6 +111,12 @@ def main() -> None:
     expected_shape = (len(queries), len(gallery))
     validate_score_matrix(scores, expected_shape)
 
+    tracker.log(
+        f"method={method} queries={len(queries):,} gallery={len(gallery):,} "
+        f"score_shape={scores.shape}"
+    )
+
+    tracker.advance("Build gallery identity index")
     gidx = {row["image_id"]: i for i, row in enumerate(gallery)}
     if len(gidx) != len(gallery):
         raise ValueError("Duplicate image_id in gallery.jsonl")
@@ -121,7 +131,13 @@ def main() -> None:
         lambda: defaultdict(list)
     )
 
-    for qi, q in enumerate(queries):
+    tracker.advance("Evaluate retrieval metrics for every query")
+    for qi, q in progress_bar(
+        enumerate(queries),
+        desc="Evaluate queries",
+        total=len(queries),
+        unit="query",
+    ):
         image_id = q["image_id"]
         if image_id not in gidx:
             raise ValueError(f'{q.get("query_id", qi)}: query image {image_id!r} missing from gallery')
@@ -172,6 +188,7 @@ def main() -> None:
         },
     }
 
+    tracker.advance("Write evaluated metrics and run metadata")
     output_dir = OUTPUTS_DIR / method
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -183,7 +200,8 @@ def main() -> None:
         json.dump(run, f, indent=2, ensure_ascii=False)
         f.write("\n")
 
-    print(json.dumps(metrics, indent=2, ensure_ascii=False))
+    print(json.dumps(metrics, indent=2, ensure_ascii=False), flush=True)
+    tracker.finish()
 
 
 if __name__ == "__main__":

@@ -16,12 +16,16 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shlex
 import subprocess
 import sys
+from time import perf_counter
 from dataclasses import dataclass
 from pathlib import Path
+
+from benchmark_progress import format_duration
 
 ROOT = Path(__file__).resolve().parent
 METHOD_ROOTS = (
@@ -146,16 +150,30 @@ def format_command(command: list[str]) -> str:
 
 
 def run_step(index: int, total: int, title: str, command: list[str]) -> None:
-    print()
-    print(f"[{index}/{total}] {title}")
-    print(f"$ {format_command(command)}")
-    subprocess.run(command, cwd=ROOT, check=True)
+    print(flush=True)
+    print(f"[{index}/{total}] {title}", flush=True)
+    print(f"$ {format_command(command)}", flush=True)
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    started = perf_counter()
+    try:
+        subprocess.run(command, cwd=ROOT, check=True, env=env)
+    except subprocess.CalledProcessError:
+        print(
+            f"[{index}/{total}] FAILED after {format_duration(perf_counter() - started)}: {title}",
+            flush=True,
+        )
+        raise
+    print(
+        f"[{index}/{total}] done in {format_duration(perf_counter() - started)}: {title}",
+        flush=True,
+    )
 
 
 def print_skip(index: int, total: int, title: str, message: str) -> None:
-    print()
-    print(f"[{index}/{total}] {title}")
-    print(f"[skip] {message}")
+    print(flush=True)
+    print(f"[{index}/{total}] {title}", flush=True)
+    print(f"[skip] {message}", flush=True)
 
 
 def run_pipeline(
@@ -164,8 +182,8 @@ def run_pipeline(
     skip_install: bool,
 ) -> None:
     total = 5
-    print(f"Method : {method.method_id}")
-    print(f"Path   : {method.relative_directory}")
+    print(f"Method : {method.method_id}", flush=True)
+    print(f"Path   : {method.relative_directory}", flush=True)
 
     if skip_install:
         print_skip(
@@ -181,6 +199,7 @@ def run_pipeline(
             "Install requirements",
             [
                 sys.executable,
+                "-u",
                 "-m",
                 "pip",
                 "install",
@@ -190,7 +209,7 @@ def run_pipeline(
         )
 
     if method.checkpoint_path.is_file():
-        command = [sys.executable, str(method.checkpoint_path.relative_to(ROOT))]
+        command = [sys.executable, "-u", str(method.checkpoint_path.relative_to(ROOT))]
         if force_checkpoint:
             command.append("--force")
         run_step(2, total, "Prepare checkpoint", command)
@@ -206,19 +225,19 @@ def run_pipeline(
         3,
         total,
         "Inference",
-        [sys.executable, str(method.run_path.relative_to(ROOT))],
+        [sys.executable, "-u", str(method.run_path.relative_to(ROOT))],
     )
     run_step(
         4,
         total,
         "Official evaluation",
-        [sys.executable, "evaluate.py", "--method", method.method_id],
+        [sys.executable, "-u", "evaluate.py", "--method", method.method_id],
     )
     run_step(
         5,
         total,
         "Build benchmark tables",
-        [sys.executable, "build_tables.py"],
+        [sys.executable, "-u", "build_tables.py"],
     )
 
     print()
