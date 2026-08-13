@@ -15,6 +15,9 @@ iopath
 timm
 decord
 opencv-python
+# Keep the official FAFA pin. Shared notebook environments may warn that an
+# unrelated preinstalled package wants a newer Transformers; do not relax this
+# baseline-specific version merely to silence that external warning.
 transformers==4.39.3
 fairscale
 einops

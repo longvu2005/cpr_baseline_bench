@@ -29,6 +29,12 @@ from PIL import Image
 from scipy.optimize import linear_sum_assignment
 from torch.utils.data import DataLoader, Dataset
 
+# The official FAFA checkout is immutable benchmark input. Disable Python bytecode
+# writes both in this process and inherited worker processes so importing upstream
+# modules cannot mutate tracked __pycache__ files.
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+sys.dont_write_bytecode = True
+
 ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -37,6 +43,9 @@ from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "fafa_setmatch"
 ADAPTER_VERSION = "2026-08-13-v2-offline-artifacts-setmatch"
+# Runtime-only guard revision. Deliberately excluded from build_cache_key so this
+# non-semantic fix continues to reuse detector/feature caches produced by v2.
+RUNTIME_GUARD_VERSION = "2026-08-13-v1-readonly-official-source"
 
 
 @dataclass(frozen=True)
@@ -202,8 +211,35 @@ def parse_query_targets(query: dict[str, Any], qi: int) -> list[QueryTarget]:
     return targets
 
 
+def is_generated_python_artifact(path: str) -> bool:
+    """Return True only for Python bytecode/cache paths, never real source files."""
+    normalized = path.strip().strip('"').replace("\\", "/")
+    return normalized.lower().endswith((".pyc", ".pyo"))
+
+
+def tracked_dirty(checkout: Path) -> str:
+    """Report tracked source changes while ignoring generated Python bytecode."""
+    output = subprocess.check_output(
+        ["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=no"],
+        text=True,
+    )
+    dirty: list[str] = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        if len(line) < 4:
+            dirty.append(line)
+            continue
+        path = line[3:].strip()
+        status_paths = path.split(" -> ")
+        if status_paths and all(is_generated_python_artifact(x) for x in status_paths):
+            continue
+        dirty.append(line)
+    return "\n".join(dirty).strip()
+
+
 def ensure_official_source(cfg: dict[str, Any]) -> Path:
-    """Verify the source prepared by download_checkpoint.py without networking."""
+    """Verify the pinned source without networking or accepting real source edits."""
     source = cfg["source"]
     checkout = resolve_config_path(str(source["local_checkout"]))
     subdir = checkout / str(source.get("subdir", "FAFA_SynCPR"))
@@ -222,10 +258,7 @@ def ensure_official_source(cfg: dict[str, Any]) -> Path:
             f"Source commit mismatch: expected {expected}, got {actual}. "
             "Re-run download_checkpoint.py to repair the pinned checkout."
         )
-    dirty = subprocess.check_output(
-        ["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=no"],
-        text=True,
-    ).strip()
+    dirty = tracked_dirty(checkout)
     if dirty:
         raise RuntimeError(
             f"Pinned FAFA source has tracked local modifications: {rel(checkout)}\n{dirty}"
@@ -1090,8 +1123,8 @@ def validate_scores(scores_path: Path, nq: int, ng: int) -> None:
 
 
 def main() -> None:
-    tracker = PhaseTracker(METHOD_ID, total=9)
-    tracker.advance("Load config, manifests, and cache identity")
+    tracker = PhaseTracker(METHOD_ID, total=10)
+    tracker.advance("Load config and manifests")
     print(f"FAFA + SetMatch adapter: {ADAPTER_VERSION}", flush=True)
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
@@ -1114,9 +1147,19 @@ def main() -> None:
     if not gallery or not queries:
         raise RuntimeError("Canonical gallery/query manifests must be non-empty")
 
+    # Fail fast before detector/CLIP work. This verifies the pinned commit, rejects
+    # real tracked source edits, validates the pre-warmed runtime inventory, and
+    # configures offline caches. Generated Python bytecode changes are ignored.
+    tracker.advance("Validate FAFA artifacts and build cache identity")
+    fafa_dir = ensure_official_source(cfg)
+    runtime_marker_for_cache = configure_runtime_cache(cfg)
+    tracker.log(
+        f"FAFA preflight passed: source={cfg['source']['commit'][:12]} "
+        f"runtime_marker={rel(runtime_marker_for_cache)} guard={RUNTIME_GUARD_VERSION}"
+    )
+
     ckpt_cfg = cfg["checkpoint"]
     ckpt_path_for_cache = resolve_config_path(str(ckpt_cfg["path"]))
-    runtime_marker_for_cache = resolve_config_path(str(ckpt_cfg["runtime_assets_marker"]))
     selector_for_cache = resolve_config_path(
         str(cfg["localization"]["query_selector"]["checkpoint"])
     )
@@ -1191,9 +1234,9 @@ def main() -> None:
     )
 
     tracker.advance("Load pinned FAFA model and released checkpoint")
-    # Load the large FAFA model only after detector/CLIP target localization to
-    # avoid keeping the auxiliary localization models resident on the GPU.
-    fafa_dir = ensure_official_source(cfg)
+    # Source/runtime integrity was checked before expensive localization. Load the
+    # large FAFA model only now so detector/CLIP do not coexist with it on the GPU.
+    # load_fafa() re-validates the runtime cache as a cheap defense-in-depth check.
     model, txt_processors, preprocess, ckpt_path, load_info = load_fafa(
         cfg, fafa_dir, device
     )
@@ -1283,6 +1326,10 @@ def main() -> None:
             "repository": cfg["source"]["repository"],
             "commit": cfg["source"]["commit"],
             "subdir": cfg["source"].get("subdir", "FAFA_SynCPR"),
+            "runtime_guard_version": RUNTIME_GUARD_VERSION,
+            "python_bytecode_writes_disabled": True,
+            "integrity_ignores_generated_python_bytecode_only": True,
+            "preflight_before_localization": True,
         },
         "checkpoint": {
             "path": rel(ckpt_path),
@@ -1355,6 +1402,15 @@ def main() -> None:
             "Canonical gallery/query ordering is preserved.",
             "The query image remains in the score matrix; evaluate.py handles exclusion.",
             "FAFA is loaded from the authors' pinned official implementation and released checkpoint.",
+            (
+                "Pinned-source and runtime-asset integrity are preflighted before "
+                "expensive detector/CLIP localization."
+            ),
+            (
+                "Python bytecode writes are disabled; integrity checks ignore only "
+                "generated .pyc/.pyo bytecode files and still reject real tracked "
+                "source edits."
+            ),
             "No CPR benchmark training, fine-tuning, checkpoint selection, or hyperparameter tuning is performed.",
             "No GT PIPA target boxes or identity-to-box mapping are used in the main adapter.",
             "SetMatch uses maximum-weight Hungarian matching followed by the minimum matched target score.",

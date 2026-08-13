@@ -16,8 +16,8 @@ subdir: FAFA_SynCPR
 
 The authors state that all retrieval training/inference code is open-sourced in
 `FAFA_SynCPR` and release a paper-version pretrained model. Their official
-`run_inference.sh` uses the checkpoint name `tuned_recall_at1_step.pt`. Put the
-released weight at:
+`run_inference.sh` uses the checkpoint name `tuned_recall_at1_step.pt`. The
+method-local checkpoint preparer downloads the released weight to:
 
 ```text
 checkpoints/fafa/tuned_recall_at1_step.pt
@@ -117,6 +117,30 @@ avoid recomputing them. The cache directory is fingerprinted by adapter/config/d
 and checkpoint identities so changing a model/config does not silently reuse stale
 features.
 
+## Pinned-source integrity and retry behavior
+
+The authors' checkout is treated as immutable benchmark input. Both preparation
+and inference disable Python bytecode writes (`PYTHONDONTWRITEBYTECODE=1` plus
+`sys.dont_write_bytecode`) so importing LAVIS cannot rewrite tracked
+`__pycache__` files. The Git integrity guard still rejects every real tracked
+source/config change; it ignores only generated `.pyc` and `.pyo` bytecode files
+(normally stored under `__pycache__`). This prevents Python-version-specific
+bytecode from causing
+a false "tracked local modifications" failure while preserving the pinned-source
+reproducibility check.
+
+Inference performs a cheap FAFA preflight **before** detector/CLIP localization:
+the pinned commit, runtime-assets marker/inventory, and offline cache are checked
+first. Missing/stale artifacts or real source edits therefore fail before the
+expensive person detector runs. The large FAFA model itself is still loaded only
+after detector/CLIP localization to avoid unnecessary GPU-memory overlap.
+
+Operational guard changes do not alter the FAFA/SetMatch scoring semantics and
+do not change `ADAPTER_VERSION`, so a valid cache produced by the previous v2
+adapter remains reusable. In particular, an existing `person_candidates.jsonl`
+with the same config/data/checkpoint fingerprint is loaded instead of rerunning
+the full gallery detector.
+
 ## Run
 
 Normal end-to-end command:
@@ -125,7 +149,7 @@ Normal end-to-end command:
 python run_baseline.py fafa_setmatch
 ```
 
-The root runner installs this method's `requirements.txt` first, pins the official source, downloads the released FAFA checkpoint plus CLIP/detector auxiliary weights, pre-warms FAFA's LAVIS/Transformers runtime assets into a repository-local cache, then runs inference, evaluation, and table rebuilding. Inference uses that cache in offline mode so a missing runtime artifact fails instead of downloading silently mid-benchmark.
+The root runner installs this method's `requirements.txt` first, pins the official source, downloads the released FAFA checkpoint plus CLIP/detector auxiliary weights, pre-warms FAFA's LAVIS/Transformers runtime assets into a repository-local cache, then runs inference, evaluation, and table rebuilding. Inference preflights the pinned source and runtime inventory before expensive localization and then uses the cache in offline mode, so a missing runtime artifact fails instead of downloading silently mid-benchmark.
 
 Expected benchmark outputs:
 

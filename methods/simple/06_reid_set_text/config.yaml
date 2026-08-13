@@ -1,0 +1,74 @@
+method: groundingdino_clipreid_set_text
+display_name: Grounding DINO + CLIP-ReID - Set + Text
+group: Simple / Obvious Baselines
+cpr_supervision: 'Val only'
+
+base_set:
+  method: groundingdino_clipreid_set
+  method_dir: methods/simple/05_groundingdino_clipreid_set
+  config: methods/simple/05_groundingdino_clipreid_set/config.yaml
+
+clip_text:
+  name: ViT-L/14
+  checkpoint: checkpoints/clip/ViT-L-14.pt
+  checkpoint_sha256: b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836
+  text_field: text
+
+fusion:
+  formula: alpha * reid_set + (1 - alpha) * clip_text
+  score_normalization: none
+  alpha_selection:
+    metric: Full-mAP
+    grid:
+      - 0.00
+      - 0.05
+      - 0.10
+      - 0.15
+      - 0.20
+      - 0.25
+      - 0.30
+      - 0.35
+      - 0.40
+      - 0.45
+      - 0.50
+      - 0.55
+      - 0.60
+      - 0.65
+      - 0.70
+      - 0.75
+      - 0.80
+      - 0.85
+      - 0.90
+      - 0.95
+      - 1.00
+    tie_break: smallest_alpha
+    result: runs/groundingdino_clipreid_set_text/alpha_selection.json
+    validation:
+      gallery_manifest: data/validation/gallery.jsonl
+      query_manifest: data/validation/queries.jsonl
+
+runtime:
+  device: cuda
+  clip_image_batch_size: 64
+  clip_text_batch_size: 256
+  clip_score_batch_size: 256
+  num_workers: 4
+
+cache:
+  main:
+    reid_set_scores: runs/groundingdino_clipreid_set_text/cache/main_reid_set_scores.npy
+    clip_gallery_features: runs/clip_image/gallery_features_vit_l14.npy
+    clip_text_scores: runs/groundingdino_clipreid_set_text/cache/main_clip_text_scores.npy
+  validation:
+    detections: runs/groundingdino_clipreid_set_text/cache/val_person_detections.npz
+    reid_features: runs/groundingdino_clipreid_set_text/cache/val_person_features.npy
+    reid_set_scores: runs/groundingdino_clipreid_set_text/cache/val_reid_set_scores.npy
+    clip_gallery_features: runs/groundingdino_clipreid_set_text/cache/val_clip_gallery_features.npy
+    clip_text_scores: runs/groundingdino_clipreid_set_text/cache/val_clip_text_scores.npy
+
+data:
+  gallery_manifest: data/gallery.jsonl
+  query_manifest: data/queries.jsonl
+
+output:
+  dir: runs/groundingdino_clipreid_set_text

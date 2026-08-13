@@ -1,0 +1,4 @@
+-r ../05_groundingdino_clipreid_set/requirements.txt
+
+# OpenAI CLIP used for the global text-to-gallery semantic branch.
+git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33
