@@ -1,0 +1,74 @@
+{
+  "adapter_version": "2026-08-14-v2-fixed-or-val-fusion",
+  "benchmark_adaptation": {
+    "evaluation_labels_used_for_alpha_selection": false,
+    "purpose": "Strong conventional baseline: CLIP-ReID answers WHO at person-set level; global CLIP text similarity answers WHAT at scene level.",
+    "query_image_removed_inside_method": false,
+    "score_direction": "higher_is_better",
+    "validation_labels_used_only_for_alpha_selection": false
+  },
+  "cache": {
+    "alpha_selection_hit": false,
+    "main_clip_gallery_hit": false,
+    "main_clip_scores_hit": false,
+    "main_s5": {
+      "attention_backend": "official_pytorch_fallback",
+      "clipreid_preflight_shape": [
+        1,
+        1280
+      ],
+      "detections_hit": false,
+      "features_hit": false,
+      "num_detected_persons": 90948,
+      "scores_hit": false
+    },
+    "validation_clip_gallery_hit": null,
+    "validation_clip_scores_hit": null,
+    "validation_s5": null
+  },
+  "components": {
+    "clip_text": {
+      "checkpoint": "checkpoints/clip/ViT-L-14.pt",
+      "checkpoint_sha256": "b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836",
+      "gallery_representation": "global full-scene CLIP image embedding",
+      "model": "ViT-L/14",
+      "text_field": "text"
+    },
+    "reid_set": {
+      "aggregation": "strict minimum",
+      "assignment": "maximum-weight Hungarian",
+      "config": "methods/simple/05_reid_set/config.yaml",
+      "detector": "Grounding DINO Swin-T",
+      "method": "groundingdino_clipreid_set",
+      "reid": "CLIP-ReID ViT-B/16 (MSMT17)"
+    }
+  },
+  "config": "methods/simple/06_reid_set_text/config.yaml",
+  "cpr_supervision": "No",
+  "display_name": "Grounding DINO + CLIP-ReID - Set + Text",
+  "fusion": {
+    "fixed_alpha": 0.5,
+    "formula": "alpha * ReID-Set + (1-alpha) * CLIP-text",
+    "grid": null,
+    "score_normalization": "none",
+    "selected_alpha": 0.5,
+    "selection_metric": null,
+    "selection_mode": "fixed",
+    "selection_result": null,
+    "selection_split": null,
+    "validation_full_map": null
+  },
+  "group": "Simple / Obvious Baselines",
+  "higher_is_better": true,
+  "method": "groundingdino_clipreid_set_text",
+  "num_gallery": 17000,
+  "num_queries": 2975,
+  "runtime": {
+    "clip_image_batch_size": 64,
+    "clip_score_batch_size": 256,
+    "clip_text_batch_size": 256,
+    "device": "cuda",
+    "num_workers": 4
+  },
+  "scores": "runs/groundingdino_clipreid_set_text/scores.npy"
+}
