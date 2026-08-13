@@ -211,9 +211,27 @@ def load_official_model(cfg: dict[str, Any], source_root: Path, checkpoint: Path
     raw = torch_load_full(checkpoint)
     if not isinstance(raw, dict):
         raise TypeError("Pic2Word checkpoint must be a dict")
-    state = strip_module_prefix(raw["state_dict"])
-    mapper = strip_module_prefix(raw["state_dict_img2text"])
-    model.load_state_dict(state, strict=True)
+    if "state_dict_img2text" not in raw:
+        raise KeyError("Pic2Word checkpoint is missing state_dict_img2text")
+
+    mapper_raw = raw["state_dict_img2text"]
+    if not isinstance(mapper_raw, dict):
+        raise TypeError("Invalid Pic2Word state_dict_img2text")
+    mapper = strip_module_prefix(mapper_raw)
+
+    state_raw = raw.get("state_dict")
+    if state_raw is not None:
+        if not isinstance(state_raw, dict):
+            raise TypeError("Invalid Pic2Word state_dict")
+        state = strip_module_prefix(state_raw)
+        model.load_state_dict(state, strict=True)
+    else:
+        print(
+            "[info] mapper-only Pic2Word checkpoint: using verified OpenAI CLIP "
+            "ViT-L/14 backbone weights",
+            flush=True,
+        )
+
     img2text.load_state_dict(mapper, strict=True)
     model.to(device).float().eval()
     img2text.to(device).float().eval()

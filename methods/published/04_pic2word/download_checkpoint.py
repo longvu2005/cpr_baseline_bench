@@ -133,31 +133,41 @@ def torch_load_full(path: Path) -> Any:
 def validate_pic2word_checkpoint(path: Path) -> dict[str, Any]:
     if not path.is_file() or path.stat().st_size <= 0:
         raise FileNotFoundError(path)
+
     checkpoint = torch_load_full(path)
     if not isinstance(checkpoint, dict):
-        raise TypeError("Official Pic2Word checkpoint must be a dict")
-    if "state_dict" not in checkpoint or "state_dict_img2text" not in checkpoint:
-        raise KeyError(
-            "Checkpoint is not the released Pic2Word inference/training artifact: "
-            "missing state_dict/state_dict_img2text"
-        )
-    state = strip_module_prefix(checkpoint["state_dict"])
-    mapper = strip_module_prefix(checkpoint["state_dict_img2text"])
-    if not isinstance(state, dict) or not isinstance(mapper, dict):
-        raise TypeError("Invalid Pic2Word state dictionaries")
+        raise TypeError("Pic2Word checkpoint must be a dict")
+    if "state_dict_img2text" not in checkpoint:
+        raise KeyError("Pic2Word checkpoint is missing state_dict_img2text")
 
-    expected_model_shapes = {
-        "visual.conv1.weight": (1024, 3, 14, 14),
-        "text_projection": (768, 768),
-        "token_embedding.weight": (49408, 768),
-    }
-    for key, expected in expected_model_shapes.items():
-        tensor = state.get(key)
-        if not isinstance(tensor, torch.Tensor) or tuple(tensor.shape) != expected:
-            raise ValueError(
-                f"Pic2Word checkpoint does not match official ViT-L/14 config: "
-                f"{key} shape={None if tensor is None else tuple(tensor.shape)}, expected={expected}"
-            )
+    mapper_raw = checkpoint["state_dict_img2text"]
+    if not isinstance(mapper_raw, dict):
+        raise TypeError("Invalid Pic2Word state_dict_img2text")
+    mapper = strip_module_prefix(mapper_raw)
+
+    # The original Google Drive artifact is a full training checkpoint, while
+    # the pinned fallback mirror contains only the trained IM2TEXT mapper.
+    # Both are valid for inference because the official training code optimizes
+    # img2text only; the CLIP backbone is loaded separately from OpenAI weights.
+    state_raw = checkpoint.get("state_dict")
+    state: dict[str, Any] = {}
+    if state_raw is not None:
+        if not isinstance(state_raw, dict):
+            raise TypeError("Invalid Pic2Word state_dict")
+        state = strip_module_prefix(state_raw)
+        expected_model_shapes = {
+            "visual.conv1.weight": (1024, 3, 14, 14),
+            "text_projection": (768, 768),
+            "token_embedding.weight": (49408, 768),
+        }
+        for key, expected in expected_model_shapes.items():
+            tensor = state.get(key)
+            if not isinstance(tensor, torch.Tensor) or tuple(tensor.shape) != expected:
+                raise ValueError(
+                    "Pic2Word checkpoint does not match official ViT-L/14 config: "
+                    f"{key} shape={None if tensor is None else tuple(tensor.shape)}, "
+                    f"expected={expected}"
+                )
 
     expected_mapper_shapes = {
         "layers.0.0.weight": (512, 768),
@@ -176,6 +186,7 @@ def validate_pic2word_checkpoint(path: Path) -> dict[str, Any]:
         "sha256": sha256_file(path),
         "size": int(path.stat().st_size),
         "epoch": checkpoint.get("epoch"),
+        "artifact_kind": "full_checkpoint" if state else "img2text_only",
         "num_model_tensors": sum(isinstance(x, torch.Tensor) for x in state.values()),
         "num_img2text_tensors": sum(isinstance(x, torch.Tensor) for x in mapper.values()),
     }
@@ -184,19 +195,17 @@ def validate_pic2word_checkpoint(path: Path) -> dict[str, Any]:
     return info
 
 
-def download_pic2word(path: Path, drive_id: str, force: bool) -> dict[str, Any]:
-    try:
-        import gdown
-    except ImportError as error:
-        raise RuntimeError(
-            "Missing gdown. Run through run_baseline.py so requirements are installed first."
-        ) from error
-
+def download_pic2word(
+    path: Path,
+    checkpoint_cfg: dict[str, Any],
+    force: bool,
+) -> dict[str, Any]:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_file() and not force:
         try:
             info = validate_pic2word_checkpoint(path)
-            print(f"[skip] valid official Pic2Word checkpoint: {rel(path)}", flush=True)
+            info["download_source"] = "existing"
+            print(f"[skip] valid Pic2Word checkpoint: {rel(path)}", flush=True)
             return info
         except Exception as error:
             print(f"[warn] replacing invalid Pic2Word checkpoint: {error}", flush=True)
@@ -204,17 +213,76 @@ def download_pic2word(path: Path, drive_id: str, force: bool) -> dict[str, Any]:
 
     temp = path.with_name(path.name + ".part")
     temp.unlink(missing_ok=True)
+
+    drive_error: Exception | None = None
+    drive_id = str(checkpoint_cfg["google_drive_id"])
     print(f"[download] official Pic2Word checkpoint -> {rel(path)}", flush=True)
     try:
+        import gdown
+
         result = gdown.download(id=drive_id, output=str(temp), quiet=False)
         if result is None or not temp.is_file() or temp.stat().st_size <= 0:
             raise RuntimeError("Google Drive download did not produce a valid file")
         info = validate_pic2word_checkpoint(temp)
+        info["download_source"] = "official_google_drive"
+        info["source_url"] = str(checkpoint_cfg["source_url"])
         os.replace(temp, path)
-    except Exception:
+        print(f"[ok] Pic2Word checkpoint sha256={info['sha256']}", flush=True)
+        return info
+    except Exception as error:
+        drive_error = error
         temp.unlink(missing_ok=True)
-        raise
-    print(f"[ok] Pic2Word checkpoint sha256={info['sha256']}", flush=True)
+        print(
+            f"[warn] official Google Drive download failed: "
+            f"{type(error).__name__}: {error}",
+            flush=True,
+        )
+
+    fallback = checkpoint_cfg.get("fallback")
+    if not isinstance(fallback, dict):
+        raise RuntimeError(
+            "Official Pic2Word Google Drive download failed and no fallback is configured"
+        ) from drive_error
+
+    print(
+        "[download] Google Drive unavailable; using pinned Pic2Word mapper mirror "
+        f"{fallback['repo_id']}@{str(fallback['revision'])[:12]}",
+        flush=True,
+    )
+    try:
+        from huggingface_hub import hf_hub_download
+
+        cached = Path(
+            hf_hub_download(
+                repo_id=str(fallback["repo_id"]),
+                filename=str(fallback["filename"]),
+                revision=str(fallback["revision"]),
+            )
+        )
+        if not cached.is_file() or cached.stat().st_size <= 0:
+            raise RuntimeError(f"Hugging Face download produced no file: {cached}")
+        shutil.copyfile(cached, temp)
+        info = validate_pic2word_checkpoint(temp)
+        if info["artifact_kind"] != "img2text_only":
+            raise RuntimeError(
+                "Pinned fallback must be the mapper-only Pic2Word artifact"
+            )
+        info["download_source"] = "pinned_huggingface_mapper_mirror"
+        info["source_url"] = str(fallback["source_url"])
+        os.replace(temp, path)
+    except Exception as fallback_error:
+        temp.unlink(missing_ok=True)
+        raise RuntimeError(
+            "Unable to prepare Pic2Word checkpoint: official Google Drive failed "
+            "and the pinned Hugging Face fallback also failed. "
+            f"Google Drive error: {type(drive_error).__name__}: {drive_error}"
+        ) from fallback_error
+
+    print(
+        f"[ok] Pic2Word mapper fallback sha256={info['sha256']} "
+        f"size={info['size']} bytes",
+        flush=True,
+    )
     return info
 
 
@@ -274,7 +342,7 @@ def main() -> None:
     checkpoint_path = resolve_path(str(cfg["checkpoint"]["path"]))
     checkpoint_info = download_pic2word(
         checkpoint_path,
-        str(cfg["checkpoint"]["google_drive_id"]),
+        cfg["checkpoint"],
         bool(args.force),
     )
 
@@ -298,7 +366,7 @@ def main() -> None:
         },
         "checkpoint": {
             "path": rel(checkpoint_path),
-            "source_url": str(cfg["checkpoint"]["source_url"]),
+            "official_source_url": str(cfg["checkpoint"]["source_url"]),
             "status": str(cfg["checkpoint"]["status"]),
             **checkpoint_info,
         },

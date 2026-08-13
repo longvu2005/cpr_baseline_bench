@@ -392,11 +392,11 @@ def encode_queries(*, gallery, queries, query_indices, image_encoder, text_encod
         n = int(images.shape[0])
         batch_prompts = prompts[offset : offset + n]
         try:
-            tokens = clip.tokenize(batch_prompts, context_length=77, truncate=False).to(device)
+            tokens = clip.tokenize(batch_prompts, context_length=77, truncate=True).to(device)
         except RuntimeError as error:
             raise RuntimeError(
                 f"LinCIR prompt exceeds CLIP context length near query rows {offset}:{offset+n}; "
-                "the adapter preserves the official no-truncation evaluation behavior."
+                "OpenAI CLIP tokenization failed after enabling deterministic context truncation."
             ) from error
         placeholder_counts = (tokens == expected_placeholder_id).sum(dim=1)
         if not torch.equal(placeholder_counts.cpu(), torch.ones(n, dtype=placeholder_counts.dtype)):
