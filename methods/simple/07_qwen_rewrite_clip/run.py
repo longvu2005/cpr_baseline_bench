@@ -34,7 +34,7 @@ from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "qwen25vl_rewrite_clip"
-ADAPTER_VERSION = "2026-08-13-v1-fixed-prompt-offline"
+ADAPTER_VERSION = "2026-08-14-v2-qwen-4bit"
 REWRITE_CACHE_SCHEMA = 1
 TEXT_FEATURE_CACHE_SCHEMA = 1
 CLIP_GALLERY_CACHE_SCHEMA = 2  # intentionally identical to existing CLIP baselines
@@ -283,7 +283,11 @@ def generate_rewritten_queries(
 
     try:
         from qwen_vl_utils import process_vision_info
-        from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+        from transformers import (
+            AutoProcessor,
+            BitsAndBytesConfig,
+            Qwen2_5_VLForConditionalGeneration,
+        )
     except ImportError as error:
         raise RuntimeError(
             "Missing Qwen runtime dependency. Run S7 through run_baseline.py so requirements are installed."
@@ -292,19 +296,60 @@ def generate_rewritten_queries(
     mllm = cfg["mllm"]
     processor_cfg = mllm["processor"]
     generation_cfg = mllm["generation"]
+    runtime_cfg = cfg["runtime"]
     processor = AutoProcessor.from_pretrained(
         str(checkpoint_dir),
         min_pixels=int(processor_cfg["min_pixels"]),
         max_pixels=int(processor_cfg["max_pixels"]),
         local_files_only=True,
     )
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        str(checkpoint_dir),
-        torch_dtype=qwen_dtype(cfg["runtime"]["qwen_dtype"]),
-        attn_implementation=str(cfg["runtime"].get("qwen_attn_implementation", "sdpa")),
-        local_files_only=True,
-    ).to(device)
+
+    model_dtype = qwen_dtype(runtime_cfg["qwen_dtype"])
+    quantization_mode = str(runtime_cfg.get("qwen_quantization", "none")).lower()
+    load_kwargs: dict[str, Any] = {
+        "torch_dtype": model_dtype,
+        "attn_implementation": str(runtime_cfg.get("qwen_attn_implementation", "sdpa")),
+        "local_files_only": True,
+        "low_cpu_mem_usage": True,
+    }
+
+    if quantization_mode == "4bit":
+        compute_dtype = qwen_dtype(
+            runtime_cfg.get("qwen_4bit_compute_dtype", runtime_cfg["qwen_dtype"])
+        )
+        load_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type=str(runtime_cfg.get("qwen_4bit_quant_type", "nf4")),
+            bnb_4bit_compute_dtype=compute_dtype,
+            bnb_4bit_use_double_quant=bool(
+                runtime_cfg.get("qwen_4bit_use_double_quant", True)
+            ),
+        )
+        # Quantized bitsandbytes models must be placed by Accelerate during
+        # from_pretrained(); calling model.to(cuda) afterwards is not reliable
+        # across Transformers/bitsandbytes versions.
+        load_kwargs["device_map"] = {"": device.index if device.index is not None else 0}
+        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            str(checkpoint_dir), **load_kwargs
+        )
+    elif quantization_mode == "none":
+        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            str(checkpoint_dir), **load_kwargs
+        ).to(device)
+    else:
+        raise ValueError(
+            f"Unsupported runtime.qwen_quantization={quantization_mode!r}; "
+            "expected '4bit' or 'none'"
+        )
+
     model.eval()
+    footprint_gib = model.get_memory_footprint() / (1024**3)
+    print(
+        f"[{METHOD_ID}] Qwen load mode={quantization_mode} "
+        f"dtype={str(model_dtype).removeprefix('torch.')} "
+        f"model_footprint={footprint_gib:.2f} GiB",
+        flush=True,
+    )
 
     text_field = str(mllm["input_text_field"])
     captions: list[str] = []

@@ -5,6 +5,7 @@ torch
 torchvision
 tqdm
 accelerate>=1.2,<2
+bitsandbytes==0.45.5
 huggingface_hub>=0.28,<1
 transformers==4.50.3
 qwen-vl-utils==0.0.10

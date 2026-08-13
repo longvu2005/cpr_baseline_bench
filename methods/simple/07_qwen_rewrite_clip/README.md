@@ -29,6 +29,10 @@ This is a **simple benchmark pipeline**, not an exact reproduction of a publishe
 - pinned revision: `cc594898137f460bfe9f0759e9844b3ce807cfb5`;
 - license: Apache-2.0;
 - inference API: Hugging Face Transformers `Qwen2_5_VLForConditionalGeneration` + `AutoProcessor`;
+- inference memory mode: bitsandbytes 4-bit NF4 weights with double quantization;
+- non-quantized / compute dtype: FP16, fixed in `config.yaml`;
+- the pinned Qwen checkpoint and architecture are unchanged; quantization is applied only
+  when the frozen model is loaded for inference so S7 fits a 16 GB-class CUDA GPU;
 - no fine-tuning or CPR supervision.
 
 The full official snapshot is prepared under:

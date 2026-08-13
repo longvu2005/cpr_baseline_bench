@@ -36,8 +36,12 @@ retriever:
 
 runtime:
   device: cuda
-  qwen_dtype: bfloat16
+  qwen_dtype: float16
   qwen_attn_implementation: sdpa
+  qwen_quantization: 4bit
+  qwen_4bit_quant_type: nf4
+  qwen_4bit_compute_dtype: float16
+  qwen_4bit_use_double_quant: true
   clip_image_batch_size: 64
   clip_text_batch_size: 256
   clip_score_batch_size: 512
