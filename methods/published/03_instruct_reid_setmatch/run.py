@@ -561,6 +561,7 @@ def load_official_instruct_model(
     bert_dir: Path,
     config_bert: Path,
     device: torch.device,
+    move_to_device: bool = True,
 ):
     checkout_text = str(checkout)
     if checkout_text not in sys.path:
@@ -568,13 +569,27 @@ def load_official_instruct_model(
 
     from reid import models  # type: ignore
     import reid.models.pass_transformer_joint as joint  # type: ignore
+    import reid.models.tokenization_bert as official_tokenization  # type: ignore
     from reid.utils.serialization import copy_state_dict  # type: ignore
 
     # The released source contains literal '<your project root> ...' placeholders.
-    # Keep the checkout immutable and redirect only those three constructor calls.
+    # Keep the checkout immutable and redirect only those constructor calls.
+    #
+    # Instruct-ReID's pinned slow BertTokenizer was written against Transformers
+    # 4.31: it initializes ``self.vocab`` *after* ``PreTrainedTokenizer.__init__``.
+    # Transformers 4.39 calls ``get_vocab()`` from the parent constructor, so on
+    # Python 3.12 (where we use 4.39 to obtain binary tokenizers wheels) the
+    # original ordering raises ``AttributeError: ... has no attribute 'vocab'``.
+    # Seed the exact official vocabulary before entering the original constructor;
+    # the original initializer then continues unchanged and re-loads the same file.
+    original_tokenizer_init = joint.BertTokenizer.__init__
     original_tokenizer = joint.BertTokenizer.from_pretrained
     original_bert_model = joint.BertForMaskedLM.from_pretrained
     original_bert_config = joint.BertConfig.from_json_file
+
+    def tokenizer_init_compat(self, vocab_file, *args, **kwargs):
+        self.vocab = official_tokenization.load_vocab(vocab_file)
+        return original_tokenizer_init(self, vocab_file, *args, **kwargs)
 
     def tokenizer_local(cls, _upstream_placeholder, *args, **kwargs):
         return original_tokenizer(str(bert_dir), *args, **kwargs)
@@ -585,6 +600,7 @@ def load_official_instruct_model(
     def bert_config_local(cls, _upstream_placeholder, *args, **kwargs):
         return original_bert_config(str(config_bert), *args, **kwargs)
 
+    joint.BertTokenizer.__init__ = tokenizer_init_compat
     joint.BertTokenizer.from_pretrained = classmethod(tokenizer_local)
     joint.BertForMaskedLM.from_pretrained = classmethod(bert_model_local)
     joint.BertConfig.from_json_file = classmethod(bert_config_local)
@@ -603,11 +619,14 @@ def load_official_instruct_model(
         )
         copy_state_dict(checkpoint["state_dict"], model, strip="module.")
     finally:
+        joint.BertTokenizer.__init__ = original_tokenizer_init
         joint.BertTokenizer.from_pretrained = original_tokenizer
         joint.BertForMaskedLM.from_pretrained = original_bert_model
         joint.BertConfig.from_json_file = original_bert_config
 
-    model.to(device).eval()
+    model.eval()
+    if move_to_device:
+        model.to(device)
     return model
 
 
@@ -977,7 +996,7 @@ def validate_scores(scores: np.ndarray, shape: tuple[int, int]) -> None:
 
 
 def main() -> None:
-    tracker = PhaseTracker(METHOD_ID, total=8)
+    tracker = PhaseTracker(METHOD_ID, total=9)
 
     with tracker.phase("Load config, manifests, and prepared artifacts"):
         parser = argparse.ArgumentParser()
@@ -1015,6 +1034,24 @@ def main() -> None:
         )
         device = device_from(str(cfg["runtime"]["device"]))
         tracker.log(f"gallery={len(gallery):,} queries={len(queries):,} device={device}")
+
+    # Construct and load the complete official model on CPU before any expensive
+    # detector/selector work. This makes dependency/checkpoint incompatibilities
+    # fail in seconds rather than after the full gallery has consumed GPU time.
+    with tracker.phase("Preflight pinned official Instruct-ReID model on CPU"):
+        model = load_official_instruct_model(
+            cfg=cfg,
+            checkout=checkout,
+            checkpoint_path=checkpoint_path,
+            bert_dir=bert_dir,
+            config_bert=config_bert,
+            device=device,
+            move_to_device=False,
+        )
+        tracker.log(
+            f"architecture={cfg['model']['architecture']} task={cfg['model']['test_task_type']} "
+            f"feature_dim={cfg['model']['feature_dim']} constructor=ok"
+        )
 
     with tracker.phase("Detect predicted person instances"):
         detection_cache = resolve_path(str(cfg["cache"]["detections"]))
@@ -1069,19 +1106,9 @@ def main() -> None:
         del selector_model
         torch.cuda.empty_cache()
 
-    with tracker.phase("Load pinned official Instruct-ReID inference model"):
-        model = load_official_instruct_model(
-            cfg=cfg,
-            checkout=checkout,
-            checkpoint_path=checkpoint_path,
-            bert_dir=bert_dir,
-            config_bert=config_bert,
-            device=device,
-        )
-        tracker.log(
-            f"architecture={cfg['model']['architecture']} task={cfg['model']['test_task_type']} "
-            f"feature_dim={cfg['model']['feature_dim']}"
-        )
+    with tracker.phase("Move pinned official Instruct-ReID model to CUDA"):
+        model.to(device).eval()
+        tracker.log(f"model_device={device}")
 
     with tracker.phase("Encode gallery person fusion features"):
         gallery_cache = resolve_path(str(cfg["cache"]["gallery_features"]))
