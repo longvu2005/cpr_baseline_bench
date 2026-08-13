@@ -22,5 +22,6 @@ yapf==0.40.1
 opencv-python==4.10.0.84
 pycocotools
 
-# Official Grounding DINO package at the exact source commit used by this adapter.
-git+https://github.com/IDEA-Research/GroundingDINO.git@856dde20aee659246248e20734ef9ba5214f5e44
+# Grounding DINO itself is NOT installed as a wheel here.
+# download_checkpoint.py clones the exact pinned official commit and run.py imports
+# that checkout directly. This avoids fragile CUDA/C++ wheel builds on Python 3.12.

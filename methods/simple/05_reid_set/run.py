@@ -41,7 +41,7 @@ from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "groundingdino_clipreid_set"
-ADAPTER_VERSION = "2026-08-13-v1-textfree-setmatch"
+ADAPTER_VERSION = "2026-08-13-v2-py312-source-setmatch"
 DETECTION_CACHE_SCHEMA = 1
 FEATURE_CACHE_SCHEMA = 1
 
@@ -187,6 +187,73 @@ def ensure_clean_pinned_source(source: dict[str, Any], label: str) -> Path:
     return checkout
 
 
+def configure_groundingdino_source(source_root: Path) -> str:
+    """Import Grounding DINO from the pinned checkout without building a wheel.
+
+    The upstream package tries to compile its optional CUDA/C++ extension during
+    pip installation.  That wheel build is fragile on hosted Python 3.12
+    environments.  The pinned source already contains an equivalent PyTorch
+    implementation of multi-scale deformable attention, so use it when the
+    custom extension is unavailable.
+
+    Returns the attention backend name for cache/reproducibility metadata.
+    """
+
+    source_text = str(source_root)
+    if source_text in sys.path:
+        sys.path.remove(source_text)
+    sys.path.insert(0, source_text)
+
+    # Import the exact module from the pinned checkout.  It may emit the
+    # upstream "custom C++ ops" warning before we install the explicit fallback.
+    import groundingdino  # type: ignore
+    from groundingdino.models.GroundingDINO import ms_deform_attn as msda  # type: ignore
+
+    package_root = Path(groundingdino.__file__).resolve().parent
+    expected_root = (source_root / "groundingdino").resolve()
+    if package_root != expected_root:
+        raise RuntimeError(
+            "Grounding DINO import did not resolve to the pinned checkout: "
+            f"expected {rel(expected_root)}, got {rel(package_root)}"
+        )
+
+    try:
+        from groundingdino import _C as _groundingdino_c  # type: ignore
+        getattr(_groundingdino_c, "ms_deform_attn_forward")
+    except Exception as error:
+        class _PytorchMSDeformAttnFunction:
+            @staticmethod
+            def apply(
+                value: torch.Tensor,
+                value_spatial_shapes: torch.Tensor,
+                value_level_start_index: torch.Tensor,
+                sampling_locations: torch.Tensor,
+                attention_weights: torch.Tensor,
+                im2col_step: int,
+            ) -> torch.Tensor:
+                del value_level_start_index, im2col_step
+                return msda.multi_scale_deformable_attn_pytorch(
+                    value,
+                    value_spatial_shapes,
+                    sampling_locations,
+                    attention_weights,
+                )
+
+        # MultiScaleDeformableAttention.forward resolves this module global at
+        # call time, so replacing it here affects model inference without
+        # modifying the pinned official checkout.
+        msda.MultiScaleDeformableAttnFunction = _PytorchMSDeformAttnFunction
+        print(
+            "[warn] Grounding DINO custom CUDA/C++ op is unavailable; "
+            "using the official pure-PyTorch deformable-attention fallback. "
+            f"Original import error: {type(error).__name__}: {error}",
+            flush=True,
+        )
+        return "official_pytorch_fallback"
+
+    return "official_custom_cuda_op"
+
+
 def require_file(path: Path, label: str) -> Path:
     if not path.is_file() or path.stat().st_size <= 0:
         raise FileNotFoundError(
@@ -246,6 +313,7 @@ def detection_fingerprint(
     gallery_manifest: Path,
     detector_config: Path,
     detector_checkpoint: Path,
+    attention_backend: str,
 ) -> dict[str, Any]:
     detector_cfg = cfg["detector"]
     payload = {
@@ -256,6 +324,7 @@ def detection_fingerprint(
         "groundingdino_source_commit": str(cfg["source"]["groundingdino"]["commit"]),
         "detector_config_sha256": sha256_file(detector_config),
         "detector_checkpoint_sha256": sha256_file(detector_checkpoint),
+        "attention_backend": attention_backend,
         "detector": {
             "text_prompt": str(detector_cfg["text_prompt"]),
             "box_threshold": float(detector_cfg["box_threshold"]),
@@ -880,11 +949,12 @@ def main() -> None:
                 "This S5 adapter requires CUDA because the pinned official CLIP-ReID "
                 "implementation constructs the ViT backbone on CUDA."
             )
+        gdino_attention_backend = configure_groundingdino_source(gdino_source)
         output_dir = resolve_path(str(cfg["output"]["dir"]))
         output_dir.mkdir(parents=True, exist_ok=True)
         tracker.log(
             f"gallery={len(gallery):,} queries={len(queries):,} device={device} "
-            f"text_used=no"
+            f"gdino_attention={gdino_attention_backend} text_used=no"
         )
 
     with tracker.phase("Detect all persons with Grounding DINO"):
@@ -895,6 +965,7 @@ def main() -> None:
             gallery_manifest=gallery_manifest,
             detector_config=detector_config,
             detector_checkpoint=detector_checkpoint,
+            attention_backend=gdino_attention_backend,
         )
         cached = load_detection_cache(detection_cache, detect_meta, len(gallery))
         detection_cache_hit = cached is not None
@@ -990,6 +1061,8 @@ def main() -> None:
                 **cfg["detector"],
                 "config_path": rel(detector_config),
                 "checkpoint_sha256": sha256_file(detector_checkpoint),
+                "attention_backend": gdino_attention_backend,
+                "source_import_mode": "pinned_checkout_direct",
             },
             "reid": {
                 **cfg["reid"],

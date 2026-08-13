@@ -100,7 +100,7 @@ Feature cache validity additionally depends on the exact detection cache, pinned
 
 `download_checkpoint.py` prepares all networked artifacts before inference:
 
-- pinned Grounding DINO source checkout;
+- pinned Grounding DINO source checkout (imported directly by `run.py`; it is not built as a pip wheel);
 - pinned CLIP-ReID source checkout;
 - official Grounding DINO Swin-T checkpoint;
 - official MSMT17 CLIP-ReID ViT-B/16 checkpoint;
@@ -155,3 +155,5 @@ outputs/groundingdino_clipreid_set/run.json
 ## Important runtime note
 
 The pinned official CLIP-ReID ViT implementation constructs parts of the model directly on CUDA. Therefore this adapter intentionally requires a CUDA runtime rather than pretending to support CPU/MPS through an unverified rewrite of the official implementation.
+
+Grounding DINO is imported directly from the pinned official checkout instead of being installed as a wheel. During artifact preparation, `download_checkpoint.py` makes a best-effort in-place build of the optional CUDA/C++ `_C` extension; build failure is non-fatal. If `_C` is usable, inference uses it. Otherwise `run.py` switches only the deformable-attention call to Grounding DINO's own pure-PyTorch fallback implementation. The selected backend is recorded in the detection-cache fingerprint and `run.json`, so caches are not silently mixed across backends.

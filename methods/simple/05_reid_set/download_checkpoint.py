@@ -25,6 +25,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+import torch
 import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -129,6 +130,101 @@ def prepare_source(source: dict[str, Any], label: str) -> Path:
 
     print(f"[ok] {label} source pinned at {expected[:12]} ({rel(checkout)})", flush=True)
     return checkout
+
+
+def groundingdino_extension_usable(source_root: Path) -> bool:
+    """Return whether the pinned checkout exposes a loadable custom `_C` op."""
+
+    env = os.environ.copy()
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        str(source_root)
+        if not existing
+        else os.pathsep.join([str(source_root), existing])
+    )
+    probe = (
+        "from groundingdino import _C; "
+        "assert hasattr(_C, 'ms_deform_attn_forward')"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def prepare_groundingdino_extension(source_root: Path) -> str:
+    """Best-effort in-place build of Grounding DINO's optional CUDA extension.
+
+    A failed build is intentionally non-fatal because run.py can use the
+    official pure-PyTorch deformable-attention implementation.  Building
+    in-place avoids pip's wheel-building path while preserving the fast custom
+    CUDA op when the hosted runtime has a compatible compiler/toolkit.
+    """
+
+    if groundingdino_extension_usable(source_root):
+        print("[skip] Grounding DINO custom CUDA/C++ op already usable", flush=True)
+        return "already_available"
+
+    try:
+        from torch.utils.cpp_extension import CUDA_HOME
+    except Exception as error:
+        print(
+            f"[warn] cannot inspect CUDA build toolchain ({type(error).__name__}: {error}); "
+            "run.py will use the PyTorch fallback",
+            flush=True,
+        )
+        return "fallback"
+
+    if CUDA_HOME is None or not torch.cuda.is_available():
+        print(
+            "[warn] CUDA build toolchain/runtime unavailable; "
+            "run.py will use the Grounding DINO PyTorch fallback",
+            flush=True,
+        )
+        return "fallback"
+
+    nvcc = Path(CUDA_HOME) / "bin" / "nvcc"
+    if not nvcc.is_file():
+        print(
+            f"[warn] nvcc not found at {nvcc}; "
+            "run.py will use the Grounding DINO PyTorch fallback",
+            flush=True,
+        )
+        return "fallback"
+
+    env = os.environ.copy()
+    env.setdefault("MAX_JOBS", "2")
+    try:
+        major, minor = torch.cuda.get_device_capability()
+        env.setdefault("TORCH_CUDA_ARCH_LIST", f"{major}.{minor}")
+    except Exception:
+        pass
+
+    print(
+        "[build] Grounding DINO custom CUDA/C++ op in-place "
+        "(best effort; failure falls back to pure PyTorch)",
+        flush=True,
+    )
+    result = subprocess.run(
+        [sys.executable, "setup.py", "build_ext", "--inplace"],
+        cwd=source_root,
+        env=env,
+        check=False,
+    )
+    if result.returncode == 0 and groundingdino_extension_usable(source_root):
+        print("[ok] Grounding DINO custom CUDA/C++ op built in-place", flush=True)
+        return "built"
+
+    print(
+        f"[warn] Grounding DINO extension build returned {result.returncode}; "
+        "continuing with the official PyTorch fallback",
+        flush=True,
+    )
+    return "fallback"
 
 
 def download_stream(
@@ -380,7 +476,7 @@ def prewarm_groundingdino_runtime(
 
 
 def prepare(config_path: Path, force: bool) -> None:
-    tracker = PhaseTracker("groundingdino_clipreid_prepare", total=6)
+    tracker = PhaseTracker("groundingdino_clipreid_prepare", total=7)
     cfg = load_yaml(config_path)
 
     tracker.advance("Pin official Grounding DINO source")
@@ -388,6 +484,9 @@ def prepare(config_path: Path, force: bool) -> None:
     detector_config = gdino_source / str(cfg["detector"]["config"])
     if not detector_config.is_file():
         raise FileNotFoundError(detector_config)
+
+    tracker.advance("Prepare Grounding DINO CUDA extension (best effort)")
+    prepare_groundingdino_extension(gdino_source)
 
     tracker.advance("Pin official CLIP-ReID source")
     clipreid_source = prepare_source(cfg["source"]["clip_reid"], "CLIP-ReID")
