@@ -1,0 +1,56 @@
+method: pic2word
+display_name: Pic2Word
+group: Published / SOTA Baselines
+cpr_supervision: 'No'
+
+paper:
+  title: 'Pic2Word: Mapping Pictures to Words for Zero-shot Composed Image Retrieval'
+  venue: CVPR 2023
+  arxiv: '2302.03084'
+
+source:
+  repository: https://github.com/google-research/composed_image_retrieval.git
+  commit: 8c053297c2fae9cd17ddcded48445a4f47208dbd
+  local_checkout: runs/pic2word/official_source/composed_image_retrieval
+  auto_clone: true
+
+checkpoint:
+  path: checkpoints/pic2word/pic2word_pretrained.pt
+  google_drive_id: 1IxRi2Cj81RxMu0ViT4q4nkfyjbSHm1dF
+  source_url: https://drive.google.com/file/d/1IxRi2Cj81RxMu0ViT4q4nkfyjbSHm1dF/view?usp=sharing
+  status: OFFICIAL_RELEASED
+  prepared_marker: checkpoints/pic2word/prepared.json
+
+model:
+  backbone: ViT-L/14
+  openai_clip_checkpoint: checkpoints/clip/ViT-L-14.pt
+  openai_clip_sha256: b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836
+  im2text:
+    middle_dim: 512
+    n_layer: 2
+    dropout: 0.1
+
+composition:
+  text_field: text
+  prompt_template: 'a photo of * , {modification}'
+  placeholder: '*'
+  normalize_query: true
+  normalize_gallery: true
+
+runtime:
+  device: cuda
+  gallery_batch_size: 64
+  query_batch_size: 64
+  score_batch_size: 256
+  num_workers: 4
+
+cache:
+  gallery_features: runs/pic2word/cache/gallery_features.npy
+  query_features: runs/pic2word/cache/query_features.npy
+
+data:
+  gallery_manifest: data/gallery.jsonl
+  query_manifest: data/queries.jsonl
+
+output:
+  dir: runs/pic2word

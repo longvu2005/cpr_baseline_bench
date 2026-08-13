@@ -1,0 +1,29 @@
+# Union runtime for S5 (Grounding DINO + CLIP-ReID) and S8 (Qwen Image Edit + CLIP).
+numpy>=1.24,<2
+pillow
+pyyaml
+torch
+torchvision
+tqdm
+scipy>=1.10
+gdown>=5.2,<7
+yacs
+timm==0.9.16
+ftfy
+regex
+scikit-image
+ninja
+accelerate>=1.2,<2
+huggingface_hub>=0.28,<1
+transformers==4.50.3
+diffusers>=0.35.0
+safetensors
+supervision==0.22.0
+addict
+yapf==0.40.1
+opencv-python==4.10.0.84
+pycocotools
+
+# Official packages pinned to the same commits already used elsewhere in the benchmark.
+git+https://github.com/IDEA-Research/GroundingDINO.git@856dde20aee659246248e20734ef9ba5214f5e44
+git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33

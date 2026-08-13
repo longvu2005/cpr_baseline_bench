@@ -1,0 +1,65 @@
+method: retrieve_qwen25vl_rerank
+display_name: Retrieve + Qwen2.5-VL Rerank
+group: Simple / Obvious Baselines
+cpr_supervision: 'Val only'
+
+first_stage:
+  method: groundingdino_clipreid_set_text
+  scores: runs/groundingdino_clipreid_set_text/scores.npy
+  run: runs/groundingdino_clipreid_set_text/run.json
+  alpha_selection: runs/groundingdino_clipreid_set_text/alpha_selection.json
+  validation:
+    reid_scores: runs/groundingdino_clipreid_set_text/cache/val_reid_set_scores.npy
+    clip_text_scores: runs/groundingdino_clipreid_set_text/cache/val_clip_text_scores.npy
+
+verifier:
+  repo_id: Qwen/Qwen2.5-VL-7B-Instruct
+  revision: cc594898137f460bfe9f0759e9844b3ce807cfb5
+  checkpoint_dir: checkpoints/qwen/Qwen2.5-VL-7B-Instruct
+  prepared_marker: checkpoints/qwen/Qwen2.5-VL-7B-Instruct.prepared.json
+  processor:
+    min_pixels: 200704
+    max_pixels: 1003520
+  generation:
+    max_new_tokens: 12
+    do_sample: false
+    num_beams: 1
+    repetition_penalty: 1.0
+  prompt_template: |-
+    You are a strict verifier for composed person image retrieval.
+    Image 1 is the reference/query scene. Image 2 is one candidate gallery scene.
+    The instruction describes the desired target scene relative to Image 1.
+    Judge how well Image 2 satisfies the request. Pay special attention to preserving the required person identity or identities, the requested appearance/action/context changes, and any requested multi-person relation.
+    Strongly penalize wrong identity, missing required people, unrelated extra people that change the requested composition, incorrect attributes, incorrect action/context, or incorrect relation.
+    Return exactly one line in the form SCORE=N where N is an integer from 0 to 100. Return nothing else.
+
+    Instruction: {instruction}
+
+rerank:
+  top_k_grid: [5, 10, 20]
+  first_stage_weight_grid: [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.0]
+  first_stage_prior: linear_rank_within_topk
+  verifier_normalization: divide_by_100
+  metric: Full-mAP
+  tie_break: smallest_top_k_then_largest_first_stage_weight
+  result: runs/retrieve_qwen25vl_rerank/rerank_selection.json
+  validation:
+    gallery_manifest: data/validation/gallery.jsonl
+    query_manifest: data/validation/queries.jsonl
+
+runtime:
+  device: cuda
+  qwen_dtype: bfloat16
+  qwen_attn_implementation: sdpa
+
+cache:
+  validation_first_stage_scores: runs/retrieve_qwen25vl_rerank/cache/val_s6_scores.npy
+  validation_verifier: runs/retrieve_qwen25vl_rerank/cache/val_qwen_verifier.npz
+  main_verifier: runs/retrieve_qwen25vl_rerank/cache/main_qwen_verifier.npz
+
+data:
+  gallery_manifest: data/gallery.jsonl
+  query_manifest: data/queries.jsonl
+
+output:
+  dir: runs/retrieve_qwen25vl_rerank

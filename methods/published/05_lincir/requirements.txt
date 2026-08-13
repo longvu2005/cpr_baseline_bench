@@ -1,0 +1,15 @@
+# Minimal inference dependencies for the pinned official LinCIR large checkpoint.
+numpy>=1.24,<2
+pillow
+pyyaml
+torch
+torchvision
+tqdm
+transformers==4.39.3
+huggingface_hub>=0.28,<1
+safetensors>=0.4,<1
+ftfy
+regex
+
+# LinCIR's official evaluation code uses OpenAI CLIP tokenization for CIR prompts.
+git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33

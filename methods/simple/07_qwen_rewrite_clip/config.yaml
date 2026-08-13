@@ -1,0 +1,56 @@
+method: qwen25vl_rewrite_clip
+display_name: Qwen2.5-VL Rewrite + CLIP ViT-L/14
+group: Simple / Obvious Baselines
+cpr_supervision: 'No'
+
+mllm:
+  repo_id: Qwen/Qwen2.5-VL-7B-Instruct
+  revision: cc594898137f460bfe9f0759e9844b3ce807cfb5
+  checkpoint_dir: checkpoints/qwen/Qwen2.5-VL-7B-Instruct
+  prepared_marker: checkpoints/qwen/Qwen2.5-VL-7B-Instruct.prepared.json
+  license: Apache-2.0
+  input_text_field: text
+  processor:
+    min_pixels: 200704       # 256 * 28 * 28
+    max_pixels: 1003520      # 1280 * 28 * 28
+  generation:
+    max_new_tokens: 96
+    do_sample: false
+    num_beams: 1
+    repetition_penalty: 1.0
+  prompt_template: |-
+    You are rewriting a composed person-retrieval query for image retrieval.
+    The provided image is the full reference scene. The modification text describes the desired target image relative to that reference.
+    Write exactly one concise, standalone English sentence describing the target image that should be retrieved.
+    Preserve visually useful appearance details of the relevant person or people from the reference scene when they remain applicable, and apply the requested modification faithfully.
+    Include multiple people and their relationship when the request requires them.
+    Describe only visible target-image content. Do not mention the reference image, the query, the modification, reasoning, uncertainty, or these instructions.
+    Output only the rewritten target-image description, with no label, preface, bullet, or explanation.
+
+    Modification text: {modification}
+
+retriever:
+  name: ViT-L/14
+  checkpoint: checkpoints/clip/ViT-L-14.pt
+  checkpoint_sha256: b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836
+
+runtime:
+  device: cuda
+  qwen_dtype: bfloat16
+  qwen_attn_implementation: sdpa
+  clip_image_batch_size: 64
+  clip_text_batch_size: 256
+  clip_score_batch_size: 512
+  num_workers: 4
+
+cache:
+  rewritten_queries: runs/qwen25vl_rewrite_clip/cache/rewritten_queries.jsonl
+  rewritten_text_features: runs/qwen25vl_rewrite_clip/cache/rewritten_text_features.npy
+  gallery_features: runs/clip_image/gallery_features_vit_l14.npy
+
+data:
+  gallery_manifest: data/gallery.jsonl
+  query_manifest: data/queries.jsonl
+
+output:
+  dir: runs/qwen25vl_rewrite_clip

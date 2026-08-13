@@ -1,0 +1,72 @@
+method: lincir
+display_name: LinCIR
+group: Published / SOTA Baselines
+cpr_supervision: 'No'
+
+paper:
+  title: 'Language-only Training of Zero-shot Composed Image Retrieval'
+  venue: CVPR 2024
+  arxiv: '2312.01998'
+
+source:
+  repository: https://github.com/navervision/lincir.git
+  commit: 1dec42d118da816be2a43fd43cc0746e05f63881
+  local_checkout: runs/lincir/official_source/lincir
+  auto_clone: true
+  license: CC-BY-NC-4.0
+
+checkpoint:
+  path: checkpoints/lincir/lincir_large.pt
+  hf_repo_id: navervision/zeroshot-cir-models
+  hf_revision: 5118df4683de6efa09f8e5336d86ca626ed21c44
+  hf_filename: lincir_large.pt
+  sha256: 5ba98d52db7a5e9a78f9ba7436991235477b89544caf246e4659642bf9b409bd
+  size_bytes: 56653151
+  status: OFFICIAL_RELEASED
+  prepared_marker: checkpoints/lincir/prepared.json
+
+backbone:
+  size: large
+  hf_repo_id: openai/clip-vit-large-patch14
+  hf_revision: 32bd64288804d66eefd0ccbe215aa642df71cc41
+  local_snapshot: checkpoints/lincir/hf/clip-vit-large-patch14
+  model_file: model.safetensors
+  model_sha256: a2bf730a0c7debf160f7a6b50b3aaf3703e7e88ac73de7a314903141db026dcb
+  projection_dim: 768
+  text_hidden_size: 768
+  image_size: 224
+
+phi:
+  input_dim: 768
+  hidden_dim: 3072
+  output_dim: 768
+  dropout: 0.5
+  l2_normalize_input: false
+
+composition:
+  text_field: text
+  placeholder: '$'
+  placeholder_token_id: 259
+  prompt_template: 'a photo of $ that {modification}'
+  normalize_query: true
+  normalize_gallery: true
+
+runtime:
+  device: cuda
+  mixed_precision: fp16
+  gallery_batch_size: 64
+  query_batch_size: 64
+  score_batch_size: 256
+  num_workers: 4
+  feature_cache_dtype: float32
+
+cache:
+  gallery_features: runs/lincir/cache/gallery_features.npy
+  query_features: runs/lincir/cache/query_features.npy
+
+data:
+  gallery_manifest: data/gallery.jsonl
+  query_manifest: data/queries.jsonl
+
+output:
+  dir: runs/lincir

@@ -1,0 +1,81 @@
+method: per_person_clip_compose_setmatch
+display_name: Per-Person CLIP Compose + SetMatch
+group: Simple / Obvious Baselines
+cpr_supervision: 'Val only'
+
+shared_protocol:
+  method: groundingdino_clipreid_set
+  method_dir: methods/simple/05_groundingdino_clipreid_set
+  config: methods/simple/05_groundingdino_clipreid_set/config.yaml
+
+clip:
+  name: ViT-L/14
+  checkpoint: checkpoints/clip/ViT-L-14.pt
+  checkpoint_sha256: b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836
+
+composition:
+  formula: normalize(alpha * target_crop_image + (1 - alpha) * modification_text)
+  alpha_selection:
+    metric: Full-mAP
+    grid:
+      - 0.00
+      - 0.05
+      - 0.10
+      - 0.15
+      - 0.20
+      - 0.25
+      - 0.30
+      - 0.35
+      - 0.40
+      - 0.45
+      - 0.50
+      - 0.55
+      - 0.60
+      - 0.65
+      - 0.70
+      - 0.75
+      - 0.80
+      - 0.85
+      - 0.90
+      - 0.95
+      - 1.00
+    tie_break: smallest_alpha
+    result: runs/per_person_clip_compose_setmatch/alpha_selection.json
+    validation:
+      gallery_manifest: data/validation/gallery.jsonl
+      query_manifest: data/validation/queries.jsonl
+
+localization:
+  selector_text: subjects.select_text
+  assignment: hungarian_max_sum
+  require_distinct_persons: true
+
+setmatch:
+  pairwise_score: cosine_similarity
+  assignment: hungarian_max_sum
+  aggregation: strict_minimum
+  unmatched_score: -1.0
+  relational_text_behavior: full_instruction
+
+runtime:
+  device: cuda
+  clip_image_batch_size: 128
+  clip_text_batch_size: 256
+  num_workers: 4
+  feature_cache_dtype: float16
+  score_feature_chunk_size: 65536
+
+cache:
+  main:
+    detections: runs/groundingdino_clipreid_set/cache/person_detections.npz
+    person_features: runs/per_person_clip_compose_setmatch/cache/main_person_features.npy
+  validation:
+    detections: runs/per_person_clip_compose_setmatch/cache/val_person_detections.npz
+    person_features: runs/per_person_clip_compose_setmatch/cache/val_person_features.npy
+
+data:
+  gallery_manifest: data/gallery.jsonl
+  query_manifest: data/queries.jsonl
+
+output:
+  dir: runs/per_person_clip_compose_setmatch

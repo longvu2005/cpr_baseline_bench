@@ -1,0 +1,14 @@
+numpy
+pillow
+pyyaml
+torch
+torchvision
+tqdm
+accelerate>=1.2,<2
+huggingface_hub>=0.28,<1
+transformers==4.50.3
+qwen-vl-utils==0.0.10
+
+# Official OpenAI CLIP implementation, pinned to the same commit used by the
+# other ViT-L/14 simple baselines in this benchmark.
+git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33

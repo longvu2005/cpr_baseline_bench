@@ -1,0 +1,10 @@
+numpy>=1.24,<2
+pillow
+pyyaml
+torch
+torchvision
+tqdm
+accelerate>=1.2,<2
+huggingface_hub>=0.28,<1
+transformers==4.50.3
+qwen-vl-utils==0.0.10

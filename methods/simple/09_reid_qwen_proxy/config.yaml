@@ -1,0 +1,76 @@
+method: reid_set_qwen_edit_proxy
+display_name: ReID-Set + Qwen Edit Proxy
+group: Simple / Obvious Baselines
+cpr_supervision: 'Val only'
+
+base_set:
+  method: groundingdino_clipreid_set
+  method_dir: methods/simple/05_groundingdino_clipreid_set
+  config: methods/simple/05_groundingdino_clipreid_set/config.yaml
+  main_scores: runs/groundingdino_clipreid_set/scores.npy
+  main_run: runs/groundingdino_clipreid_set/run.json
+
+proxy:
+  method: qwen_image_edit_clip
+  method_dir: methods/simple/08_qwen_image_edit_clip
+  config: methods/simple/08_qwen_image_edit_clip/config.yaml
+  main_scores: runs/qwen_image_edit_clip/scores.npy
+  main_run: runs/qwen_image_edit_clip/run.json
+
+fusion:
+  formula: alpha * reid_set + (1 - alpha) * generated_proxy_similarity
+  score_normalization: none
+  alpha_selection:
+    metric: Full-mAP
+    grid:
+      - 0.00
+      - 0.05
+      - 0.10
+      - 0.15
+      - 0.20
+      - 0.25
+      - 0.30
+      - 0.35
+      - 0.40
+      - 0.45
+      - 0.50
+      - 0.55
+      - 0.60
+      - 0.65
+      - 0.70
+      - 0.75
+      - 0.80
+      - 0.85
+      - 0.90
+      - 0.95
+      - 1.00
+    tie_break: smallest_alpha
+    result: runs/reid_set_qwen_edit_proxy/alpha_selection.json
+    validation:
+      gallery_manifest: data/validation/gallery.jsonl
+      query_manifest: data/validation/queries.jsonl
+
+runtime:
+  device: cuda
+  proxy_generator_dtype: bfloat16
+  proxy_clip_image_batch_size: 64
+  proxy_clip_score_batch_size: 512
+  num_workers: 4
+
+cache:
+  validation:
+    reid_detections: runs/reid_set_qwen_edit_proxy/cache/val_person_detections.npz
+    reid_features: runs/reid_set_qwen_edit_proxy/cache/val_person_features.npy
+    reid_scores: runs/reid_set_qwen_edit_proxy/cache/val_reid_set_scores.npy
+    proxy_edited_queries_dir: runs/reid_set_qwen_edit_proxy/cache/val_proxy_edited_queries
+    proxy_edited_queries_manifest: runs/reid_set_qwen_edit_proxy/cache/val_proxy_edited_queries.jsonl
+    proxy_query_features: runs/reid_set_qwen_edit_proxy/cache/val_proxy_query_features.npy
+    proxy_gallery_features: runs/reid_set_qwen_edit_proxy/cache/val_proxy_gallery_features.npy
+    proxy_scores: runs/reid_set_qwen_edit_proxy/cache/val_proxy_scores.npy
+
+data:
+  gallery_manifest: data/gallery.jsonl
+  query_manifest: data/queries.jsonl
+
+output:
+  dir: runs/reid_set_qwen_edit_proxy

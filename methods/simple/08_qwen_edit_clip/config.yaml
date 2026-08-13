@@ -1,0 +1,54 @@
+method: qwen_image_edit_clip
+display_name: Qwen-Image-Edit-2509 + CLIP ViT-L/14
+group: Simple / Obvious Baselines
+cpr_supervision: 'No'
+
+generator:
+  repo_id: Qwen/Qwen-Image-Edit-2509
+  revision: main
+  checkpoint_dir: checkpoints/qwen/Qwen-Image-Edit-2509
+  prepared_marker: checkpoints/qwen/Qwen-Image-Edit-2509.prepared.json
+  pipeline_class: QwenImageEditPlusPipeline
+  license: Apache-2.0
+  input_text_field: text
+  prompt_template: |-
+    You are editing a reference scene into the desired target image for person retrieval.
+    Apply the requested modification faithfully.
+    Preserve the identity and visually useful appearance of the relevant person or people whenever they are not supposed to change.
+    Keep all required people present, preserve or update their relationship when the request requires it, and avoid adding unrelated extra people.
+    Produce a realistic edited image of the target scene.
+
+    Modification text: {modification}
+  negative_prompt: |-
+    blurry, low quality, distorted face, wrong identity, duplicate person, extra person, missing person, malformed hands, malformed body, incorrect relation, text, watermark
+  generation:
+    num_inference_steps: 30
+    guidance_scale: 4.0
+    seed: 42
+  output:
+    image_format: PNG
+
+retriever:
+  name: ViT-L/14
+  checkpoint: checkpoints/clip/ViT-L-14.pt
+  checkpoint_sha256: b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836
+
+runtime:
+  device: cuda
+  generator_dtype: bfloat16
+  clip_image_batch_size: 64
+  clip_score_batch_size: 512
+  num_workers: 4
+
+cache:
+  edited_queries_dir: runs/qwen_image_edit_clip/cache/edited_queries
+  edited_queries_manifest: runs/qwen_image_edit_clip/cache/edited_queries.jsonl
+  edited_query_features: runs/qwen_image_edit_clip/cache/edited_query_features.npy
+  gallery_features: runs/clip_image/gallery_features_vit_l14.npy
+
+data:
+  gallery_manifest: data/gallery.jsonl
+  query_manifest: data/queries.jsonl
+
+output:
+  dir: runs/qwen_image_edit_clip

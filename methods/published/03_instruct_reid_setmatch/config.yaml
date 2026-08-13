@@ -1,0 +1,108 @@
+method: instruct_reid_setmatch
+display_name: Instruct-ReID + SetMatch
+group: Published / SOTA Baselines
+cpr_supervision: 'No'
+
+paper:
+  title: 'Instruct-ReID: A Multi-purpose Person Re-identification Task with Instructions'
+  venue: CVPR 2024
+  arxiv: '2306.07520'
+
+source:
+  repository: https://github.com/hwz-zju/Instruct-ReID.git
+  commit: 8250f44a301a50d8afcd2e09a46c3e96bf52090d
+  local_checkout: runs/instruct_reid_setmatch/official_source/Instruct-ReID
+  auto_clone: true
+
+checkpoint:
+  path: checkpoints/instruct_reid/inference_language_reid.pth.tar
+  status: OFFICIAL_RELEASED
+  task: language_instructed_reid
+  official_test_task_type: attr
+  inference_folder_url: https://drive.google.com/drive/folders/1QBJ-GTI3Luvv-9c7_QJbhlx3ljo2t5kb?usp=drive_link
+  direct_file_url: null
+  discovery:
+    required_regex: '(?i)(attr|language|li[-_ ]?reid|real2)'
+    checkpoint_regex: '(?i)\.(pth|pt)(\.tar)?$'
+    exclude_regex: '(?i)(t2i|cuhk|market|msmt|ltcc|prcc|vc[_ -]?clothes|llcm|ctcc)'
+  prepared_marker: checkpoints/instruct_reid/inference_language_reid.prepared.json
+
+runtime_assets:
+  bert_dir: checkpoints/instruct_reid/bert-base-uncased
+  bert_weight_url: https://huggingface.co/google-bert/bert-base-uncased/resolve/main/pytorch_model.bin
+  config_bert: checkpoints/instruct_reid/config_bert.json
+
+model:
+  architecture: PASS_Transformer_DualAttn_joint
+  test_task_type: attr
+  validate_feat: fusion
+  feature_dim: 1536
+  image_size: [256, 128]
+  normalization_mean: [0.485, 0.456, 0.406]
+  normalization_std: [0.229, 0.224, 0.225]
+  official_text_max_words: 50
+  official_token_max_length: 70
+  args:
+    patch_size_clo: 16
+    stride_size_clo: 16
+    patch_size_bio: 16
+    stride_size_bio: 16
+    attn_type: dual_attn
+    fusion_loss: all
+    fusion_branch: bio+clot
+    vit_type: base
+    vit_fusion_layer: 2
+    test_feat_type: f
+    dropout_clo: 0.0
+    pool_clo: false
+
+localization:
+  detector:
+    backend: torchvision_fasterrcnn_resnet50_fpn_v2
+    score_threshold: 0.55
+    max_persons_per_image: 10
+    person_label: 1
+    checkpoint: checkpoints/torchvision/fasterrcnn_resnet50_fpn_v2_coco-dd69338a.pth
+    checkpoint_url: https://download.pytorch.org/models/fasterrcnn_resnet50_fpn_v2_coco-dd69338a.pth
+  query_selector:
+    backend: openai_clip
+    model: ViT-B/32
+    assignment: hungarian_max_sum
+    checkpoint: checkpoints/clip/ViT-B-32.pt
+    fallback_order: [select_text, modify_text, text]
+
+instruction_adapter:
+  query_instruction:
+    ordinary: subject.modify_text_then_query_text
+    relational: full_query_text_when_relation_text_present
+  gallery_instruction: 'Do not change clothes.'
+  gallery_instruction_source: native_traditional_reid_instruction_from_paper
+
+setmatch:
+  enabled: true
+  pairwise_metric: negative_squared_euclidean
+  assignment: hungarian_max_sum
+  aggregation: strict_minimum
+  unmatched_score: -1000000.0
+
+runtime:
+  device: cuda
+  detector_device: cuda
+  detector_batch_size: 1
+  selector_batch_size: 256
+  instruct_batch_size: 64
+  score_person_chunk_size: 8192
+  gallery_feature_dtype: float16
+
+cache:
+  detections: runs/instruct_reid_setmatch/cache/person_detections.npz
+  selector_features: runs/instruct_reid_setmatch/cache/selector_person_features.npy
+  gallery_features: runs/instruct_reid_setmatch/cache/gallery_instruct_features.npy
+  query_features: runs/instruct_reid_setmatch/cache/query_target_features.npz
+
+data:
+  gallery_manifest: data/gallery.jsonl
+  query_manifest: data/queries.jsonl
+
+output:
+  dir: runs/instruct_reid_setmatch

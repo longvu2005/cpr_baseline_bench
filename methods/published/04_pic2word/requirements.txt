@@ -1,0 +1,10 @@
+# Minimal inference dependencies for the pinned official Pic2Word source.
+numpy>=1.24,<2
+pillow
+pyyaml
+torch
+torchvision
+tqdm
+ftfy
+regex
+gdown>=5.2,<7
