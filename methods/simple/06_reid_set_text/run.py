@@ -375,6 +375,37 @@ def prepare_s5_scores(
         "OpenAI CLIP ViT-B/16 checkpoint",
     )
     s5.configure_groundingdino_offline(s5_cfg)
+    gdino_attention_backend = s5.configure_groundingdino_source(gdino_source)
+
+    # S6 calls S5 helpers directly instead of S5.main(). Preserve S5's
+    # fail-fast CLIP-ReID check, but run it lazily only if a cache miss would
+    # otherwise launch expensive detector/ReID inference.
+    preflight_shape: tuple[int, ...] | None = None
+
+    def ensure_clipreid_preflight() -> tuple[int, ...]:
+        nonlocal preflight_shape
+        if preflight_shape is not None:
+            return preflight_shape
+
+        preflight_model = s5.load_clipreid_model(
+            cfg=s5_cfg,
+            source_root=clipreid_source,
+            checkpoint=reid_checkpoint,
+            clip_backbone=clip_backbone,
+            device=device,
+        )
+        try:
+            preflight_shape = s5.validate_clipreid_forward(
+                model=preflight_model,
+                cfg=s5_cfg,
+                device=device,
+            )
+        finally:
+            del preflight_model
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+        assert preflight_shape is not None
+        return preflight_shape
 
     detect_meta = s5.detection_fingerprint(
         cfg=s5_cfg,
@@ -382,10 +413,12 @@ def prepare_s5_scores(
         gallery_manifest=gallery_manifest,
         detector_config=detector_config,
         detector_checkpoint=detector_checkpoint,
+        attention_backend=gdino_attention_backend,
     )
     cached_det = s5.load_detection_cache(detection_cache, detect_meta, len(gallery))
     detection_hit = cached_det is not None
     if cached_det is None:
+        ensure_clipreid_preflight()
         offsets, boxes, confidences = s5.compute_detections(
             cfg=s5_cfg,
             gallery=gallery,
@@ -408,6 +441,7 @@ def prepare_s5_scores(
     features = s5.load_feature_cache(feature_cache, feat_meta, expected_feature_shape)
     feature_hit = features is not None
     if features is None:
+        ensure_clipreid_preflight()
         features = s5.compute_reid_features(
             cfg=s5_cfg,
             gallery=gallery,
@@ -456,6 +490,10 @@ def prepare_s5_scores(
         "features_hit": feature_hit,
         "scores_hit": score_hit,
         "num_detected_persons": int(offsets[-1]),
+        "attention_backend": gdino_attention_backend,
+        "clipreid_preflight_shape": (
+            list(preflight_shape) if preflight_shape is not None else None
+        ),
     }
 
 
@@ -673,13 +711,10 @@ def main() -> None:
                     f"Expected: {rel(val_gallery_manifest)} and {rel(val_query_manifest)}\n"
                     "Do not point these paths at the canonical evaluation manifests."
                 )
-            if (
-                sha256_file(val_gallery_manifest) == sha256_file(gallery_manifest)
-                and sha256_file(val_query_manifest) == sha256_file(query_manifest)
-            ):
+            if sha256_file(val_query_manifest) == sha256_file(query_manifest):
                 raise RuntimeError(
-                    "Validation manifests are identical to canonical evaluation manifests; "
-                    "refusing to tune alpha on the evaluation set."
+                    "Validation query manifest is identical to the canonical evaluation "
+                    "query manifest; refusing to tune alpha on evaluation labels."
                 )
 
         cpr_supervision = "Val only" if alpha_mode == "validation" else "No"
@@ -706,10 +741,6 @@ def main() -> None:
             f"main={len(queries):,}x{len(gallery):,} alpha_mode={alpha_mode} "
             f"validation_manifests={validation_status} device={device}"
         )
-
-    with tracker.phase("Load OpenAI CLIP ViT-L/14"):
-        model, preprocess = clip.load(str(clip_checkpoint), device=device, jit=False)
-        model.eval()
 
     val_cache = None
     val_reid_scores = None
@@ -739,6 +770,26 @@ def main() -> None:
             tracker.log(f"validation_s5_cache={val_s5_stats}")
         else:
             tracker.log("skipped: alpha_selection.mode=fixed")
+
+    with tracker.phase("Prepare canonical ReID-Set branch"):
+        main_cache = cfg["cache"]["main"]
+        s5_main_cache = s5_cfg["cache"]
+        main_reid_scores, main_s5_stats = prepare_s5_scores(
+            s5=s5,
+            s5_cfg=s5_cfg,
+            s5_cfg_path=s5_cfg_path,
+            gallery_manifest=gallery_manifest,
+            query_manifest=query_manifest,
+            detection_cache=s5.resolve_path(str(s5_main_cache["detections"])),
+            feature_cache=s5.resolve_path(str(s5_main_cache["reid_features"])),
+            score_cache=resolve_path(str(main_cache["reid_set_scores"])),
+            device=device,
+        )
+        tracker.log(f"main_s5_cache={main_s5_stats}")
+
+    with tracker.phase("Load OpenAI CLIP ViT-L/14"):
+        model, preprocess = clip.load(str(clip_checkpoint), device=device, jit=False)
+        model.eval()
 
     with tracker.phase("Prepare validation CLIP text branch"):
         if alpha_mode == "validation":
@@ -778,7 +829,7 @@ def main() -> None:
         else:
             tracker.log("skipped: alpha_selection.mode=fixed")
 
-    with tracker.phase("Select alpha on validation Full-mAP"):
+    with tracker.phase("Resolve fusion alpha"):
         if alpha_mode == "validation":
             if (
                 val_gallery_manifest is None
@@ -820,22 +871,6 @@ def main() -> None:
     if alpha is None or alpha_meta is None:
         raise RuntimeError("Internal error: alpha selection did not produce a usable value")
 
-    with tracker.phase("Prepare canonical ReID-Set branch"):
-        main_cache = cfg["cache"]["main"]
-        s5_main_cache = s5_cfg["cache"]
-        main_reid_scores, main_s5_stats = prepare_s5_scores(
-            s5=s5,
-            s5_cfg=s5_cfg,
-            s5_cfg_path=s5_cfg_path,
-            gallery_manifest=gallery_manifest,
-            query_manifest=query_manifest,
-            detection_cache=s5.resolve_path(str(s5_main_cache["detections"])),
-            feature_cache=s5.resolve_path(str(s5_main_cache["reid_features"])),
-            score_cache=resolve_path(str(main_cache["reid_set_scores"])),
-            device=device,
-        )
-        tracker.log(f"main_s5_cache={main_s5_stats}")
-
     with tracker.phase("Prepare canonical CLIP text branch and fuse scores"):
         main_clip_gallery, main_clip_gallery_hit = prepare_clip_gallery_features(
             model=model,
@@ -865,6 +900,9 @@ def main() -> None:
             f"clip_gallery_hit={main_clip_gallery_hit} clip_scores_hit={main_clip_scores_hit} "
             f"scores={scores.shape}"
         )
+        del model
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     with tracker.phase("Write reproducibility metadata"):
         run = {

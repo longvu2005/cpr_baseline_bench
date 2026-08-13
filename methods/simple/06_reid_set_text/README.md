@@ -31,7 +31,7 @@ S6 reuses the exact S5 adapter and its caches:
 - strict minimum over assigned similarities;
 - unmatched score `-1.0` when the gallery has fewer detected persons than the query set.
 
-S6 intentionally imports `methods/simple/05_reid_set/run.py` instead of cloning the S5 implementation. This keeps person detection, embedding, matching, and cache semantics identical between S5 and S6.
+S6 intentionally imports `methods/simple/05_reid_set/run.py` instead of cloning the S5 implementation. This keeps person detection, embedding, matching, and cache semantics identical between S5 and S6. On an S5 cache miss, S6 runs the same one-sample CLIP-ReID CUDA preflight before launching expensive detector/ReID inference. The S5 branch is completed before OpenAI CLIP ViT-L/14 is loaded, reducing unnecessary peak GPU memory.
 
 ### Text branch
 
@@ -105,7 +105,7 @@ In validation mode benchmark supervision is:
 CPR Supervision: Val only
 ```
 
-The adapter explicitly refuses to tune if the validation manifests are byte-identical to the canonical evaluation manifests. Runtime metadata derives `cpr_supervision` from the active mode, so switching modes cannot silently leave a stale supervision label.
+The adapter explicitly refuses to tune if the validation query manifest is byte-identical to the canonical evaluation query manifest, regardless of which gallery manifest is supplied. Runtime metadata derives `cpr_supervision` from the active mode, so switching modes cannot silently leave a stale supervision label.
 
 ## Data contract
 
