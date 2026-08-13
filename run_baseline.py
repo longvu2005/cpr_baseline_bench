@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from benchmark_progress import format_duration
+from benchmark_data import describe_gallery_link, ensure_gallery_layout
 
 ROOT = Path(__file__).resolve().parent
 METHOD_ROOTS = (
@@ -181,20 +182,28 @@ def run_pipeline(
     force_checkpoint: bool,
     skip_install: bool,
 ) -> None:
-    total = 5
+    total = 6
     print(f"Method : {method.method_id}", flush=True)
     print(f"Path   : {method.relative_directory}", flush=True)
 
+    started = perf_counter()
+    print(flush=True)
+    print(f"[1/{total}] Validate gallery data", flush=True)
+    gallery_root = ensure_gallery_layout(ROOT, repair=True)
+    print(f"Gallery: {describe_gallery_link(ROOT)}", flush=True)
+    print(f"Files  : validated canonical gallery at {gallery_root}", flush=True)
+    print(f"[1/{total}] done in {format_duration(perf_counter() - started)}: Validate gallery data", flush=True)
+
     if skip_install:
         print_skip(
-            1,
+            2,
             total,
             "Install requirements",
             "requested by --skip-install; using the current environment as-is.",
         )
     else:
         run_step(
-            1,
+            2,
             total,
             "Install requirements",
             [
@@ -212,29 +221,29 @@ def run_pipeline(
         command = [sys.executable, "-u", str(method.checkpoint_path.relative_to(ROOT))]
         if force_checkpoint:
             command.append("--force")
-        run_step(2, total, "Prepare checkpoint", command)
+        run_step(3, total, "Prepare checkpoint", command)
     else:
         print_skip(
-            2,
+            3,
             total,
             "Prepare checkpoint",
             "this method has no download_checkpoint.py and declares no automated checkpoint preparation.",
         )
 
     run_step(
-        3,
+        4,
         total,
         "Inference",
         [sys.executable, "-u", str(method.run_path.relative_to(ROOT))],
     )
     run_step(
-        4,
+        5,
         total,
         "Official evaluation",
         [sys.executable, "-u", "evaluate.py", "--method", method.method_id],
     )
     run_step(
-        5,
+        6,
         total,
         "Build benchmark tables",
         [sys.executable, "-u", "build_tables.py"],

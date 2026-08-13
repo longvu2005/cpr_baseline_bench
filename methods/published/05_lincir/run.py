@@ -34,6 +34,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
+from benchmark_data import ensure_gallery_layout  # noqa: E402
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "lincir"
@@ -450,6 +451,7 @@ def main() -> None:
         query_manifest = resolve_path(str(cfg["data"]["query_manifest"]))
         gallery = load_jsonl(gallery_manifest)
         queries = load_jsonl(query_manifest)
+        gallery_root = ensure_gallery_layout(ROOT, gallery_rows=gallery, repair=True)
         gallery_index = build_gallery_index(gallery)
         query_indices = query_gallery_indices(queries, gallery_index)
         device = device_from(str(cfg["runtime"]["device"]))
@@ -457,6 +459,7 @@ def main() -> None:
         tracker.log(
             f"gallery={len(gallery):,} queries={len(queries):,} device={device} dtype={dtype}"
         )
+        tracker.log(f"gallery_root={gallery_root}")
 
     with tracker.phase("Load official LinCIR Phi and pinned CLIP ViT-L/14"):
         official_models = load_source_module(source / "models.py", "cpr_lincir_official_models")
