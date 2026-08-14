@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import json
 import os
@@ -32,7 +33,7 @@ from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "bge_vl_mllm_s1"
-ADAPTER_VERSION = "2026-08-14-v1-fullscene-official-s1"
+ADAPTER_VERSION = "2026-08-14-v2-auto-dispatch-offload"
 GALLERY_CACHE_SCHEMA = 1
 QUERY_CACHE_SCHEMA = 1
 
@@ -147,6 +148,74 @@ def torch_dtype(name: str, device: torch.device) -> torch.dtype:
             raise RuntimeError("Configured bfloat16 is not supported by this CUDA device")
         return torch.bfloat16
     raise ValueError(f"Unsupported torch_dtype: {name!r}")
+
+
+def build_max_memory(runtime: dict[str, Any]) -> tuple[dict[int | str, int], dict[str, Any]]:
+    """Reserve activation headroom while keeping the exact official FP16 weights."""
+    placement = str(runtime.get("model_placement", "accelerate_auto"))
+    if placement != "accelerate_auto":
+        raise ValueError("runtime.model_placement must be 'accelerate_auto' when specified")
+
+    headroom_gib = float(runtime.get("cuda_headroom_gib", 2.0))
+    cpu_offload_gib = float(runtime.get("cpu_offload_max_gib", 8.0))
+    if headroom_gib <= 0:
+        raise ValueError("runtime.cuda_headroom_gib must be > 0 when specified")
+    if cpu_offload_gib <= 0:
+        raise ValueError("runtime.cpu_offload_max_gib must be > 0 when specified")
+
+    headroom_bytes = int(headroom_gib * (1024**3))
+    max_memory: dict[int | str, int] = {}
+    gpu_info: list[dict[str, Any]] = []
+    for index in range(torch.cuda.device_count()):
+        with torch.cuda.device(index):
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+        usable_bytes = int(free_bytes) - headroom_bytes
+        if usable_bytes <= 0:
+            raise RuntimeError(
+                f"CUDA:{index} has only {free_bytes / (1024**3):.2f} GiB free; "
+                f"cannot reserve {headroom_gib:.2f} GiB inference headroom"
+            )
+        max_memory[index] = usable_bytes
+        gpu_info.append(
+            {
+                "device": f"cuda:{index}",
+                "free_gib_before_load": round(free_bytes / (1024**3), 3),
+                "total_gib": round(total_bytes / (1024**3), 3),
+                "weight_budget_gib": round(usable_bytes / (1024**3), 3),
+            }
+        )
+
+    max_memory["cpu"] = int(cpu_offload_gib * (1024**3))
+    return max_memory, {
+        "policy": placement,
+        "cuda_headroom_gib": headroom_gib,
+        "cpu_offload_max_gib": cpu_offload_gib,
+        "gpus": gpu_info,
+    }
+
+
+def summarize_device_map(model) -> dict[str, int]:
+    mapping = getattr(model, "hf_device_map", None)
+    if not isinstance(mapping, dict) or not mapping:
+        raise RuntimeError("Accelerate did not attach the expected hf_device_map")
+
+    summary: dict[str, int] = {}
+    for target in mapping.values():
+        label = f"cuda:{target}" if isinstance(target, int) else str(target)
+        if label == "disk":
+            raise RuntimeError(
+                "BGE-VL placement fell back to disk offload; "
+                "increase CPU/GPU memory instead of changing the model weights."
+            )
+        summary[label] = summary.get(label, 0) + 1
+    return summary
+
+
+def release_cuda_cache() -> None:
+    gc.collect()
+    for index in range(torch.cuda.device_count()):
+        with torch.cuda.device(index):
+            torch.cuda.empty_cache()
 
 
 def validate_prepared(cfg: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
@@ -359,6 +428,7 @@ def main() -> None:
         if device.type != "cuda" or not torch.cuda.is_available():
             raise RuntimeError("BGE-VL-MLLM-S1 is configured for CUDA, but CUDA is unavailable")
         dtype = torch_dtype(str(cfg["model"]["torch_dtype"]), device)
+        max_memory, placement_info = build_max_memory(cfg["runtime"])
         tracker.log(f"gallery={len(gallery):,} queries={len(queries):,} device={device} dtype={dtype}")
         tracker.log(f"gallery_root={gallery_root}")
 
@@ -370,8 +440,12 @@ def main() -> None:
             torch_dtype=dtype,
             low_cpu_mem_usage=True,
             attn_implementation=str(cfg["model"]["attention_implementation"]),
+            device_map="auto",
+            max_memory=max_memory,
         )
-        model = model.eval().requires_grad_(False).to(device)
+        # Keep Accelerate's dispatch. Calling .to(cuda) here would collapse the
+        # 7B model back onto GPU 0 and reproduce the original OOM.
+        model = model.eval().requires_grad_(False)
         model.set_processor(str(snapshot))
         if model.__class__.__name__ != "LLaVANextForEmbedding":
             raise RuntimeError(f"Unexpected remote model class: {model.__class__.__name__}")
@@ -379,7 +453,11 @@ def main() -> None:
             raise RuntimeError("Pinned BGE-VL text hidden size does not match embedding_dim")
         if getattr(model.processor.tokenizer, "padding_side", None) != "left":
             raise RuntimeError("Pinned BGE-VL tokenizer must use left padding for last-token pooling")
+        placement_info["resolved_modules_per_device"] = summarize_device_map(model)
+        placement_info["input_device"] = str(model.device)
         tracker.log(f"model={cfg['checkpoint']['hf_repo_id']} revision={cfg['checkpoint']['hf_revision'][:12]}")
+        tracker.log(f"placement={json.dumps(placement_info, sort_keys=True)}")
+        release_cuda_cache()
 
     with tracker.phase("Encode normalized full-scene gallery candidates"):
         gallery_cache = resolve_path(str(cfg["cache"]["gallery_features"]))
@@ -398,6 +476,11 @@ def main() -> None:
         )
         query_features = encode_queries(model, query_paths, texts, query_cache, query_meta, cfg)
         tracker.log(f"query_features={query_features.shape} cache={rel(query_cache)}")
+
+    # The encoder is no longer needed once both normalized feature caches exist.
+    # Free all dispatched shards before allocating the score matrix on CUDA.
+    del model
+    release_cuda_cache()
 
     with tracker.phase("Compute complete query-gallery score matrix"):
         output_dir = resolve_path(str(cfg["output"]["dir"]))
@@ -440,6 +523,7 @@ def main() -> None:
             "model": cfg["model"],
             "composition": cfg["composition"],
             "runtime": cfg["runtime"],
+            "model_placement": placement_info,
             "config": rel(config_path),
             "gallery_features": rel(gallery_cache),
             "query_features": rel(query_cache),

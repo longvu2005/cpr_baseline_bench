@@ -29,7 +29,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from benchmark_progress import PhaseTracker, byte_progress  # noqa: E402
-DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
+METHOD_DIR = Path(__file__).resolve().parent
+DEFAULT_CONFIG = METHOD_DIR / "config.yaml"
 
 CLIP_ASSETS = {
     "ViT-B/16": (
@@ -50,6 +51,8 @@ DETECTOR_HASH_PREFIX = "dd69338a"
 
 STAGE2_CHECKPOINT_ENV = "WORD4PER_STAGE2_CHECKPOINT"
 STAGE2_CONFIG_ENV = "WORD4PER_STAGE2_CONFIG"
+STAGE1_CHECKPOINT_ENV = "WORD4PER_STAGE1_CHECKPOINT"
+REPRO_DATA_ROOT_ENV = "WORD4PER_REPRO_DATA_ROOT"
 KAGGLE_INPUT_ROOT = Path("/kaggle/input")
 
 
@@ -345,7 +348,65 @@ def validate_stage2_recipe(data: dict[str, Any], source: Path) -> None:
         )
 
 
-def validate_reproduced_stage2(cfg: dict[str, Any]) -> tuple[Path, Path]:
+def try_reproduce_stage2(config_path: Path) -> bool:
+    """Run the pinned official Stage-2 recipe when prerequisites are explicit.
+
+    Reproduction is opt-in: both environment variables must be set. This
+    prevents an ordinary benchmark invocation from silently starting a
+    60-epoch training job, while still allowing the standard one-command
+    ``run_baseline.py word4per_setmatch`` pipeline to prepare the exact
+    external artifact when the user has mounted the official prerequisites.
+    """
+    stage1 = os.environ.get(STAGE1_CHECKPOINT_ENV, "").strip()
+    data_root = os.environ.get(REPRO_DATA_ROOT_ENV, "").strip()
+    if not stage1 and not data_root:
+        return False
+
+    missing_env = [
+        name
+        for name, value in (
+            (STAGE1_CHECKPOINT_ENV, stage1),
+            (REPRO_DATA_ROOT_ENV, data_root),
+        )
+        if not value
+    ]
+    if missing_env:
+        joined = ", ".join(f"${name}" for name in missing_env)
+        raise RuntimeError(
+            "Incomplete Word4Per Stage-2 reproduction configuration: "
+            f"missing {joined}. Set both reproduction environment variables "
+            "or unset both to keep checkpoint preparation inference-only."
+        )
+
+    reproducer = METHOD_DIR / "reproduce_stage2.py"
+    if not reproducer.is_file():
+        raise FileNotFoundError(
+            f"Missing Word4Per Stage-2 reproduction helper: {rel(reproducer)}"
+        )
+
+    command = [
+        sys.executable,
+        "-u",
+        str(reproducer.relative_to(ROOT)),
+        "--config",
+        str(config_path),
+        "--stage1-checkpoint",
+        stage1,
+        "--data-root",
+        data_root,
+    ]
+    print(
+        "[reproduce] Stage-2 artifacts are absent; running the pinned official recipe",
+        flush=True,
+    )
+    print("$ " + " ".join(command), flush=True)
+    subprocess.run(command, cwd=ROOT, check=True)
+    return True
+
+
+def validate_reproduced_stage2(
+    cfg: dict[str, Any], *, config_path: Path = DEFAULT_CONFIG
+) -> tuple[Path, Path]:
     checkpoint = cfg.get("checkpoint")
     if not isinstance(checkpoint, dict):
         raise KeyError("config.yaml must define a checkpoint mapping")
@@ -367,6 +428,16 @@ def validate_reproduced_stage2(cfg: dict[str, Any]) -> tuple[Path, Path]:
     for path, label in ((stage2, "Stage-2 checkpoint"), (stage2_config, "Stage-2 config")):
         if not path.is_file() or path.stat().st_size <= 0:
             missing.append(f"{label}: {rel(path)}")
+
+    if missing and try_reproduce_stage2(config_path):
+        missing = []
+        for path, label in (
+            (stage2, "Stage-2 checkpoint"),
+            (stage2_config, "Stage-2 config"),
+        ):
+            if not path.is_file() or path.stat().st_size <= 0:
+                missing.append(f"{label}: {rel(path)}")
+
     if missing:
         details = "\n".join(f"  - {item}" for item in missing)
         message = (
@@ -378,6 +449,10 @@ def validate_reproduced_stage2(cfg: dict[str, Any]) -> tuple[Path, Path]:
             "with these filenames, or point the two environment variables at them:\n"
             f"  export {STAGE2_CHECKPOINT_ENV}=/path/to/best.pth\n"
             f"  export {STAGE2_CONFIG_ENV}=/path/to/configs.yaml\n\n"
+            "To reproduce automatically before the normal benchmark run, set both:\n"
+            f"  export {STAGE1_CHECKPOINT_ENV}=/path/to/stage1_model_vitb.pth\n"
+            f"  export {REPRO_DATA_ROOT_ENV}=/path/to/word4per_reproduction_data\n"
+            "  python run_baseline.py word4per_setmatch\n\n"
             "Expected canonical paths:\n"
             f"{details}\n"
             "Do not train, tune, or select this checkpoint on the CPR benchmark."
@@ -408,7 +483,7 @@ def prepare(config_path: Path, force: bool) -> None:
 
     tracker.advance("Validate reproduced Word4Per Stage-2 artifacts")
     cfg = load_yaml(config_path)
-    validate_reproduced_stage2(cfg)
+    validate_reproduced_stage2(cfg, config_path=config_path)
 
     tracker.advance("Pin official Word4Per source checkout")
     prepare_source(cfg)
