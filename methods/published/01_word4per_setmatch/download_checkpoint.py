@@ -423,7 +423,7 @@ def validate_stage2_recipe(data: dict[str, Any], source: Path) -> None:
 
 
 def try_reproduce_stage2(config_path: Path) -> bool:
-    """Auto-resolve official prerequisites, then run the pinned Stage-2 recipe."""
+    """Run the pinned Stage-2 recipe only when all external inputs are available."""
     stage1_value = os.environ.get(STAGE1_CHECKPOINT_ENV, "").strip()
     data_root_value = os.environ.get(REPRO_DATA_ROOT_ENV, "").strip()
 
@@ -477,14 +477,19 @@ def try_reproduce_stage2(config_path: Path) -> bool:
         )
     if missing:
         details = "\n".join(f"  - {item}" for item in missing)
-        raise RuntimeError(
-            "Word4Per Stage-2 cannot be reproduced because required official "
-            f"external inputs are missing:\n{details}\n\n"
+        print(
+            "Word4Per Stage-2 artifacts are absent, and automatic reproduction "
+            "cannot start because required official external inputs are missing:\n"
+            f"{details}\n\n"
             "Detected Kaggle mounts:\n"
             f"{kaggle_mount_summary()}\n\n"
-            "Mount the missing official artifacts or set the two WORD4PER_* "
-            "environment variables explicitly."
+            f"Mount reproduced Stage-2 artifacts directly, or set both "
+            f"${STAGE1_CHECKPOINT_ENV} and ${REPRO_DATA_ROOT_ENV} to enable "
+            "automatic Stage-2 reproduction.",
+            file=sys.stderr,
+            flush=True,
         )
+        return False
 
     reproducer = METHOD_DIR / "reproduce_stage2.py"
     if not reproducer.is_file():
