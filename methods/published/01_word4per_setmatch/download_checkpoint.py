@@ -13,12 +13,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 import urllib.request
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import torch
 import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -44,6 +47,10 @@ DETECTOR_URL = (
     "fasterrcnn_resnet50_fpn_v2_coco-dd69338a.pth"
 )
 DETECTOR_HASH_PREFIX = "dd69338a"
+
+STAGE2_CHECKPOINT_ENV = "WORD4PER_STAGE2_CHECKPOINT"
+STAGE2_CONFIG_ENV = "WORD4PER_STAGE2_CONFIG"
+KAGGLE_INPUT_ROOT = Path("/kaggle/input")
 
 
 def resolve_path(value: str) -> Path:
@@ -89,6 +96,107 @@ def validate_nonempty(path: Path, label: str) -> None:
         raise FileNotFoundError(f"Missing {label}: {rel(path)}")
     if path.stat().st_size <= 0:
         raise RuntimeError(f"Empty {label}: {rel(path)}")
+
+
+def kaggle_artifact_matches(filename: str) -> list[Path]:
+    """Find a uniquely named reproduced artifact in shallow Kaggle mounts.
+
+    Kaggle datasets are normally mounted as ``/kaggle/input/<dataset>/...``.
+    Keep the search deliberately shallow so preparing Word4Per does not walk
+    the large image dataset just to locate two model artifacts.
+    """
+    if not KAGGLE_INPUT_ROOT.is_dir():
+        return []
+
+    matches: set[Path] = set()
+    direct = KAGGLE_INPUT_ROOT / filename
+    if direct.is_file():
+        matches.add(direct.resolve())
+
+    for pattern in (f"*/{filename}", f"*/*/{filename}"):
+        for path in KAGGLE_INPUT_ROOT.glob(pattern):
+            if path.is_file():
+                matches.add(path.resolve())
+    return sorted(matches, key=str)
+
+
+def materialize_reproduced_artifact(
+    canonical: Path,
+    *,
+    env_var: str,
+    label: str,
+) -> Path:
+    """Expose an externally reproduced artifact at the canonical repo path.
+
+    The benchmark must not fabricate Word4Per Stage-2 weights. This helper
+    only imports an artifact supplied by the user (explicit environment
+    variable) or a uniquely named artifact already mounted by Kaggle.
+    """
+    if canonical.is_file():
+        return canonical
+    if canonical.exists() and not canonical.is_file():
+        raise RuntimeError(f"Expected {label} to be a file: {rel(canonical)}")
+    if canonical.is_symlink():
+        canonical.unlink()
+
+    source: Path | None = None
+    configured = os.environ.get(env_var, "").strip()
+    if configured:
+        source = resolve_path(configured)
+        validate_nonempty(source, f"{label} from ${env_var}")
+    else:
+        matches = kaggle_artifact_matches(canonical.name)
+        if len(matches) > 1:
+            options = "\n".join(f"  - {path}" for path in matches)
+            raise RuntimeError(
+                f"Found multiple Kaggle candidates for {label}:\n{options}\n"
+                f"Set ${env_var} to the exact artifact that must be used."
+            )
+        if matches:
+            source = matches[0]
+
+    if source is None:
+        return canonical
+
+    canonical.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        canonical.symlink_to(source)
+        mode = "symlink"
+    except OSError:
+        shutil.copy2(source, canonical)
+        mode = "copy"
+    print(f"[import] {label}: {source} -> {rel(canonical)} ({mode})")
+    return canonical
+
+
+def validate_stage2_checkpoint_structure(path: Path) -> None:
+    """Reject Stage-1 or unrelated checkpoints before expensive inference."""
+    try:
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(path, map_location="cpu")
+    except Exception as error:
+        raise RuntimeError(
+            f"Could not safely read reproduced Word4Per Stage-2 checkpoint: {rel(path)}"
+        ) from error
+
+    if not isinstance(checkpoint, Mapping):
+        raise RuntimeError(
+            f"Invalid Word4Per Stage-2 checkpoint {rel(path)}: expected a mapping"
+        )
+    for key in ("model", "img2text"):
+        state = checkpoint.get(key)
+        if not isinstance(state, Mapping) or not state:
+            raise RuntimeError(
+                f"Invalid Word4Per Stage-2 checkpoint {rel(path)}: "
+                f"missing non-empty {key!r} state_dict"
+            )
+        if not any(isinstance(value, torch.Tensor) for value in state.values()):
+            raise RuntimeError(
+                f"Invalid Word4Per Stage-2 checkpoint {rel(path)}: "
+                f"{key!r} contains no tensors"
+            )
+    print(f"[ok] {rel(path)} contains Word4Per model + img2text states")
 
 
 def download_with_sha256(
@@ -244,6 +352,17 @@ def validate_reproduced_stage2(cfg: dict[str, Any]) -> tuple[Path, Path]:
 
     stage2 = resolve_path(str(checkpoint["stage2"]))
     stage2_config = resolve_path(str(checkpoint["stage2_config"]))
+    stage2 = materialize_reproduced_artifact(
+        stage2,
+        env_var=STAGE2_CHECKPOINT_ENV,
+        label="Word4Per Stage-2 checkpoint",
+    )
+    stage2_config = materialize_reproduced_artifact(
+        stage2_config,
+        env_var=STAGE2_CONFIG_ENV,
+        label="Word4Per Stage-2 config",
+    )
+
     missing: list[str] = []
     for path, label in ((stage2, "Stage-2 checkpoint"), (stage2_config, "Stage-2 config")):
         if not path.is_file() or path.stat().st_size <= 0:
@@ -252,12 +371,19 @@ def validate_reproduced_stage2(cfg: dict[str, Any]) -> tuple[Path, Path]:
         details = "\n".join(f"  - {item}" for item in missing)
         raise SystemExit(
             "Word4Per final Stage-2 inference weights are not published as a documented "
-            "official download in the pinned old_project. Reproduce Stage 2 on CUHK-PEDES "
-            "using the authors' recipe and place the artifacts at:\n"
+            "official download in the pinned old_project. Do not substitute the published "
+            "Stage-1 checkpoint: Word4Per inference needs the learned Stage-2 img2text/TINet.\n\n"
+            "Reproduce Stage 2 on CUHK-PEDES using the authors' recipe, then either place "
+            "the artifacts at the canonical paths below, mount them as a Kaggle dataset "
+            "with these filenames, or point the two environment variables at them:\n"
+            f"  export {STAGE2_CHECKPOINT_ENV}=/path/to/best.pth\n"
+            f"  export {STAGE2_CONFIG_ENV}=/path/to/configs.yaml\n\n"
+            "Expected canonical paths:\n"
             f"{details}\n"
             "Do not train, tune, or select this checkpoint on the CPR benchmark."
         )
 
+    validate_stage2_checkpoint_structure(stage2)
     stage2_data = load_training_yaml(stage2_config)
     validate_stage2_recipe(stage2_data, stage2_config)
     configured_backbone = str(checkpoint["base_clip_model"])
