@@ -1,0 +1,11 @@
+# Official BGE-VL-MLLM code recommends transformers==4.45.2.
+numpy>=1.24,<3
+pillow>=10,<12
+pyyaml>=6,<7
+torch>=2.1
+tqdm>=4.66,<5
+transformers==4.45.2
+huggingface_hub>=0.28,<1
+safetensors>=0.4,<1
+accelerate>=0.26,<2
+sentencepiece>=0.1.99,<1

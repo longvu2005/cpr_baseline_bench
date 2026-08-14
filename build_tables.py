@@ -301,6 +301,7 @@ def main():
         "pic2word": 4,
         "lincir": 5,
         "magiclens_large": 6,
+        "bge_vl_mllm_s1": 7,
     }
 
     results.sort(

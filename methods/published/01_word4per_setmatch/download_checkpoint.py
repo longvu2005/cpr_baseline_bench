@@ -369,7 +369,7 @@ def validate_reproduced_stage2(cfg: dict[str, Any]) -> tuple[Path, Path]:
             missing.append(f"{label}: {rel(path)}")
     if missing:
         details = "\n".join(f"  - {item}" for item in missing)
-        raise SystemExit(
+        message = (
             "Word4Per final Stage-2 inference weights are not published as a documented "
             "official download in the pinned old_project. Do not substitute the published "
             "Stage-1 checkpoint: Word4Per inference needs the learned Stage-2 img2text/TINet.\n\n"
@@ -382,6 +382,8 @@ def validate_reproduced_stage2(cfg: dict[str, Any]) -> tuple[Path, Path]:
             f"{details}\n"
             "Do not train, tune, or select this checkpoint on the CPR benchmark."
         )
+        print(message, file=sys.stderr, flush=True)
+        raise SystemExit(42)
 
     validate_stage2_checkpoint_structure(stage2)
     stage2_data = load_training_yaml(stage2_config)

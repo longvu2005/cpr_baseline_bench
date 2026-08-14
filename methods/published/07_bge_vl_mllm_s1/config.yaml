@@ -1,0 +1,61 @@
+method: bge_vl_mllm_s1
+display_name: BGE-VL-MLLM-S1
+group: Published / SOTA Baselines
+cpr_supervision: 'No'
+
+paper:
+  title: 'MegaPairs: Massive Data Synthesis for Universal Multimodal Retrieval'
+  venue: ACL 2025 Oral
+  arxiv: '2412.14475'
+
+source:
+  repository: https://github.com/VectorSpaceLab/MegaPairs.git
+  commit: 00a74a776e935b58fa95015b2aff48119c43df30
+  license: MIT
+
+checkpoint:
+  hf_repo_id: BAAI/BGE-VL-MLLM-S1
+  hf_revision: 455ac20c111813fbb263dd0f22d47d173a971582
+  local_snapshot: checkpoints/bge_vl_mllm_s1/hf/BAAI--BGE-VL-MLLM-S1
+  prepared_marker: checkpoints/bge_vl_mllm_s1/prepared.json
+  status: OFFICIAL_RELEASED
+  weight_index: model.safetensors.index.json
+  weight_index_sha256: 4e378725ff60e04fc90244e360592f1dafe27c1cb80428e38a237790ec8827fc
+  remote_code: modeling_llavanext_for_embedding.py
+  remote_code_sha256: d3da6242e857ae05a93b0adb3b5f1407045a8e8f4b679fa2249b8e7a71e4b07e
+  config_sha256: f85bb1334cda6946c6657a8671a796ea2c25a851a8bef29bee1a7e69229921d9
+  tensor_bytes: 15132528640
+  num_shards: 4
+
+model:
+  architecture: LLaVA-NeXT Mistral-7B embedding model
+  embedding_dim: 4096
+  image_resize: 512
+  torch_dtype: float16
+  attention_implementation: sdpa
+
+composition:
+  text_field: text
+  query_role: q
+  candidate_role: c
+  task_instruction: 'Retrieve the target image that best meets the combined criteria by using both the provided image and the image retrieval instructions: '
+  normalize_query: true
+  normalize_gallery: true
+
+runtime:
+  device: cuda
+  gallery_batch_size: 1
+  query_batch_size: 1
+  score_batch_size: 128
+  feature_cache_dtype: float32
+
+cache:
+  gallery_features: runs/bge_vl_mllm_s1/cache/gallery_features.npy
+  query_features: runs/bge_vl_mllm_s1/cache/query_features.npy
+
+data:
+  gallery_manifest: data/gallery.jsonl
+  query_manifest: data/queries.jsonl
+
+output:
+  dir: runs/bge_vl_mllm_s1

@@ -34,6 +34,7 @@ METHOD_ROOTS = (
     ROOT / "methods" / "published",
 )
 NUMERIC_PREFIX_RE = re.compile(r"^\d+_(.+)$")
+EXTERNAL_CHECKPOINT_UNAVAILABLE = 42
 
 
 @dataclass(frozen=True)
@@ -171,6 +172,29 @@ def run_step(index: int, total: int, title: str, command: list[str]) -> None:
     )
 
 
+def run_checkpoint_step(index: int, total: int, title: str, command: list[str]) -> bool:
+    """Run checkpoint preparation and distinguish unavailable external artifacts."""
+    print(flush=True)
+    print(f"[{index}/{total}] {title}", flush=True)
+    print(f"$ {format_command(command)}", flush=True)
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    started = perf_counter()
+    completed = subprocess.run(command, cwd=ROOT, check=False, env=env)
+    elapsed = format_duration(perf_counter() - started)
+
+    if completed.returncode == 0:
+        print(f"[{index}/{total}] done in {elapsed}: {title}", flush=True)
+        return True
+
+    if completed.returncode == EXTERNAL_CHECKPOINT_UNAVAILABLE:
+        print(f"[{index}/{total}] unavailable after {elapsed}: {title}", flush=True)
+        return False
+
+    print(f"[{index}/{total}] FAILED after {elapsed}: {title}", flush=True)
+    raise subprocess.CalledProcessError(completed.returncode, command)
+
+
 def print_skip(index: int, total: int, title: str, message: str) -> None:
     print(flush=True)
     print(f"[{index}/{total}] {title}", flush=True)
@@ -221,7 +245,13 @@ def run_pipeline(
         command = [sys.executable, "-u", str(method.checkpoint_path.relative_to(ROOT))]
         if force_checkpoint:
             command.append("--force")
-        run_step(3, total, "Prepare checkpoint", command)
+        if not run_checkpoint_step(3, total, "Prepare checkpoint", command):
+            print()
+            print("Not runnable yet")
+            print("----------------")
+            print("The selected method requires an external checkpoint that is not available.")
+            print("Inference/evaluation were not run, and no fallback scores were produced.")
+            return
     else:
         print_skip(
             3,
