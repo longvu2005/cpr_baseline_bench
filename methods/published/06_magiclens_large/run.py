@@ -36,7 +36,7 @@ from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "magiclens_large"
-ADAPTER_VERSION = "2026-08-14-v2-checkpoint-era-pins"
+ADAPTER_VERSION = "2026-08-14-v3-inference-complete-source"
 GALLERY_CACHE_SCHEMA = 1
 QUERY_CACHE_SCHEMA = 1
 

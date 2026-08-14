@@ -1,6 +1,8 @@
 # P6 MagicLens Large: isolated JAX/Flax inference environment.
-# Python 3.9-3.12 is supported by the pinned JAX release.
-numpy==1.26.4
+# Python 3.9-3.12 is supported by the pinned JAX release. JAX >=0.4.26
+# supports NumPy 2.0; retain Kaggle's NumPy 2 ABI instead of downgrading the
+# shared notebook and breaking OpenCV/CuPy/Kaggle packages.
+numpy==2.0.2
 pillow>=10,<12
 pyyaml>=6,<7
 tqdm>=4.66,<5

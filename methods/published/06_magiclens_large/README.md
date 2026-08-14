@@ -7,14 +7,22 @@ Published CPR baseline using the official JAX/Flax implementation and released *
 - **Paper:** *MagicLens: Self-Supervised Image Retrieval with Open-Ended Instructions*, ICML 2024 Oral.
 - **Training data:** 36.7M `(query image, instruction, target image)` triplets, as stated by the official project.
 - **Official repository:** `google-deepmind/magiclens`.
-- **Pinned MagicLens source:** `c0770efa6d29f125ee3600fbd8b62bc66127aa04`.
+- **Pinned MagicLens source:** `a296f807d49912790cb2d915673ccab3e78df8b0`.
 - **Checkpoint:** `magic_lens_clip_large.pkl`.
 - **Checkpoint status:** `OFFICIAL_RELEASED`.
 - **Checkpoint variant:** the official repository's converted JAX/Flax Large checkpoint. The upstream README notes that converted weights can differ slightly from the original model's reported numbers.
 - **Backbone:** CLIP ViT-L/14.
 - **Embedding dimension:** 768.
 
-MagicLens upstream depends on Scenic but does not pin a Scenic revision. For reproducible benchmark execution, this adapter pins Scenic commit `e08103067d2033470e5d072a0f4117a02f6f9a4a`, the latest Scenic commit preceding the **2024-05-28 official checkpoint open-source commit**. This is deliberately tied to the checkpoint-release era rather than a later README/data-only update. OpenAI CLIP tokenizer source is pinned to `a1d071733d7111c9c014f024669f959182114e33`.
+The checkpoint-release commit `c0770efa6d29f125ee3600fbd8b62bc66127aa04`
+did not yet contain `data_utils.py`, although `inference.py` imported it. The
+adapter therefore pins the first inference-complete official revision,
+`a296f807d49912790cb2d915673ccab3e78df8b0`, which adds `data_utils.py` and
+README edits only. `model.py`, `layers.py`, and `inference.py` are byte-identical
+between those two commits, so this source correction does not alter the model
+architecture, Flax parameter tree, checkpoint restoration, or scoring math.
+
+MagicLens upstream depends on Scenic but does not pin a Scenic revision. For reproducible benchmark execution, this adapter pins Scenic commit `e08103067d2033470e5d072a0f4117a02f6f9a4a`, the latest Scenic commit preceding the **2024-05-28 official checkpoint open-source commit**. This is deliberately tied to the checkpoint-release era rather than a later Scenic update. OpenAI CLIP tokenizer source is pinned to `a1d071733d7111c9c014f024669f959182114e33`.
 
 ## What is preserved from official MagicLens
 
@@ -74,8 +82,12 @@ Flax 0.8.5
 Optax 0.2.3
 Orbax Checkpoint 0.6.4
 Chex 0.1.86
-NumPy 1.26.4
+NumPy 2.0.2
 ```
+
+JAX 0.4.30 supports NumPy 2.0. Keeping NumPy 2.0.2 avoids downgrading Kaggle's
+shared notebook ABI and prevents conflicts with its OpenCV, CuPy, rasterio and
+other NumPy-2-dependent packages.
 
 On Linux x86_64 the requirements install `jax[cuda12]==0.4.30`. Other platforms receive CPU JAX. A CUDA GPU is strongly recommended for the full benchmark; CPU execution is functional but slow.
 

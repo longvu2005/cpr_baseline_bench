@@ -12,7 +12,10 @@ paper:
 source:
   magiclens:
     repository: https://github.com/google-deepmind/magiclens.git
-    commit: c0770efa6d29f125ee3600fbd8b62bc66127aa04
+    # First official inference-complete revision. It adds data_utils.py on top of
+    # the checkpoint-release commit; model.py, layers.py, and inference.py are
+    # byte-identical to c0770efa6d29f125ee3600fbd8b62bc66127aa04.
+    commit: a296f807d49912790cb2d915673ccab3e78df8b0
     local_checkout: runs/magiclens_large/official_source/magiclens
     license: Apache-2.0
   scenic:
@@ -50,7 +53,7 @@ model:
   normalized_embedding_key: multimodal_embed_norm
 
 preprocessing:
-  # Match official magiclens/data_utils.py::process_img semantics exactly:
+  # Match pinned official magiclens/data_utils.py::process_img semantics exactly:
   # RGB -> divide by per-image max -> jax.image.resize(..., bilinear) to 224x224.
   mode: official_jax_process_img
   resize_method: bilinear
