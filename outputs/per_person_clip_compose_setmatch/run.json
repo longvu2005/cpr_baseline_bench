@@ -1,0 +1,28 @@
+{
+  "adapter_version": "2026-08-14-v2-py312-s5-sync-fixed-alpha",
+  "alpha": 0.5,
+  "alpha_selection": null,
+  "alpha_selection_details": {
+    "selected_alpha": 0.5,
+    "selected_full_map": null,
+    "selection_mode": "fixed"
+  },
+  "alpha_selection_mode": "fixed",
+  "clip": {
+    "checkpoint": "checkpoints/clip/ViT-L-14.pt",
+    "checkpoint_sha256": "b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836",
+    "name": "ViT-L/14"
+  },
+  "composition_formula": "normalize(alpha * target_crop_image + (1 - alpha) * modification_text)",
+  "config": "methods/simple/10_person_compose_setmatch/config.yaml",
+  "cpr_supervision": "No",
+  "display_name": "Per-Person CLIP Compose + SetMatch",
+  "groundingdino_attention_backend": "official_pytorch_fallback",
+  "group": "Simple / Obvious Baselines",
+  "higher_is_better": true,
+  "method": "per_person_clip_compose_setmatch",
+  "num_gallery": 17000,
+  "num_queries": 2975,
+  "scores": "runs/per_person_clip_compose_setmatch/scores.npy",
+  "shared_protocol": "groundingdino_clipreid_set"
+}
