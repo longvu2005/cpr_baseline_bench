@@ -404,8 +404,11 @@ def ensure_validation_split(main_gallery_manifest: Path, main_query_manifest: Pa
     for path in (val_gallery_manifest, val_query_manifest):
         if not path.is_file():
             raise FileNotFoundError(f"Missing validation manifest: {rel(path)}. S10 requires a separate validation split for alpha selection.")
-    if sha256_file(main_gallery_manifest) == sha256_file(val_gallery_manifest) and sha256_file(main_query_manifest) == sha256_file(val_query_manifest):
-        raise RuntimeError("Validation manifests are byte-identical to the main evaluation manifests. Refusing to tune alpha on the evaluation set.")
+    if sha256_file(main_query_manifest) == sha256_file(val_query_manifest):
+        raise RuntimeError(
+            "Validation query manifest is byte-identical to the main evaluation "
+            "query manifest. Refusing to tune alpha on evaluation labels."
+        )
 
 
 def measure(scores: np.ndarray, positives: set[int]) -> float:
@@ -478,7 +481,7 @@ def select_alpha(*, cfg: dict[str, Any], config_path: Path, main_gallery_manifes
 
 
 def main() -> None:
-    tracker = PhaseTracker(METHOD_ID, total=7)
+    tracker = PhaseTracker(METHOD_ID, total=8)
 
     with tracker.phase("Load config, shared protocol, and manifests"):
         parser = argparse.ArgumentParser()
