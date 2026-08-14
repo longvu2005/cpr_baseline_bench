@@ -1,0 +1,52 @@
+{
+  "adaptation": {
+    "evaluation_labels_used": false,
+    "person_detection": false,
+    "prompt_template": "a photo of * , {modification}",
+    "query_image": "full canonical query/reference scene",
+    "query_image_removed_inside_method": false,
+    "query_text": "full canonical queries.jsonl['text']",
+    "setmatch": false,
+    "target_box_used": false,
+    "target_identity_label_used": false
+  },
+  "cache": {
+    "gallery_features": "runs/pic2word/cache/gallery_features.npy",
+    "query_features": "runs/pic2word/cache/query_features.npy"
+  },
+  "checkpoint": {
+    "path": "checkpoints/pic2word/pic2word_pretrained.pt",
+    "sha256": "6826fd50ccca9124da095c2f848bd22ef2b509c9d73475dddefafa7745ced544",
+    "source_url": "https://drive.google.com/file/d/1IxRi2Cj81RxMu0ViT4q4nkfyjbSHm1dF/view?usp=sharing",
+    "status": "OFFICIAL_RELEASED"
+  },
+  "config": "methods/published/04_pic2word/config.yaml",
+  "cpr_supervision": "No",
+  "display_name": "Pic2Word",
+  "group": "Published / SOTA Baselines",
+  "higher_is_better": true,
+  "method": "pic2word",
+  "model": {
+    "backbone": "ViT-L/14",
+    "im2text": {
+      "dropout": 0.1,
+      "middle_dim": 512,
+      "n_layer": 2
+    },
+    "openai_clip_checkpoint": "checkpoints/clip/ViT-L-14.pt",
+    "openai_clip_sha256": "b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836"
+  },
+  "num_gallery": 17000,
+  "num_queries": 2975,
+  "paper": {
+    "arxiv": "2302.03084",
+    "title": "Pic2Word: Mapping Pictures to Words for Zero-shot Composed Image Retrieval",
+    "venue": "CVPR 2023"
+  },
+  "scores": "runs/pic2word/scores.npy",
+  "source": {
+    "checkout": "runs/pic2word/official_source/composed_image_retrieval",
+    "commit": "8c053297c2fae9cd17ddcded48445a4f47208dbd",
+    "repository": "https://github.com/google-research/composed_image_retrieval.git"
+  }
+}
