@@ -102,12 +102,7 @@ def validate_nonempty(path: Path, label: str) -> None:
 
 
 def kaggle_artifact_matches(filename: str) -> list[Path]:
-    """Find a uniquely named reproduced artifact in shallow Kaggle mounts.
-
-    Kaggle datasets are normally mounted as ``/kaggle/input/<dataset>/...``.
-    Keep the search deliberately shallow so preparing Word4Per does not walk
-    the large image dataset just to locate two model artifacts.
-    """
+    """Find a named artifact in standard and owner-qualified Kaggle mounts."""
     if not KAGGLE_INPUT_ROOT.is_dir():
         return []
 
@@ -116,11 +111,70 @@ def kaggle_artifact_matches(filename: str) -> list[Path]:
     if direct.is_file():
         matches.add(direct.resolve())
 
-    for pattern in (f"*/{filename}", f"*/*/{filename}"):
+    # Support both /kaggle/input/<dataset>/... and
+    # /kaggle/input/datasets/<owner>/<dataset>/..., with a few wrapper dirs.
+    for depth in range(1, 7):
+        pattern = "/".join(["*"] * depth + [filename])
         for path in KAGGLE_INPUT_ROOT.glob(pattern):
             if path.is_file():
                 matches.add(path.resolve())
     return sorted(matches, key=str)
+
+
+def kaggle_stage1_matches() -> list[Path]:
+    candidates: set[Path] = set(kaggle_artifact_matches("stage1_model_vitb.pth"))
+
+    # The authors' Stage-1 output may be mounted as generic best.pth.
+    # Only consider it when the path clearly identifies Word4Per Stage-1.
+    for path in kaggle_artifact_matches("best.pth"):
+        lowered = str(path).lower()
+        if "word4per" in lowered and ("stage1" in lowered or "stage-1" in lowered):
+            candidates.add(path)
+
+    valid: list[Path] = []
+    for path in sorted(candidates, key=str):
+        try:
+            validate_stage1_checkpoint_structure(path)
+        except Exception:
+            continue
+        valid.append(path)
+    return valid
+
+
+def kaggle_repro_data_root_matches() -> list[Path]:
+    """Find roots with CUHK-PEDES training data plus ITCPR annotations."""
+    if not KAGGLE_INPUT_ROOT.is_dir():
+        return []
+
+    matches: set[Path] = set()
+    for depth in range(1, 7):
+        pattern = "/".join(["*"] * depth + ["CUHK-PEDES", "reid_raw.json"])
+        for annotation in KAGGLE_INPUT_ROOT.glob(pattern):
+            if not annotation.is_file():
+                continue
+            root = annotation.parent.parent
+            if (
+                (root / "CUHK-PEDES" / "imgs").is_dir()
+                and (root / "query.json").is_file()
+                and (root / "gallery.json").is_file()
+            ):
+                matches.add(root.resolve())
+    return sorted(matches, key=str)
+
+
+def kaggle_mount_summary(limit: int = 30) -> str:
+    if not KAGGLE_INPUT_ROOT.is_dir():
+        return "  <no /kaggle/input directory>"
+    mounts = sorted(
+        (path.resolve() for path in KAGGLE_INPUT_ROOT.iterdir() if path.exists()),
+        key=str,
+    )
+    if not mounts:
+        return "  <no mounted Kaggle inputs>"
+    lines = [f"  - {path}" for path in mounts[:limit]]
+    if len(mounts) > limit:
+        lines.append(f"  ... and {len(mounts) - limit} more")
+    return "\n".join(lines)
 
 
 def materialize_reproduced_artifact(
@@ -200,6 +254,26 @@ def validate_stage2_checkpoint_structure(path: Path) -> None:
                 f"{key!r} contains no tensors"
             )
     print(f"[ok] {rel(path)} contains Word4Per model + img2text states")
+
+
+def validate_stage1_checkpoint_structure(path: Path) -> None:
+    """Accept an authors Stage-1 checkpoint and reject Stage-2/TINet."""
+    try:
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(path, map_location="cpu")
+    except Exception as error:
+        raise RuntimeError(f"Could not read Word4Per Stage-1 checkpoint: {path}") from error
+
+    if not isinstance(checkpoint, Mapping):
+        raise RuntimeError(f"Invalid Word4Per Stage-1 checkpoint: {path}")
+    model_state = checkpoint.get("model")
+    if not isinstance(model_state, Mapping) or not model_state:
+        raise RuntimeError(f"Stage-1 checkpoint has no non-empty 'model' state: {path}")
+    if not any(isinstance(value, torch.Tensor) for value in model_state.values()):
+        raise RuntimeError(f"Stage-1 checkpoint 'model' contains no tensors: {path}")
+    if "img2text" in checkpoint:
+        raise RuntimeError(f"Expected Stage-1 but found Stage-2 img2text state: {path}")
 
 
 def download_with_sha256(
@@ -349,33 +423,67 @@ def validate_stage2_recipe(data: dict[str, Any], source: Path) -> None:
 
 
 def try_reproduce_stage2(config_path: Path) -> bool:
-    """Run the pinned official Stage-2 recipe when prerequisites are explicit.
+    """Auto-resolve official prerequisites, then run the pinned Stage-2 recipe."""
+    stage1_value = os.environ.get(STAGE1_CHECKPOINT_ENV, "").strip()
+    data_root_value = os.environ.get(REPRO_DATA_ROOT_ENV, "").strip()
 
-    Reproduction is opt-in: both environment variables must be set. This
-    prevents an ordinary benchmark invocation from silently starting a
-    60-epoch training job, while still allowing the standard one-command
-    ``run_baseline.py word4per_setmatch`` pipeline to prepare the exact
-    external artifact when the user has mounted the official prerequisites.
-    """
-    stage1 = os.environ.get(STAGE1_CHECKPOINT_ENV, "").strip()
-    data_root = os.environ.get(REPRO_DATA_ROOT_ENV, "").strip()
-    if not stage1 and not data_root:
-        return False
+    if stage1_value:
+        stage1 = resolve_path(stage1_value)
+        validate_stage1_checkpoint_structure(stage1)
+        print(f"[explicit] Word4Per Stage-1: {stage1}", flush=True)
+    else:
+        stage1_matches = kaggle_stage1_matches()
+        if len(stage1_matches) > 1:
+            options = "\n".join(f"  - {path}" for path in stage1_matches)
+            raise RuntimeError(
+                "Multiple valid Word4Per Stage-1 checkpoints were found:\n"
+                f"{options}\n"
+                f"Set ${STAGE1_CHECKPOINT_ENV} to the exact official checkpoint."
+            )
+        stage1 = stage1_matches[0] if stage1_matches else None
+        if stage1 is not None:
+            print(f"[auto] Word4Per Stage-1: {stage1}", flush=True)
 
-    missing_env = [
-        name
-        for name, value in (
-            (STAGE1_CHECKPOINT_ENV, stage1),
-            (REPRO_DATA_ROOT_ENV, data_root),
+    if data_root_value:
+        data_root = resolve_path(data_root_value)
+        if not data_root.is_dir():
+            raise FileNotFoundError(
+                f"${REPRO_DATA_ROOT_ENV} is not a directory: {data_root}"
+            )
+        print(f"[explicit] Word4Per reproduction data root: {data_root}", flush=True)
+    else:
+        data_matches = kaggle_repro_data_root_matches()
+        if len(data_matches) > 1:
+            options = "\n".join(f"  - {path}" for path in data_matches)
+            raise RuntimeError(
+                "Multiple valid Word4Per reproduction data roots were found:\n"
+                f"{options}\n"
+                f"Set ${REPRO_DATA_ROOT_ENV} to the exact root."
+            )
+        data_root = data_matches[0] if data_matches else None
+        if data_root is not None:
+            print(f"[auto] Word4Per reproduction data root: {data_root}", flush=True)
+
+    missing: list[str] = []
+    if stage1 is None:
+        missing.append(
+            "official Word4Per Stage-1 checkpoint "
+            "(stage1_model_vitb.pth or Word4Per/Stage1 best.pth)"
         )
-        if not value
-    ]
-    if missing_env:
-        joined = ", ".join(f"${name}" for name in missing_env)
+    if data_root is None:
+        missing.append(
+            "data root containing CUHK-PEDES/imgs, CUHK-PEDES/reid_raw.json, "
+            "query.json and gallery.json"
+        )
+    if missing:
+        details = "\n".join(f"  - {item}" for item in missing)
         raise RuntimeError(
-            "Incomplete Word4Per Stage-2 reproduction configuration: "
-            f"missing {joined}. Set both reproduction environment variables "
-            "or unset both to keep checkpoint preparation inference-only."
+            "Word4Per Stage-2 cannot be reproduced because required official "
+            f"external inputs are missing:\n{details}\n\n"
+            "Detected Kaggle mounts:\n"
+            f"{kaggle_mount_summary()}\n\n"
+            "Mount the missing official artifacts or set the two WORD4PER_* "
+            "environment variables explicitly."
         )
 
     reproducer = METHOD_DIR / "reproduce_stage2.py"
@@ -391,9 +499,9 @@ def try_reproduce_stage2(config_path: Path) -> bool:
         "--config",
         str(config_path),
         "--stage1-checkpoint",
-        stage1,
+        str(stage1),
         "--data-root",
-        data_root,
+        str(data_root),
     ]
     print(
         "[reproduce] Stage-2 artifacts are absent; running the pinned official recipe",
