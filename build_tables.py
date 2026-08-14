@@ -297,6 +297,10 @@ def main():
         "clip_late_fusion": 4,
         "word4per_setmatch": 1,
         "fafa_setmatch": 2,
+        "instruct_reid_setmatch": 3,
+        "pic2word": 4,
+        "lincir": 5,
+        "magiclens_large": 6,
     }
 
     results.sort(

@@ -1,0 +1,22 @@
+# P6 MagicLens Large: isolated JAX/Flax inference environment.
+# Python 3.9-3.12 is supported by the pinned JAX release.
+numpy==1.26.4
+pillow>=10,<12
+pyyaml>=6,<7
+tqdm>=4.66,<5
+gdown==5.2.2
+ftfy>=6.2,<7
+regex>=2024.5.15
+absl-py>=2.1,<3
+
+# Keep the 2024 Flax stack coherent instead of allowing 2026 transitive
+# dependencies to pull a newer, incompatible JAX.
+flax==0.8.5
+optax==0.2.3
+orbax-checkpoint==0.6.4
+chex==0.1.86
+
+# JAX 0.4.30 exposes the cuda12 extra and has Python 3.12 wheels.
+# Linux x86_64 gets the CUDA 12 plugin; other platforms use CPU JAX.
+jax[cuda12]==0.4.30; sys_platform == "linux" and platform_machine == "x86_64"
+jax==0.4.30; sys_platform != "linux" or platform_machine != "x86_64"

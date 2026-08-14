@@ -1,0 +1,86 @@
+method: magiclens_large
+display_name: MagicLens Large
+group: Published / SOTA Baselines
+cpr_supervision: 'No'
+
+paper:
+  title: 'MagicLens: Self-Supervised Image Retrieval with Open-Ended Instructions'
+  venue: ICML 2024 Oral
+  arxiv: '2403.19651'
+  training_triplets: 36700000
+
+source:
+  magiclens:
+    repository: https://github.com/google-deepmind/magiclens.git
+    commit: c0770efa6d29f125ee3600fbd8b62bc66127aa04
+    local_checkout: runs/magiclens_large/official_source/magiclens
+    license: Apache-2.0
+  scenic:
+    repository: https://github.com/google-research/scenic.git
+    # MagicLens upstream does not pin Scenic. The official MagicLens model/checkpoint
+    # was open-sourced on 2024-05-28; pin the latest Scenic commit preceding that
+    # checkpoint release for a time-consistent, reproducible Flax parameter tree.
+    commit: e08103067d2033470e5d072a0f4117a02f6f9a4a
+    local_checkout: runs/magiclens_large/official_source/scenic
+    license: Apache-2.0
+  openai_clip:
+    repository: https://github.com/openai/CLIP.git
+    commit: a1d071733d7111c9c014f024669f959182114e33
+    local_checkout: runs/magiclens_large/official_source/CLIP
+    license: MIT
+
+checkpoint:
+  path: checkpoints/magiclens/magic_lens_clip_large.pkl
+  status: OFFICIAL_RELEASED
+  variant: official_converted_jax_flax
+  gcs_uri: gs://gresearch/magiclens/models/magic_lens_clip_large.pkl
+  gcs_https_url: https://storage.googleapis.com/gresearch/magiclens/models/magic_lens_clip_large.pkl
+  google_drive_folder_id: 1MXszMqIIh-yV7cYxWUxP7uHs9gfuTT3u
+  filename: magic_lens_clip_large.pkl
+  min_size_bytes: 100000000
+  prepared_marker: checkpoints/magiclens/magic_lens_clip_large.prepared.json
+
+model:
+  size: large
+  backbone: ViT-L/14
+  scenic_clip_name: vit_l14
+  embedding_dim: 768
+  image_size: 224
+  text_context_length: 77
+  normalized_embedding_key: multimodal_embed_norm
+
+preprocessing:
+  # Match official magiclens/data_utils.py::process_img semantics exactly:
+  # RGB -> divide by per-image max -> jax.image.resize(..., bilinear) to 224x224.
+  mode: official_jax_process_img
+  resize_method: bilinear
+  per_image_max_scale: true
+
+composition:
+  query_text_field: text
+  gallery_text: ''
+  tokenizer_truncate: false
+  query_image: canonical_query_image_full_scene
+  gallery_image: canonical_gallery_full_scene
+  setmatch: false
+  localization: none
+
+runtime:
+  # JAX automatically prefers CUDA when the CUDA plugin is usable, otherwise CPU.
+  backend: auto
+  gallery_batch_size: 16
+  query_batch_size: 16
+  score_batch_size: 256
+  preprocess_workers: 4
+  jax_preallocate: false
+
+cache:
+  gallery_features: runs/magiclens_large/cache/gallery_features.npy
+  query_features: runs/magiclens_large/cache/query_features.npy
+
+data:
+  gallery_manifest: data/gallery.jsonl
+  query_manifest: data/queries.jsonl
+
+output:
+  dir: runs/magiclens_large
