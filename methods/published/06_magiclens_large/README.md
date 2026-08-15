@@ -46,7 +46,8 @@ For each canonical CPR query:
 
 ```text
 query image       = the full scene identified by queries.jsonl["image_id"]
-query instruction = the full queries.jsonl["text"] retrieval instruction
+query instruction = the canonical queries.jsonl["text"] retrieval instruction
+                    (right-truncated by the official Scenic CLIP tokenizer only if >77 tokens)
 ```
 
 For every canonical gallery row:
@@ -70,7 +71,9 @@ The method also does **not** remove the query image from the score matrix. The r
 
 ## Text length
 
-The official Scenic/OpenAI CLIP tokenizer has a context length of 77 tokens. This adapter keeps `tokenizer_truncate: false` by default. If a CPR instruction is too long, inference fails with the exact query row instead of silently changing the instruction by truncation.
+The official Scenic/OpenAI CLIP tokenizer has a fixed context length of 77 tokens. CPR instructions can be longer than that, so this adapter sets `tokenizer_truncate: true`. This uses Scenic's own CLIP-compatible truncation path: if the tokenized instruction is longer than 77 tokens, it keeps the first 76 positions and places the CLIP end-of-text token in position 77.
+
+This is a model-input constraint, not an instruction rewrite: the source field remains the canonical `queries.jsonl["text"]`, there is no LLM summarization or hand-authored shortening, and no target labels are consulted. Long `MULTI`/`RELATIONAL` instructions may lose tail information; that limitation is reported as part of the direct MagicLens baseline rather than introducing a custom splitting or SetMatch mechanism.
 
 ## Environment
 

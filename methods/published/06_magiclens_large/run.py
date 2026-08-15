@@ -36,7 +36,7 @@ from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "magiclens_large"
-ADAPTER_VERSION = "2026-08-14-v3-inference-complete-source"
+ADAPTER_VERSION = "2026-08-15-v4-cpr-context-truncation"
 GALLERY_CACHE_SCHEMA = 1
 QUERY_CACHE_SCHEMA = 1
 
@@ -650,7 +650,7 @@ def main() -> None:
         )
         tracker.log(f"gallery_features={gallery_features.shape} cache={rel(gallery_cache)}")
 
-    with tracker.phase("Encode full-scene queries with full textual instruction"):
+    with tracker.phase("Encode full-scene queries with canonical textual instruction"):
         query_cache = resolve_path(str(cfg["cache"]["query_features"]))
         query_meta = feature_cache_meta(
             schema=QUERY_CACHE_SCHEMA,
@@ -719,7 +719,10 @@ def main() -> None:
             "composition": cfg["composition"],
             "runtime": {**cfg["runtime"], "resolved_jax_backend": jax.default_backend()},
             "cpr_adapter": {
-                "query": "full canonical scene image + canonical query.text instruction",
+                "query": (
+                    "full canonical scene image + canonical query.text instruction; "
+                    "official Scenic CLIP right-truncation to 77 tokens when required"
+                ),
                 "gallery": "full canonical scene image + empty instruction",
                 "localization": "none",
                 "setmatch": False,

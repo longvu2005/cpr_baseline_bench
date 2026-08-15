@@ -62,7 +62,9 @@ preprocessing:
 composition:
   query_text_field: text
   gallery_text: ''
-  tokenizer_truncate: false
+  # CPR instructions can exceed CLIP's fixed 77-token context. Use Scenic's
+  # official deterministic CLIP-style right truncation (keep 76 tokens + EOT).
+  tokenizer_truncate: true
   query_image: canonical_query_image_full_scene
   gallery_image: canonical_gallery_full_scene
   setmatch: false
