@@ -1,0 +1,86 @@
+{
+  "adapter_version": "2026-08-15-v4-cpr-context-truncation",
+  "checkpoint": {
+    "path": "checkpoints/magiclens/magic_lens_clip_large.pkl",
+    "sha256": "9fa429275a762a84866e7e63cd1a91973a6d09abe63bf469e5f442e50ee5846c",
+    "size": 1861692696,
+    "status": "OFFICIAL_RELEASED",
+    "variant": "official_converted_jax_flax"
+  },
+  "composition": {
+    "gallery_image": "canonical_gallery_full_scene",
+    "gallery_text": "",
+    "localization": "none",
+    "query_image": "canonical_query_image_full_scene",
+    "query_text_field": "text",
+    "setmatch": false,
+    "tokenizer_truncate": true
+  },
+  "config": "methods/published/06_magiclens_large/config.yaml",
+  "cpr_adapter": {
+    "gallery": "full canonical scene image + empty instruction",
+    "localization": "none",
+    "query": "full canonical scene image + canonical query.text instruction; official Scenic CLIP right-truncation to 77 tokens when required",
+    "query_image_excluded_inside_method": false,
+    "setmatch": false,
+    "single_multi_relational_policy": "same scene-level MagicLens scoring for every case",
+    "uses_positives": false,
+    "uses_target_ids": false
+  },
+  "cpr_supervision": "No",
+  "display_name": "MagicLens Large",
+  "gallery_features": "runs/magiclens_large/cache/gallery_features.npy",
+  "group": "Published / SOTA Baselines",
+  "higher_is_better": true,
+  "method": "magiclens_large",
+  "model": {
+    "backbone": "ViT-L/14",
+    "embedding_dim": 768,
+    "image_size": 224,
+    "normalized_embedding_key": "multimodal_embed_norm",
+    "scenic_clip_name": "vit_l14",
+    "size": "large",
+    "text_context_length": 77
+  },
+  "num_gallery": 17000,
+  "num_queries": 2975,
+  "paper": {
+    "arxiv": "2403.19651",
+    "title": "MagicLens: Self-Supervised Image Retrieval with Open-Ended Instructions",
+    "training_triplets": 36700000,
+    "venue": "ICML 2024 Oral"
+  },
+  "preprocessing": {
+    "mode": "official_jax_process_img",
+    "per_image_max_scale": true,
+    "resize_method": "bilinear"
+  },
+  "query_features": "runs/magiclens_large/cache/query_features.npy",
+  "runtime": {
+    "backend": "auto",
+    "gallery_batch_size": 16,
+    "jax_preallocate": false,
+    "preprocess_workers": 4,
+    "query_batch_size": 16,
+    "resolved_jax_backend": "gpu",
+    "score_batch_size": 256
+  },
+  "scores": "runs/magiclens_large/scores.npy",
+  "source": {
+    "magiclens": {
+      "checkout": "runs/magiclens_large/official_source/magiclens",
+      "commit": "a296f807d49912790cb2d915673ccab3e78df8b0",
+      "repository": "https://github.com/google-deepmind/magiclens.git"
+    },
+    "openai_clip": {
+      "checkout": "runs/magiclens_large/official_source/CLIP",
+      "commit": "a1d071733d7111c9c014f024669f959182114e33",
+      "repository": "https://github.com/openai/CLIP.git"
+    },
+    "scenic": {
+      "checkout": "runs/magiclens_large/official_source/scenic",
+      "commit": "e08103067d2033470e5d072a0f4117a02f6f9a4a",
+      "repository": "https://github.com/google-research/scenic.git"
+    }
+  }
+}
