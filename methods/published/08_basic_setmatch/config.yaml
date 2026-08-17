@@ -1,0 +1,101 @@
+method: basic_setmatch
+display_name: BASIC + SetMatch
+group: Published / SOTA Baselines
+cpr_supervision: 'No'
+
+paper:
+  title: 'Instance-Level Composed Image Retrieval'
+  venue: NeurIPS 2025
+  arxiv: '2510.25387'
+  project: https://vrg.fel.cvut.cz/icir/
+
+source:
+  repository: https://github.com/billpsomas/icir.git
+  commit: 28375f899d731f91857dcf7dfc9af28755cbccf7
+  local_checkout: runs/basic_setmatch/official_source/icir
+  auto_clone: true
+
+basic:
+  method: basic
+  backbone: clip
+  preset_name: official_basic_use_preset
+  expected_preset:
+    contextualize: true
+    specified_corpus: generic_subjects
+    specified_ncorpus: generic_styles
+    aa: 0.2
+    num_principal_components_for_projection: 250.0
+    standardize_features: true
+    use_laion_mean: true
+    project_features: true
+    do_query_expansion: true
+    normalize_similarities: true
+    path_to_synthetic_data: ./synthetic_data
+    harris_lambda: 0.1
+  official_resources:
+    positive_corpus: corpora/generic_subjects.csv
+    negative_corpus: corpora/generic_styles.csv
+    laion_mean: data/laion_mean/laion_1m_mean_clip.pkl
+    synthetic_normalization: synthetic_data/dataset_1_sd_clip.pkl.npy
+  contextualization_corpus_words: 100
+  query_expansion_top_k: 25
+  official_parity_check: true
+  parity_database_size: 64
+  parity_queries: 2
+
+runtime_assets:
+  basic_model_cache_root: checkpoints/basic_setmatch/openclip_cache
+  prepared_marker: checkpoints/basic_setmatch/prepared.json
+  detector:
+    backend: torchvision_fasterrcnn_resnet50_fpn_v2
+    path: checkpoints/torchvision/fasterrcnn_resnet50_fpn_v2_coco-dd69338a.pth
+    url: https://download.pytorch.org/models/fasterrcnn_resnet50_fpn_v2_coco-dd69338a.pth
+    sha256_prefix: dd69338a
+  selector:
+    backend: openai_clip
+    model: ViT-B/32
+    path: checkpoints/clip/ViT-B-32.pt
+    url: https://openaipublic.azureedge.net/clip/models/40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af/ViT-B-32.pt
+    sha256: 40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af
+
+localization:
+  detector:
+    score_threshold: 0.55
+    max_persons_per_image: 10
+    person_label: 1
+    no_person_policy: full_scene_fallback
+  query_selector:
+    assignment: hungarian_max_sum
+    fallback_order: [select_text, modify_text, text]
+    shortage_policy: pad_missing_slots_with_full_reference_scene
+
+query_text_adapter:
+  ordinary: subject.modify_text
+  relational: full_query_text_when_relation_text_present
+
+setmatch:
+  enabled: true
+  pairwise_metric: basic_official_score
+  assignment: hungarian_max_sum
+  aggregation: strict_minimum
+  unmatched_score: -1000000.0
+
+runtime:
+  device: cuda
+  detector_device: cuda
+  detector_batch_size: 1
+  selector_batch_size: 256
+  basic_image_batch_size: 128
+  basic_text_batch_size: 256
+  score_query_batch_size: 32
+  gallery_feature_dtype: float16
+
+cache:
+  root: runs/basic_setmatch/cache
+
+data:
+  gallery_manifest: data/gallery.jsonl
+  query_manifest: data/queries.jsonl
+
+output:
+  dir: runs/basic_setmatch

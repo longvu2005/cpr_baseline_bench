@@ -1,0 +1,13 @@
+# Official i-CIR/BASIC requirements + CPR adapter dependencies.
+--prefer-binary
+numpy>=1.24,<2
+Pillow>=9.5.0
+PyYAML>=6.0
+torch>=2.0.0
+torchvision>=0.15.0
+open_clip_torch>=2.20.0
+scipy>=1.10
+tqdm>=4.65
+
+# Query-person selector used by the existing CPR SetMatch protocol.
+git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33
