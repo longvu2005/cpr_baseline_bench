@@ -1226,6 +1226,9 @@ def save_run_metadata(
         "display_name": str(cfg["display_name"]),
         "group": str(cfg["group"]),
         "cpr_supervision": str(cfg["cpr_supervision"]),
+        # Required by the repository-wide score-matrix contract and evaluate.py.
+        # BASIC parity is checked with descending=True, so larger scores are better.
+        "higher_is_better": True,
         "adapter_version": ADAPTER_VERSION,
         "paper": cfg["paper"],
         "source": {

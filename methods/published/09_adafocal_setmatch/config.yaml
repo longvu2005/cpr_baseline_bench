@@ -1,0 +1,70 @@
+method: adafocal_setmatch
+display_name: AdaFocal + SetMatch
+group: Published Baselines
+cpr_supervision: 'No'
+
+shared_protocol:
+  method: groundingdino_clipreid_set
+  method_dir: methods/simple/05_reid_set
+  config: methods/simple/05_reid_set/config.yaml
+
+official_source:
+  repository: https://github.com/HaHaJun1101/OACIR.git
+  commit: 11307ff5e31cda82fe70b0a8e5d6a9d34c130ae9
+  local_checkout: runs/adafocal_setmatch/official_source/OACIR
+  auto_clone: true
+
+adafocal:
+  model_name: oacir_adafocal
+  model_type: pretrain
+  checkpoint: checkpoints/adafocal/adafocal_scalar.pt
+  checkpoint_sha256: 03e885888facffd789640fe4a4fd209e4924255124d5bee32bccfd280b52406e
+  hf_repo: HaHaJun1101/AdaFocal
+  hf_revision: c36dfffb367a9a1f95d8f40460e7d668c8f1c436
+  hf_filename: adafocal_scalar.pt
+  transform: targetpad
+  target_ratio: 1.25
+  input_size: 224
+
+selector:
+  name: OpenAI CLIP ViT-B/32
+  model_name: ViT-B/32
+  checkpoint: checkpoints/clip/ViT-B-32.pt
+  checkpoint_sha256: 40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af
+  checkpoint_url: https://openaipublic.azureedge.net/clip/models/40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af/ViT-B-32.pt
+  assignment: hungarian_max_sum
+  require_distinct_persons: true
+  text_field: subjects.select_text
+
+adaptation:
+  query_anchor: predicted_person_box
+  query_image: full_reference_scene
+  target_candidate: detected_person_crop
+  relational_text_behavior: full_instruction
+  gt_box_main_table: false
+
+setmatch:
+  pairwise_score: adafocal_cosine_max_over_target_query_tokens
+  assignment: hungarian_max_sum
+  aggregation: strict_minimum
+  unmatched_score: -1.0
+
+runtime:
+  device: cuda
+  gallery_person_batch_size: 8
+  selector_image_batch_size: 128
+  selector_text_batch_size: 256
+  target_feature_cache_dtype: float16
+  candidate_feature_chunk_size: 2048
+  num_workers: 4
+
+cache:
+  detections: runs/groundingdino_clipreid_set/cache/person_detections.npz
+  target_person_features: runs/adafocal_setmatch/cache/target_person_features.npy
+
+data:
+  gallery_manifest: data/gallery.jsonl
+  query_manifest: data/queries.jsonl
+
+output:
+  dir: runs/adafocal_setmatch
