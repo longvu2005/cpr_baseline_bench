@@ -1,0 +1,117 @@
+method: imagine_seek
+display_name: Imagine and Seek (IP-CIR, reproduced)
+group: Published / SOTA Baselines
+cpr_supervision: 'No'
+
+paper:
+  title: 'Imagine and Seek: Improving Composed Image Retrieval with an Imagined Proxy'
+  venue: CVPR 2025
+  arxiv: '2411.16752'
+  implementation_status: REPRODUCED
+
+# IP-CIR is training-free. No author IP-CIR checkpoint is assumed here.
+# LinCIR is used as the retrieval baseline because the paper evaluates IP-CIR on top of LinCIR.
+base_retriever:
+  method: lincir
+  method_dir: methods/published/05_lincir
+  config: methods/published/05_lincir/config.yaml
+  scores: runs/lincir/scores.npy
+  gallery_features: runs/lincir/cache/gallery_features.npy
+  clip_snapshot: checkpoints/lincir/hf/clip-vit-large-patch14
+  projection_dim: 768
+  auto_prepare: true
+  auto_run: true
+
+proxy:
+  # generate: reproduce paper proxy generation with public foundation models.
+  # precomputed: skip generation and consume proxy_manifest directly.
+  mode: generate
+  count_per_query: 5
+  aggregation: mean_similarity
+  manifest: runs/imagine_seek/cache/proxy_manifest.jsonl
+  image_dir: runs/imagine_seek/cache/proxies
+
+captioner:
+  repo_id: Salesforce/blip2-opt-2.7b
+  revision: main
+  local_snapshot: checkpoints/imagine_seek/hf/blip2-opt-2.7b
+  captions_per_query: 5
+  max_new_tokens: 48
+  do_sample: true
+  top_p: 0.92
+  temperature: 0.85
+
+layout_llm:
+  repo_id: Qwen/Qwen1.5-32B-Chat
+  revision: main
+  local_snapshot: checkpoints/imagine_seek/hf/Qwen1.5-32B-Chat
+  max_new_tokens: 900
+  do_sample: false
+  temperature: 0.0
+  target_captions_per_query: 5
+  # Full 32B weights are intentionally used by default to stay closest to the paper.
+  # Set load_in_4bit=true if VRAM is limited; this changes only runtime quantization.
+  load_in_4bit: true
+
+migc:
+  repository: https://github.com/limuloo/MIGC.git
+  commit: effd6cc2e6a9f7d2fe34409c300a5f037a87b9ec
+  local_checkout: runs/imagine_seek/official_source/MIGC
+  checkpoint: checkpoints/imagine_seek/migc/MIGC_SD14.ckpt
+  google_drive_id: 107fnQ9Fpu5K0UtqnHlKja7hqe-GwjAmz
+  prepared_marker: checkpoints/imagine_seek/prepared.json
+  checkpoint_status: PUBLIC_REIMPLEMENTED_UPSTREAM_WEIGHT
+  # The public MIGC path is text/layout-conditioned. It does not reproduce the
+  # paper's unreleased/underspecified ELITE reference-image conditioning exactly.
+  reference_conditioning: public_layout_only
+  negative_prompt: 'worst quality, low quality, bad anatomy, distorted face, duplicate person, extra person, missing person, watermark, text, blurry'
+  generation:
+    num_inference_steps: 50
+    guidance_scale: 7.5
+    migc_steps: 25
+    seed: 42000
+
+stable_diffusion:
+  repo_id: stable-diffusion-v1-5/stable-diffusion-v1-5
+  revision: main
+  local_snapshot: checkpoints/imagine_seek/hf/stable-diffusion-v1-5
+
+representation:
+  # Eq. (1) in the paper:
+  # f_RP = f_p + max(f_p)/max(f_q) * f_q + max(f_p)/max(f_s) * f_s
+  query_residual_weight: 1.0
+  semantic_residual_weight: 1.0
+  denominator_epsilon: 1.0e-6
+  normalize_proxy_representation: true
+  original_caption_reduce: mean_then_normalize
+  target_caption_reduce: mean_then_normalize
+
+fusion:
+  # Eq. (2): S_b = S_t * S_p; S_f = lambda*S_t + (1-lambda)*S_b
+  lambda_text: 0.3
+
+runtime:
+  device: cuda
+  caption_dtype: float16
+  llm_dtype: float16
+  diffusion_dtype: float16
+  clip_dtype: float16
+  clip_image_batch_size: 32
+  clip_text_batch_size: 64
+  score_batch_size: 128
+  num_workers: 4
+
+data:
+  gallery_manifest: data/gallery.jsonl
+  query_manifest: data/queries.jsonl
+
+cache:
+  captions: runs/imagine_seek/cache/query_captions.jsonl
+  layouts: runs/imagine_seek/cache/layouts.jsonl
+  proxy_features: runs/imagine_seek/cache/proxy_features.npy
+  proxy_features_meta: runs/imagine_seek/cache/proxy_features.meta.json
+  query_components: runs/imagine_seek/cache/query_components.npz
+  query_components_meta: runs/imagine_seek/cache/query_components.meta.json
+
+output:
+  dir: runs/imagine_seek

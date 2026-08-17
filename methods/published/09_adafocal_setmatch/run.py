@@ -17,9 +17,11 @@ import importlib.util
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
+import types
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -200,20 +202,82 @@ def ensure_clean_pinned_source(cfg: dict[str, Any]) -> Path:
 
 
 def import_official_adafocal(checkout: Path):
+    """Import only the official AdaFocal inference stack.
+
+    Upstream ``lavis/__init__.py`` eagerly imports datasets/processors/tasks and
+    therefore optional video dependencies such as ``decord``. AdaFocal image
+    retrieval does not need those modules, so we construct minimal package
+    namespaces while still executing the official pinned AdaFocal source files.
+    """
+    lavis_root = (checkout / "lavis").resolve()
+    if not lavis_root.is_dir():
+        raise FileNotFoundError(f"Missing official LAVIS directory: {lavis_root}")
+
     checkout_str = str(checkout)
     if checkout_str not in sys.path:
         sys.path.insert(0, checkout_str)
 
-    # The pinned checkout must win over any pip-installed LAVIS.
     for name in list(sys.modules):
         if name == "lavis" or name.startswith("lavis.") or name == "data_utils":
             del sys.modules[name]
 
-    from lavis.models import load_model_and_preprocess
-    from data_utils import targetpad_transform, transform_bbox_targetpad
-    from lavis.models.blip2_models.blip2_qformer_oacir_adafocal import bbox_to_patch_mask
+    # Stub package ``lavis`` without executing lavis/__init__.py.
+    lavis_pkg = types.ModuleType("lavis")
+    lavis_pkg.__file__ = str(lavis_root / "__init__.py")
+    lavis_pkg.__package__ = "lavis"
+    lavis_pkg.__path__ = [str(lavis_root)]
+    sys.modules["lavis"] = lavis_pkg
 
-    return load_model_and_preprocess, targetpad_transform, transform_bbox_targetpad, bbox_to_patch_mask
+    # Stub ``lavis.models`` as well. registry.register_model imports
+    # ``lavis.models.BaseModel`` while decorating the AdaFocal class.
+    models_root = lavis_root / "models"
+    models_pkg = types.ModuleType("lavis.models")
+    models_pkg.__file__ = str(models_root / "__init__.py")
+    models_pkg.__package__ = "lavis.models"
+    models_pkg.__path__ = [str(models_root)]
+    sys.modules["lavis.models"] = models_pkg
+    lavis_pkg.models = models_pkg
+
+    from omegaconf import OmegaConf
+    from lavis.common.registry import registry
+
+    # Reproduce the small registry setup done by official lavis/__init__.py.
+    default_cfg = OmegaConf.load(lavis_root / "configs" / "default.yaml")
+    registry.mapping["paths"].clear()
+    registry.mapping["state"].clear()
+    registry.mapping["model_name_mapping"].clear()
+    registry.register_path("library_root", str(lavis_root))
+    registry.register_path("repo_root", str(checkout))
+    registry.register_path("cache_root", str(checkout / str(default_cfg.env.cache_root)))
+    registry.register("MAX_INT", sys.maxsize)
+    registry.register("SPLIT_NAMES", ["train", "val", "test"])
+
+    from lavis.models.base_model import BaseModel
+    models_pkg.BaseModel = BaseModel
+
+    from lavis.models.blip2_models.blip2_qformer_oacir_adafocal import (
+        Blip2QformerOacirAdaFocal,
+        bbox_to_patch_mask,
+    )
+    from data_utils import targetpad_transform, transform_bbox_targetpad
+
+    return (
+        Blip2QformerOacirAdaFocal,
+        targetpad_transform,
+        transform_bbox_targetpad,
+        bbox_to_patch_mask,
+    )
+
+
+def blip_caption_eval(caption: str, max_words: int = 50) -> str:
+    """Exact eval behavior of official BlipCaptionProcessor defaults."""
+    caption = re.sub(r'([.!"()*#:;~])', " ", str(caption).lower())
+    caption = re.sub(r"\s{2,}", " ", caption)
+    caption = caption.rstrip("\n").strip(" ")
+    words = caption.split(" ")
+    if len(words) > max_words:
+        caption = " ".join(words[:max_words])
+    return caption
 
 
 def load_adafocal(
@@ -222,7 +286,7 @@ def load_adafocal(
     device: torch.device,
 ):
     (
-        load_model_and_preprocess,
+        model_cls,
         targetpad_transform,
         transform_bbox_targetpad,
         bbox_to_patch_mask,
@@ -241,12 +305,13 @@ def load_adafocal(
             f"AdaFocal checkpoint checksum mismatch: expected {expected_sha}, got {actual_sha}"
         )
 
-    model, _, txt_processors = load_model_and_preprocess(
-        name=str(model_cfg["model_name"]),
-        model_type=str(model_cfg["model_type"]),
-        is_eval=False,
-        device=device,
-    )
+    # Same official BaseModel.from_pretrained path, without importing the full
+    # LAVIS package graph.
+    model = model_cls.from_pretrained(model_type=str(model_cfg["model_type"]))
+    if device == torch.device("cpu"):
+        model = model.float()
+    model = model.to(device)
+    txt_processors = {"eval": blip_caption_eval}
     checkpoint_obj = torch.load(checkpoint, map_location="cpu")
     class_key = model.__class__.__name__
     if isinstance(checkpoint_obj, dict) and class_key in checkpoint_obj:

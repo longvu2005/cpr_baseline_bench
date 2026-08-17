@@ -1,0 +1,28 @@
+# P10 Imagine and Seek reproduction dependencies.
+# Kept compatible with the repository's LinCIR adapter and public MIGC code.
+numpy>=1.24,<2
+pillow
+pyyaml
+torch
+torchvision
+tqdm
+scipy
+opencv-python
+einops
+omegaconf
+accelerate>=0.28,<1
+bitsandbytes>=0.43,<1
+safetensors>=0.4,<1
+ftfy
+regex
+gdown>=5,<6
+
+# LinCIR / BLIP2 / Qwen1.5
+transformers==4.39.3
+
+# Public MIGC currently targets this Diffusers/HF Hub generation stack.
+diffusers==0.21.1
+huggingface_hub==0.24.5
+
+# OpenAI CLIP tokenizer used by the existing LinCIR adapter.
+git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33
