@@ -1,0 +1,110 @@
+{
+  "adapter_version": "2026-08-17-v1-official-basic-score-setmatch",
+  "cache": {
+    "fingerprint": {
+      "adapter_version": "2026-08-17-v1-official-basic-score-setmatch",
+      "config_sha256": "61670a408a97d7964413cca7649d00d4145619f3c6a2e595c34a7a4cfe6901f6",
+      "gallery_sha256": "5c120cb19a1682f70056a6e06bcd7654ce617b4a12a75533481f01668ce89117",
+      "prepared_marker_sha256": "f80ff10815b1760745d236e6a812b2705b1a373f69617c985cf57c0da35d0654",
+      "queries_sha256": "8c36b50969c41383c546cfe39a103ccd58cf8da0f2f9a81310b1542677dee9de",
+      "schema": 1
+    },
+    "key": "5c6c891e676841a8046b"
+  },
+  "checkpoint": {
+    "backbone": "OpenCLIP ViT-L/14 OpenAI pretrained",
+    "resources": "official pinned i-CIR corpora/LAION mean/synthetic normalization",
+    "status": "TRAINING_FREE_NO_BASIC_NEURAL_CHECKPOINT"
+  },
+  "cpr_adapter": {
+    "person_detection": {
+      "max_persons_per_image": 10,
+      "no_person_policy": "full_scene_fallback",
+      "person_label": 1,
+      "score_threshold": 0.55
+    },
+    "query_selector": {
+      "assignment": "hungarian_max_sum",
+      "backend": "openai_clip",
+      "fallback_order": [
+        "select_text",
+        "modify_text",
+        "text"
+      ],
+      "model": "ViT-B/32",
+      "shortage_policy": "pad_missing_slots_with_full_reference_scene"
+    },
+    "query_text_adapter": {
+      "ordinary": "subject.modify_text",
+      "relational": "full_query_text_when_relation_text_present"
+    },
+    "setmatch": {
+      "aggregation": "strict_minimum",
+      "assignment": "hungarian_max_sum",
+      "enabled": true,
+      "pairwise_metric": "basic_official_score",
+      "unmatched_score": -1000000.0
+    },
+    "uses_gt_boxes": false,
+    "uses_positive_labels": false,
+    "uses_target_ids": false
+  },
+  "cpr_supervision": "No",
+  "display_name": "BASIC + SetMatch",
+  "group": "Published / SOTA Baselines",
+  "higher_is_better": true,
+  "method": "basic_setmatch",
+  "official_basic": {
+    "backbone": "clip",
+    "contextualization_corpus_words": 100,
+    "method": "basic",
+    "preset": {
+      "aa": 0.2,
+      "contextualize": true,
+      "do_query_expansion": true,
+      "harris_lambda": 0.1,
+      "normalize_similarities": true,
+      "num_principal_components_for_projection": 250.0,
+      "path_to_synthetic_data": "./synthetic_data",
+      "project_features": true,
+      "specified_corpus": "generic_subjects",
+      "specified_ncorpus": "generic_styles",
+      "standardize_features": true,
+      "use_laion_mean": true
+    },
+    "score_adapter_parity_checked": true
+  },
+  "paper": {
+    "arxiv": "2510.25387",
+    "project": "https://vrg.fel.cvut.cz/icir/",
+    "title": "Instance-Level Composed Image Retrieval",
+    "venue": "NeurIPS 2025"
+  },
+  "score_contract": {
+    "finite_only": true,
+    "higher_is_better": true,
+    "query_image_removed_inside_method": false,
+    "shape": [
+      2975,
+      17000
+    ]
+  },
+  "source": {
+    "commit": "28375f899d731f91857dcf7dfc9af28755cbccf7",
+    "repository": "https://github.com/billpsomas/icir.git",
+    "status": "OFFICIAL_RELEASED_SOURCE"
+  },
+  "stats": {
+    "detector_full_scene_fallback_scenes": 12,
+    "gallery_images": 17000,
+    "gallery_person_candidates": 81408,
+    "queries": 2975,
+    "query_selector": {
+      "full_scene_fallback_slots": 7,
+      "mean_assigned_clip_similarity": 0.30908981786791456,
+      "min_assigned_clip_similarity": 0.15606102347373962,
+      "queries_with_too_few_candidates": 7,
+      "shortage_policy": "pad_missing_slots_with_full_reference_scene"
+    }
+  }
+}
