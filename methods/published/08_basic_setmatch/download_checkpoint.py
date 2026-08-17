@@ -9,11 +9,9 @@ import importlib
 import json
 import os
 import shutil
-import socket
 import subprocess
 import sys
 import urllib.request
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -227,34 +225,78 @@ def configure_basic_cache(cache_root: Path) -> None:
     os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 
 
-@contextmanager
-def block_network():
-    original_connect = socket.socket.connect
-    original_connect_ex = socket.socket.connect_ex
+def run_official_clip_loader(
+    checkout: Path,
+    *,
+    offline: bool,
+) -> subprocess.CompletedProcess[str]:
+    """Run the pinned official CLIP loader in an isolated child process.
 
-    def blocked_connect(self, address):  # noqa: ANN001
-        raise RuntimeError(f"Network blocked during BASIC cache verification: {address!r}")
+    Cache probing used to monkey-patch ``socket.socket.connect`` in this process.
+    On Kaggle, Hugging Face/httpx can retain networking state across retries, so
+    the subsequent online population attempt could still call the blocked function.
+    A fresh child process makes the two modes independent and guarantees that an
+    offline verification cannot contaminate cache preparation.
+    """
 
-    def blocked_connect_ex(self, address):  # noqa: ANN001
-        blocked_connect(self, address)
-        return 1
+    env = os.environ.copy()
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    if offline:
+        env["HF_HUB_OFFLINE"] = "1"
+        env["TRANSFORMERS_OFFLINE"] = "1"
+    else:
+        # Preparation is the one stage where networking is intentionally allowed.
+        # Do not inherit an offline shell setting into the population subprocess.
+        env.pop("HF_HUB_OFFLINE", None)
+        env.pop("TRANSFORMERS_OFFLINE", None)
 
-    socket.socket.connect = blocked_connect
-    socket.socket.connect_ex = blocked_connect_ex
-    try:
-        yield
-    finally:
-        socket.socket.connect = original_connect
-        socket.socket.connect_ex = original_connect_ex
+    code = (
+        "import socket\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        "checkout = Path(sys.argv[1]).resolve()\n"
+        "offline = sys.argv[2] == \"1\"\n"
+        "if offline:\n"
+        "    def blocked_connect(self, address):\n"
+        "        raise RuntimeError(f\"Network blocked during isolated BASIC offline verification: {address!r}\")\n"
+        "    socket.socket.connect = blocked_connect\n"
+        "    socket.socket.connect_ex = blocked_connect\n"
+        "sys.path.insert(0, str(checkout))\n"
+        "from utils_features import load_model\n"
+        "bundle = load_model(\"clip\", \"cpu\")\n"
+        "del bundle\n"
+        "print(\"OFFICIAL_BASIC_CLIP_LOADER_OK\", flush=True)\n"
+    )
+    return subprocess.run(
+        [sys.executable, "-u", "-c", code, str(checkout), "1" if offline else "0"],
+        cwd=checkout,
+        env=env,
+        text=True,
+        # Online population inherits stdout/stderr so large model-download progress
+        # stays visible. Offline probes are captured to keep expected cache misses quiet.
+        capture_output=offline,
+        check=False,
+    )
+
+
+def format_loader_failure(result: subprocess.CompletedProcess[str]) -> str:
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+    parts = [f"exit={result.returncode}"]
+    if stdout:
+        parts.append(f"stdout:\n{stdout[-4000:]}")
+    if stderr:
+        parts.append(f"stderr:\n{stderr[-8000:]}")
+    return "\n".join(parts)
 
 
 def import_official(checkout: Path):
     checkout_str = str(checkout)
     if checkout_str not in sys.path:
         sys.path.insert(0, checkout_str)
-    utils_features = importlib.import_module("utils_features")
     run_retrieval = importlib.import_module("run_retrieval")
-    return utils_features, run_retrieval
+    return run_retrieval
 
 
 def normalized_expected_preset(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -300,28 +342,35 @@ def prepare_basic_model_cache(
         shutil.rmtree(cache_root)
     configure_basic_cache(cache_root)
 
-    utils_features, run_retrieval = import_official(checkout)
+    run_retrieval = import_official(checkout)
     preset = verify_official_preset(cfg, run_retrieval)
 
-    # First try the exact official loader with networking blocked. Existing complete
-    # caches take this fast path. On a fresh machine, populate once with networking
-    # allowed, then immediately prove the same official loader works offline.
-    offline_ok = False
-    try:
-        with block_network():
-            bundle = utils_features.load_model("clip", "cpu")
-        del bundle
-        offline_ok = True
+    # Probe an existing cache in an isolated offline process. If it is incomplete,
+    # populate it in a separate online process, then verify again offline. Never
+    # monkey-patch networking in this parent process: that caused the Kaggle failure
+    # where the online retry still hit ``blocked_connect``.
+    offline_probe = run_official_clip_loader(checkout, offline=True)
+    if offline_probe.returncode == 0:
         print("[skip] official BASIC CLIP cache is already offline-complete", flush=True)
-    except Exception as error:
-        print(f"[prepare] BASIC CLIP cache miss/incomplete: {type(error).__name__}: {error}", flush=True)
-
-    if not offline_ok:
-        bundle = utils_features.load_model("clip", "cpu")
-        del bundle
-        with block_network():
-            bundle = utils_features.load_model("clip", "cpu")
-        del bundle
+    else:
+        print(
+            "[prepare] BASIC CLIP cache miss/incomplete; populating with the pinned "
+            "official loader",
+            flush=True,
+        )
+        online_load = run_official_clip_loader(checkout, offline=False)
+        if online_load.returncode != 0:
+            raise RuntimeError(
+                "Official BASIC CLIP cache population failed.\n"
+                + format_loader_failure(online_load)
+            )
+        offline_verify = run_official_clip_loader(checkout, offline=True)
+        if offline_verify.returncode != 0:
+            raise RuntimeError(
+                "Official BASIC CLIP loaded online, but the prepared cache does not "
+                "work offline. Refusing an unreproducible runtime cache.\n"
+                + format_loader_failure(offline_verify)
+            )
         print("[ok] official BASIC CLIP loader verified offline after preparation", flush=True)
 
     files = list_cache_files(cache_root)
