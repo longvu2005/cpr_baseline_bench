@@ -40,7 +40,7 @@ from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "adafocal_setmatch"
-ADAPTER_VERSION = "2026-08-17-v1-official-scalar-pred-anchor-person-target-setmatch"
+ADAPTER_VERSION = "2026-08-18-v3-checkpoint-namespace-preflight"
 TARGET_FEATURE_SCHEMA = 1
 
 
@@ -280,6 +280,134 @@ def blip_caption_eval(caption: str, max_words: int = 50) -> str:
     return caption
 
 
+def _checkpoint_tensor_dict_candidates(obj: Any, path: str = "root", depth: int = 0):
+    """Yield nested mappings that look like PyTorch state_dict containers."""
+    if depth > 4 or not isinstance(obj, dict):
+        return
+    tensor_items = {
+        str(k): v
+        for k, v in obj.items()
+        if isinstance(k, str) and isinstance(v, (torch.Tensor, torch.nn.Parameter))
+    }
+    if tensor_items:
+        yield path, tensor_items
+    for key, value in obj.items():
+        if isinstance(value, dict):
+            yield from _checkpoint_tensor_dict_candidates(
+                value, f"{path}.{key}", depth + 1
+            )
+
+
+def _strip_state_prefix(state_dict: dict[str, Any], prefix: str) -> dict[str, Any]:
+    if not prefix:
+        return dict(state_dict)
+    if not state_dict or not all(key.startswith(prefix) for key in state_dict):
+        return dict(state_dict)
+    return {key[len(prefix):]: value for key, value in state_dict.items()}
+
+
+def resolve_checkpoint_state_dict(
+    checkpoint_obj: Any,
+    model: torch.nn.Module,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Find the checkpoint namespace with maximum key+shape overlap with model.
+
+    The official OACIR saver stores a full state_dict under the runtime class
+    name, but released/checkpoint wrappers can introduce namespaces such as
+    ``module.``.  Never silently accept a zero-overlap dict: select and validate
+    the best candidate explicitly.
+    """
+    target = model.state_dict()
+    target_keys = set(target)
+    class_key = model.__class__.__name__
+
+    roots: list[tuple[str, Any]] = []
+    if isinstance(checkpoint_obj, dict):
+        for key in (class_key, "model", "state_dict", "model_state_dict", "DataParallel"):
+            if key in checkpoint_obj:
+                roots.append((f"root.{key}", checkpoint_obj[key]))
+        roots.append(("root", checkpoint_obj))
+    else:
+        roots.append(("root", checkpoint_obj))
+
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    seen_ids: set[int] = set()
+    for root_path, root_obj in roots:
+        if isinstance(root_obj, dict) and id(root_obj) not in seen_ids:
+            seen_ids.add(id(root_obj))
+            candidates.extend(_checkpoint_tensor_dict_candidates(root_obj, root_path))
+
+    if not candidates:
+        raise RuntimeError(
+            "AdaFocal checkpoint contains no tensor state_dict candidates. "
+            f"top_level_type={type(checkpoint_obj).__name__}"
+        )
+
+    prefixes = (
+        "",
+        "module.",
+        "model.",
+        "_orig_mod.",
+        "module.model.",
+        "model.module.",
+        "module._orig_mod.",
+    )
+
+    best = None
+    diagnostics = []
+    for candidate_path, raw in candidates:
+        for prefix in prefixes:
+            normalized = _strip_state_prefix(raw, prefix)
+            exact = 0
+            shape_match = 0
+            for key, value in normalized.items():
+                if key in target_keys:
+                    exact += 1
+                    if tuple(value.shape) == tuple(target[key].shape):
+                        shape_match += 1
+            score = (shape_match, exact, -len(normalized))
+            diagnostics.append(
+                {
+                    "path": candidate_path,
+                    "prefix": prefix or "<none>",
+                    "keys": len(normalized),
+                    "exact": exact,
+                    "shape_match": shape_match,
+                }
+            )
+            if best is None or score > best[0]:
+                best = (score, candidate_path, prefix, normalized)
+
+    assert best is not None
+    (_, candidate_path, prefix, state_dict) = best
+    shape_match = best[0][0]
+    exact = best[0][1]
+    if shape_match == 0:
+        preview = sorted(diagnostics, key=lambda x: (x["shape_match"], x["exact"]), reverse=True)[:5]
+        raise RuntimeError(
+            "Could not align AdaFocal checkpoint with model state_dict. "
+            f"model_class={class_key}; top_candidates={preview}"
+        )
+
+    # Remove entries whose names overlap but tensor shapes differ; load_state_dict
+    # raises on shape mismatch even with strict=False.
+    compatible = {
+        key: value
+        for key, value in state_dict.items()
+        if key in target and tuple(value.shape) == tuple(target[key].shape)
+    }
+    info = {
+        "candidate_path": candidate_path,
+        "stripped_prefix": prefix or None,
+        "checkpoint_tensor_keys": len(state_dict),
+        "compatible_keys": len(compatible),
+        "model_keys": len(target),
+        "exact_name_overlap": exact,
+        "shape_match_overlap": shape_match,
+    }
+    return compatible, info
+
+
 def load_adafocal(
     cfg: dict[str, Any],
     checkout: Path,
@@ -313,35 +441,56 @@ def load_adafocal(
     model = model.to(device)
     txt_processors = {"eval": blip_caption_eval}
     checkpoint_obj = torch.load(checkpoint, map_location="cpu")
-    class_key = model.__class__.__name__
-    if isinstance(checkpoint_obj, dict) and class_key in checkpoint_obj:
-        state_dict = checkpoint_obj[class_key]
-    elif isinstance(checkpoint_obj, dict) and "model" in checkpoint_obj:
-        state_dict = checkpoint_obj["model"]
-    elif isinstance(checkpoint_obj, dict):
-        # Last-resort compatibility for a raw state_dict checkpoint.
-        state_dict = checkpoint_obj
-    else:
-        raise TypeError("Unsupported AdaFocal checkpoint format")
+    state_dict, checkpoint_load_info = resolve_checkpoint_state_dict(
+        checkpoint_obj, model
+    )
+    del checkpoint_obj
 
     msg = model.load_state_dict(state_dict, strict=False)
     model.eval()
 
-    # These should not be missing for the released scalar checkpoint.
-    critical_prefixes = ("crm_module.", "contextual_probe_tokens", "text_proj.", "vision_proj.")
-    critical_missing = [
-        key for key in msg.missing_keys if key.startswith(critical_prefixes)
+    # Released scalar AdaFocal must provide every CAAM/query/target projection
+    # parameter.  Base BLIP-2 keys may legitimately come from from_pretrained().
+    critical_prefixes = (
+        "crm_module.",
+        "contextual_probe_tokens",
+        "text_proj.",
+        "vision_proj.",
+    )
+    critical_target_keys = [
+        key for key in model.state_dict() if key.startswith(critical_prefixes)
     ]
-    if critical_missing:
+    loaded_keys = set(state_dict)
+    critical_not_loaded = [key for key in critical_target_keys if key not in loaded_keys]
+    if critical_not_loaded:
         raise RuntimeError(
-            "AdaFocal checkpoint is missing critical scalar-model weights: "
-            + ", ".join(critical_missing[:12])
+            "AdaFocal checkpoint namespace resolved, but critical scalar-model "
+            "weights are still absent after normalization: "
+            + ", ".join(critical_not_loaded[:12])
+            + f"; load_info={checkpoint_load_info}"
         )
+
+    print(
+        "[AdaFocal] checkpoint namespace: "
+        f"{checkpoint_load_info['candidate_path']} "
+        f"prefix={checkpoint_load_info['stripped_prefix'] or '<none>'} "
+        f"compatible={checkpoint_load_info['compatible_keys']}/"
+        f"{checkpoint_load_info['model_keys']}",
+        flush=True,
+    )
 
     preprocess = targetpad_transform(
         float(model_cfg["target_ratio"]), int(model_cfg["input_size"])
     )
-    return model, txt_processors, preprocess, transform_bbox_targetpad, bbox_to_patch_mask, msg
+    return (
+        model,
+        txt_processors,
+        preprocess,
+        transform_bbox_targetpad,
+        bbox_to_patch_mask,
+        msg,
+        checkpoint_load_info,
+    )
 
 
 def query_compose_text(query: dict[str, Any], subject: dict[str, Any]) -> str:
@@ -834,6 +983,42 @@ def main() -> None:
         query_indices = query_gallery_indices(queries, gallery_index)
         tracker.log(f"gallery={len(gallery):,} queries={len(queries):,}")
 
+    with tracker.phase("Load selector and official AdaFocal"):
+        device = device_from(str(cfg["runtime"]["device"]))
+
+        selector_checkpoint = resolve_path(str(cfg["selector"]["checkpoint"]))
+        if not selector_checkpoint.is_file():
+            raise FileNotFoundError(
+                f"Missing selector checkpoint: {rel(selector_checkpoint)}"
+            )
+        selector_sha = sha256_file(selector_checkpoint)
+        if selector_sha != str(cfg["selector"]["checkpoint_sha256"]):
+            raise RuntimeError("CLIP ViT-B/32 selector checkpoint checksum mismatch")
+        selector_model, selector_preprocess = clip.load(
+            str(selector_checkpoint), device=device, jit=False
+        )
+        selector_model.eval()
+        if device.type != "cuda":
+            selector_model.float()
+
+        oacir_checkout = ensure_clean_pinned_source(cfg)
+        (
+            adafocal,
+            txt_processors,
+            adafocal_preprocess,
+            transform_bbox_targetpad,
+            bbox_to_patch_mask,
+            load_msg,
+            checkpoint_load_info,
+        ) = load_adafocal(cfg, oacir_checkout, device)
+        tracker.log(
+            f"AdaFocal missing_keys={len(load_msg.missing_keys)} "
+            f"unexpected_keys={len(load_msg.unexpected_keys)} "
+            f"checkpoint={checkpoint_load_info['candidate_path']} "
+            f"prefix={checkpoint_load_info['stripped_prefix'] or '<none>'}"
+        )
+
+
     with tracker.phase("Prepare shared predicted person detections"):
         s5_method_dir = resolve_path(str(cfg["shared_protocol"]["method_dir"]))
         s5_config_path = resolve_path(str(cfg["shared_protocol"]["config"]))
@@ -879,38 +1064,6 @@ def main() -> None:
             offsets, boxes, confidence = loaded
         del confidence
         tracker.log(f"predicted_persons={int(offsets[-1]):,}")
-
-    with tracker.phase("Load selector and official AdaFocal"):
-        device = device_from(str(cfg["runtime"]["device"]))
-
-        selector_checkpoint = resolve_path(str(cfg["selector"]["checkpoint"]))
-        if not selector_checkpoint.is_file():
-            raise FileNotFoundError(
-                f"Missing selector checkpoint: {rel(selector_checkpoint)}"
-            )
-        selector_sha = sha256_file(selector_checkpoint)
-        if selector_sha != str(cfg["selector"]["checkpoint_sha256"]):
-            raise RuntimeError("CLIP ViT-B/32 selector checkpoint checksum mismatch")
-        selector_model, selector_preprocess = clip.load(
-            str(selector_checkpoint), device=device, jit=False
-        )
-        selector_model.eval()
-        if device.type != "cuda":
-            selector_model.float()
-
-        oacir_checkout = ensure_clean_pinned_source(cfg)
-        (
-            adafocal,
-            txt_processors,
-            adafocal_preprocess,
-            transform_bbox_targetpad,
-            bbox_to_patch_mask,
-            load_msg,
-        ) = load_adafocal(cfg, oacir_checkout, device)
-        tracker.log(
-            f"AdaFocal missing_keys={len(load_msg.missing_keys)} "
-            f"unexpected_keys={len(load_msg.unexpected_keys)}"
-        )
 
     with tracker.phase("Prepare AdaFocal gallery-person target features"):
         checkpoint = resolve_path(str(cfg["adafocal"]["checkpoint"]))
@@ -1083,6 +1236,7 @@ def main() -> None:
                 "variant": "scalar_beta_default",
                 "transform": cfg["adafocal"]["transform"],
                 "target_ratio": cfg["adafocal"]["target_ratio"],
+                "checkpoint_load_info": checkpoint_load_info,
             },
             "query_anchor": {
                 "source": "shared Grounding DINO predicted person boxes",

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""P10 Imagine and Seek: paper-guided, training-free CPR reproduction."""
+"""P10 Imagine and Seek: official-source, training-free CPR adapter."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "imagine_seek"
-ADAPTER_VERSION = "2026-08-18-v1-paper-guided-fullscene-lincir"
+ADAPTER_VERSION = "2026-08-18-v2-official-source-migc-elite-fullscene"
 PROXY_FEATURE_SCHEMA = 1
 QUERY_COMPONENT_SCHEMA = 1
 
@@ -166,11 +166,11 @@ def run_lincir_if_needed(cfg: dict[str, Any]) -> tuple[Path, Path]:
     return scores, gallery_features
 
 
-def ensure_proxy_manifest(cfg: dict[str, Any]) -> Path:
+def ensure_proxy_manifest(cfg: dict[str, Any], config_path: Path) -> Path:
     manifest = resolve_path(str(cfg["proxy"]["manifest"]))
     script = Path(__file__).resolve().parent / "prepare_proxies.py"
     # Always invoke the validator/preparer. Cache fingerprints make this cheap when valid.
-    subprocess.run([sys.executable, str(script), "--stage", "all"], cwd=str(ROOT), check=True)
+    subprocess.run([sys.executable, str(script), "--config", str(config_path), "--stage", "all"], cwd=str(ROOT), check=True)
     if not manifest.is_file():
         raise FileNotFoundError(f"Proxy preparation did not produce {rel(manifest)}")
     return manifest
@@ -419,24 +419,25 @@ def construct_proxy_representation(
     fq: np.ndarray,
     fs: np.ndarray,
 ) -> np.ndarray:
-    # Eq. (1), with only a numerical epsilon guard and optional final L2 normalization.
+    # Released retrieval code first averages the N proxy image features, then builds
+    # robust_aug_img = a_w*proxy + s_w*max(proxy)/max(source)*source
+    #                  + t_w*max(proxy)/max(direction)*direction.
+    if fp.ndim != 2 or fq.ndim != 2 or fs.ndim != 2:
+        raise ValueError(f"Expected [Q,D] proxy/source/direction features, got {fp.shape}, {fq.shape}, {fs.shape}")
     epsilon = float(cfg["representation"]["denominator_epsilon"])
     fp_max = fp.max(axis=-1, keepdims=True)
-    fq_max = safe_denominator(fq.max(axis=-1, keepdims=True), epsilon)[:, None, :]
-    fs_max = safe_denominator(fs.max(axis=-1, keepdims=True), epsilon)[:, None, :]
-    query_scale = fp_max / fq_max
-    semantic_scale = fp_max / fs_max
+    fq_max = safe_denominator(fq.max(axis=-1, keepdims=True), epsilon)
+    fs_max = safe_denominator(fs.max(axis=-1, keepdims=True), epsilon)
     frp = (
         fp
-        + float(cfg["representation"]["query_residual_weight"]) * query_scale * fq[:, None, :]
-        + float(cfg["representation"]["semantic_residual_weight"]) * semantic_scale * fs[:, None, :]
+        + float(cfg["representation"]["query_residual_weight"]) * (fp_max / fq_max) * fq
+        + float(cfg["representation"]["semantic_residual_weight"]) * (fp_max / fs_max) * fs
     )
     if bool(cfg["representation"]["normalize_proxy_representation"]):
-        norm = np.linalg.norm(frp, axis=-1, keepdims=True)
-        frp = frp / np.maximum(norm, 1e-12)
+        frp = frp / np.maximum(np.linalg.norm(frp, axis=-1, keepdims=True), 1e-12)
     frp = frp.astype(np.float32, copy=False)
     if not np.isfinite(frp).all():
-        raise RuntimeError("Eq. (1) produced non-finite proxy representations")
+        raise RuntimeError("Robust proxy representation contains NaN/Inf")
     return frp
 
 
@@ -451,7 +452,7 @@ def validate_scores(scores: np.ndarray, expected: tuple[int, int]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run P10 Imagine-and-Seek CPR reproduction")
+    parser = argparse.ArgumentParser(description="Run P10 Imagine-and-Seek official-source CPR adapter")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     args = parser.parse_args()
     config_path = resolve_path(args.config)
@@ -480,7 +481,7 @@ def main() -> None:
             raise ValueError(f"LinCIR gallery feature shape mismatch: {gallery_features.shape}")
 
     with tracker.phase("Prepare/validate five imagined proxies per query"):
-        proxy_manifest = ensure_proxy_manifest(cfg)
+        proxy_manifest = ensure_proxy_manifest(cfg, config_path)
         proxy_rows = load_jsonl(proxy_manifest)
         validate_proxy_manifest(cfg, queries, proxy_rows)
         tracker.log(f"proxy_manifest={rel(proxy_manifest)}")
@@ -525,7 +526,8 @@ def main() -> None:
             gallery_features_path=gallery_features_path,
             clip_model_sha=clip_model_sha,
         )
-        frp = construct_proxy_representation(cfg=cfg, fp=np.asarray(proxy_features), fq=fq, fs=fs)
+        fp = np.asarray(proxy_features, dtype=np.float32).mean(axis=1)
+        frp = construct_proxy_representation(cfg=cfg, fp=fp, fq=fq, fs=fs)
         del image_encoder, text_encoder
         gc.collect()
         if torch.cuda.is_available():
@@ -547,7 +549,7 @@ def main() -> None:
         if not (0.0 <= lam <= 1.0):
             raise ValueError("fusion.lambda_text must be in [0,1]")
         aggregation = str(cfg["proxy"]["aggregation"])
-        if aggregation != "mean_similarity":
+        if aggregation != "mean_feature_then_robust":
             raise ValueError(f"Unsupported proxy aggregation: {aggregation}")
         steps = (len(queries) + batch - 1) // batch
         for start in progress_bar(
@@ -557,9 +559,9 @@ def main() -> None:
             unit="batch",
         ):
             end = min(start + batch, len(queries))
-            # [B, P, D] @ [D, G] -> [B, P, G], then average over five proxies.
+            # Released source: mean proxy features first, then one robust proxy score per query.
             proxy_tensor = torch.from_numpy(frp[start:end]).to(device=device, dtype=torch.float32)
-            sp = torch.matmul(proxy_tensor, gallery_tensor.T).mean(dim=1).cpu().numpy()
+            sp = torch.matmul(proxy_tensor, gallery_tensor.T).cpu().numpy()
             st = np.asarray(base_scores[start:end], dtype=np.float32)
             sb = st * sp
             scores[start:end] = lam * st + (1.0 - lam) * sb
@@ -575,7 +577,7 @@ def main() -> None:
             "group": cfg["group"],
             "cpr_supervision": cfg["cpr_supervision"],
             "paper": cfg["paper"],
-            "implementation_status": "REPRODUCED",
+            "implementation_status": "OFFICIAL_SOURCE_ADAPTED",
             "adapter_version": ADAPTER_VERSION,
             "cpr_adaptation": "direct_full_scene",
             "base_retriever": {
@@ -586,26 +588,34 @@ def main() -> None:
             "proxy": {
                 **cfg["proxy"],
                 "manifest": rel(proxy_manifest),
-                "reference_conditioning": cfg["migc"]["reference_conditioning"],
-                "aggregation_note": "Paper specifies five proxies but not an explicit released multi-proxy aggregation rule; this reproduction averages proxy similarities.",
+                "reference_conditioning": "MIGC+ELITE_full_scene_mask",
+                "aggregation_note": "Released retrieval code averages proxy image features first, then builds the robust proxy representation.",
             },
             "representation": cfg["representation"],
             "fusion": cfg["fusion"],
             "paper_equations": {
-                "eq1": "f_RP = f_p + max(f_p)/max(f_q)*f_q + max(f_p)/max(f_s)*f_s; f_s=f_t-f_o",
+                "eq1": "f_p=mean(proxy image features); f_RP=f_p+max(f_p)/max(f_q)*f_q+max(f_p)/max(f_s)*f_s; f_s=f_t-f_o",
                 "eq2": "S_b=S_t*S_p; S_f=lambda*S_t+(1-lambda)*S_b",
             },
             "generator": {
+                "author_source": {
+                    "repository": cfg["author_source"]["repository"],
+                    "commit": cfg["author_source"]["commit"],
+                    "adaptation": cfg["author_source"]["adaptation"],
+                },
                 "captioner": cfg["captioner"],
                 "layout_llm": cfg["layout_llm"],
                 "migc": {
-                    "repository": cfg["migc"]["repository"],
-                    "commit": cfg["migc"]["commit"],
                     "checkpoint_status": cfg["migc"]["checkpoint_status"],
                     "checkpoint_sha256": marker.get("migc_checkpoint", {}).get("sha256"),
                 },
-                "stable_diffusion": cfg["stable_diffusion"],
-                "limitation": "Public reproduction uses MIGC text/layout control; exact IP-CIR ELITE reference-image conditioning is not claimed.",
+                "elite": {
+                    "global_mapper_sha256": marker.get("elite", {}).get("global_mapper", {}).get("sha256"),
+                    "local_mapper_sha256": marker.get("elite", {}).get("local_mapper", {}).get("sha256"),
+                    "reference_mask": cfg["proxy"]["reference_mask"],
+                },
+                "realistic_vision": marker.get("realistic_vision", {}),
+                "cpr_boundary": "Released MIGC+ELITE source is reused; CPR uses the complete query scene as the visual reference mask instead of dataset-specific GT/object masks.",
             },
             "runtime": cfg["runtime"],
             "config": rel(config_path),

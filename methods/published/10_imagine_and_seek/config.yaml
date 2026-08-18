@@ -1,5 +1,5 @@
 method: imagine_seek
-display_name: Imagine and Seek (IP-CIR, reproduced)
+display_name: Imagine and Seek (IP-CIR, official-source CPR adapter)
 group: Published / SOTA Baselines
 cpr_supervision: 'No'
 
@@ -7,10 +7,17 @@ paper:
   title: 'Imagine and Seek: Improving Composed Image Retrieval with an Imagined Proxy'
   venue: CVPR 2025
   arxiv: '2411.16752'
-  implementation_status: REPRODUCED
+  implementation_status: OFFICIAL_SOURCE_ADAPTED
 
-# IP-CIR is training-free. No author IP-CIR checkpoint is assumed here.
-# LinCIR is used as the retrieval baseline because the paper evaluates IP-CIR on top of LinCIR.
+author_source:
+  repository: https://github.com/LeyRio/Imagine-and-Seek.git
+  commit: 2f615824bd7a6958083c85d8ad5e5e20549e22cb
+  local_checkout: runs/imagine_seek/official_source/Imagine-and-Seek
+  auto_clone: true
+  # The released project is adapted only at its dataset/path boundary and proxy masking boundary.
+  # We reuse its MIGC + ELITE implementation, mapper classes and generation function.
+  adaptation: cpr_full_scene_reference_mask
+
 base_retriever:
   method: lincir
   method_dir: methods/published/05_lincir
@@ -23,13 +30,15 @@ base_retriever:
   auto_run: true
 
 proxy:
-  # generate: reproduce paper proxy generation with public foundation models.
-  # precomputed: skip generation and consume proxy_manifest directly.
   mode: generate
   count_per_query: 5
-  aggregation: mean_similarity
+  aggregation: mean_feature_then_robust
   manifest: runs/imagine_seek/cache/proxy_manifest.jsonl
   image_dir: runs/imagine_seek/cache/proxies
+  jobs: runs/imagine_seek/cache/proxy_jobs.jsonl
+  # Direct full-scene CPR adaptation: ELITE receives the complete reference scene as
+  # the visual concept for every image-referenced subject. No GT target box/identity is used.
+  reference_mask: full_scene
 
 captioner:
   repo_id: Salesforce/blip2-opt-2.7b
@@ -42,52 +51,63 @@ captioner:
   temperature: 0.85
 
 layout_llm:
-  repo_id: Qwen/Qwen1.5-32B-Chat
-  revision: main
-  local_snapshot: checkpoints/imagine_seek/hf/Qwen1.5-32B-Chat
+  # The released IP-CIR project primarily reports Qwen1.5-32B-Chat-GPTQ-Int4.
+  # AutoGPTQ is brittle on Kaggle/Python 3.12, so this default uses the same Qwen1.5
+  # family with bitsandbytes 4-bit. Change repo_id to Qwen/Qwen1.5-14B-Chat or
+  # Qwen/Qwen1.5-32B-Chat if your GPU/storage allows it.
+  repo_id: Qwen/Qwen1.5-7B-Chat
+  revision: 5f4f5e69ac7f1d508f8369e977de208b4803444b
+  local_snapshot: checkpoints/imagine_seek/hf/Qwen1.5-7B-Chat
   max_new_tokens: 900
   do_sample: false
   temperature: 0.0
   target_captions_per_query: 5
-  # Full 32B weights are intentionally used by default to stay closest to the paper.
-  # Set load_in_4bit=true if VRAM is limited; this changes only runtime quantization.
   load_in_4bit: true
 
 migc:
-  repository: https://github.com/limuloo/MIGC.git
-  commit: effd6cc2e6a9f7d2fe34409c300a5f037a87b9ec
-  local_checkout: runs/imagine_seek/official_source/MIGC
-  checkpoint: checkpoints/imagine_seek/migc/MIGC_SD14.ckpt
+  checkpoint: checkpoints/imagine_seek/weights/MIGC_SD14.ckpt
   google_drive_id: 107fnQ9Fpu5K0UtqnHlKja7hqe-GwjAmz
-  prepared_marker: checkpoints/imagine_seek/prepared.json
   checkpoint_status: PUBLIC_REIMPLEMENTED_UPSTREAM_WEIGHT
-  # The public MIGC path is text/layout-conditioned. It does not reproduce the
-  # paper's unreleased/underspecified ELITE reference-image conditioning exactly.
-  reference_conditioning: public_layout_only
-  negative_prompt: 'worst quality, low quality, bad anatomy, distorted face, duplicate person, extra person, missing person, watermark, text, blurry'
+  prepared_marker: checkpoints/imagine_seek/prepared.json
   generation:
     num_inference_steps: 50
     guidance_scale: 7.5
     migc_steps: 25
+    naive_fuser_steps: 50
     seed: 42000
 
-stable_diffusion:
+elite:
+  checkpoint_folder_url: https://drive.google.com/drive/folders/1VkiVZzA_i9gbfuzvHaLH2VYh7kOTzE0x?usp=sharing
+  download_dir: checkpoints/imagine_seek/weights/elite_download
+  global_mapper: checkpoints/imagine_seek/weights/global_mapper.pt
+  local_mapper: checkpoints/imagine_seek/weights/local_mapper.pt
+  clip_vision_snapshot: checkpoints/lincir/hf/clip-vit-large-patch14
+
+realistic_vision:
+  repo_id: aishuu/Realistic_Vision_V6.0_B1VAE
+  revision: main
+  filename: realisticVisionV60B1_v60B1VAE.safetensors
+  path: checkpoints/imagine_seek/weights/realisticVisionV60B1_v60B1VAE.safetensors
+  sha256: e5f3cbc5f7669457d3bec1fd492420995fb9a79e735dce438b81af61fd5d77f0
+
+sd15_components:
+  # Needed by diffusers.from_single_file to construct the released Realistic Vision checkpoint offline.
   repo_id: stable-diffusion-v1-5/stable-diffusion-v1-5
   revision: main
-  local_snapshot: checkpoints/imagine_seek/hf/stable-diffusion-v1-5
+  local_snapshot: checkpoints/imagine_seek/hf/stable-diffusion-v1-5-components
 
 representation:
-  # Eq. (1) in the paper:
-  # f_RP = f_p + max(f_p)/max(f_q) * f_q + max(f_p)/max(f_s) * f_s
+  # Author retrieval code uses the same three-term robust proxy representation:
+  # proxy + scaled source feature + scaled semantic direction.
   query_residual_weight: 1.0
   semantic_residual_weight: 1.0
   denominator_epsilon: 1.0e-6
-  normalize_proxy_representation: true
+  normalize_proxy_representation: false
   original_caption_reduce: mean_then_normalize
   target_caption_reduce: mean_then_normalize
 
 fusion:
-  # Eq. (2): S_b = S_t * S_p; S_f = lambda*S_t + (1-lambda)*S_b
+  # Released source default: 0.3. No CPR label is used to tune this value.
   lambda_text: 0.3
 
 runtime:

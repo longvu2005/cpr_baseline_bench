@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare external artifacts for the P10 Imagine-and-Seek reproduction.
-
-No IP-CIR author checkpoint is claimed. This prepares:
-  * the repository's pinned P5 LinCIR assets;
-  * a pinned public MIGC source checkout + public MIGC_SD14.ckpt;
-  * local HF snapshots for BLIP2, Qwen1.5-32B, and Stable Diffusion 1.5.
-"""
+"""Prepare external artifacts for P10 Imagine-and-Seek official-source CPR adapter."""
 
 from __future__ import annotations
 
@@ -63,6 +57,61 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def tracked_dirty(checkout: Path) -> str:
+    output = subprocess.check_output(
+        ["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=no"],
+        text=True,
+    )
+    return output.strip()
+
+
+def prepare_author_source(cfg: dict[str, Any], force: bool) -> Path:
+    if shutil.which("git") is None:
+        raise RuntimeError("System tool 'git' is required to pin the released IP-CIR source")
+    c = cfg["author_source"]
+    checkout = resolve_path(str(c["local_checkout"]))
+    expected = str(c["commit"])
+
+    if force and checkout.exists():
+        dirty = tracked_dirty(checkout)
+        if dirty:
+            raise RuntimeError(f"Refusing to replace dirty IP-CIR checkout: {rel(checkout)}\n{dirty}")
+        shutil.rmtree(checkout)
+
+    if not checkout.exists():
+        checkout.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "clone", str(c["repository"]), str(checkout)], check=True)
+
+    dirty = tracked_dirty(checkout)
+    if dirty:
+        raise RuntimeError(f"Pinned IP-CIR checkout has tracked modifications:\n{dirty}")
+
+    actual = subprocess.check_output(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True
+    ).strip()
+    if actual != expected:
+        subprocess.run(["git", "-C", str(checkout), "fetch", "--all", "--tags"], check=True)
+        subprocess.run(["git", "-C", str(checkout), "checkout", "--detach", expected], check=True)
+        actual = subprocess.check_output(
+            ["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True
+        ).strip()
+    if actual != expected:
+        raise RuntimeError(f"IP-CIR source commit mismatch: expected {expected}, got {actual}")
+
+    required = (
+        "generate_proxy_migc_elite.py",
+        "generate_layout.py",
+        "MIGC/migc/migc_pipeline.py",
+        "MIGC/migc/migc_utils.py",
+        "MIGC/migc_gui_weights/v1-inference.yaml",
+    )
+    for value in required:
+        if not (checkout / value).is_file():
+            raise FileNotFoundError(f"Released IP-CIR source missing {value}")
+    print(f"[ok] released IP-CIR source {expected[:12]}: {rel(checkout)}", flush=True)
+    return checkout
+
+
 def run_lincir_preparer(cfg: dict[str, Any], force: bool) -> None:
     method_dir = resolve_path(str(cfg["base_retriever"]["method_dir"]))
     script = method_dir / "download_checkpoint.py"
@@ -74,127 +123,170 @@ def run_lincir_preparer(cfg: dict[str, Any], force: bool) -> None:
     subprocess.run(command, cwd=str(ROOT), check=True)
 
 
-def tracked_dirty(checkout: Path) -> str:
-    output = subprocess.check_output(
-        ["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=no"],
-        text=True,
-    )
-    return output.strip()
-
-
-def prepare_migc_source(cfg: dict[str, Any], force: bool) -> Path:
-    if shutil.which("git") is None:
-        raise RuntimeError("System tool 'git' is required for the pinned MIGC checkout")
-    c = cfg["migc"]
-    checkout = resolve_path(str(c["local_checkout"]))
-    expected = str(c["commit"])
-    if force and checkout.exists():
-        if tracked_dirty(checkout):
-            raise RuntimeError(f"Refusing to delete dirty MIGC checkout: {rel(checkout)}")
-        shutil.rmtree(checkout)
-    if not checkout.exists():
-        checkout.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["git", "clone", str(c["repository"]), str(checkout)], check=True)
-    dirty = tracked_dirty(checkout)
-    if dirty:
-        raise RuntimeError(f"Pinned MIGC checkout has tracked modifications:\n{dirty}")
-    actual = subprocess.check_output(
-        ["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True
-    ).strip()
-    if actual != expected:
-        subprocess.run(["git", "-C", str(checkout), "fetch", "--all", "--tags"], check=True)
-        subprocess.run(["git", "-C", str(checkout), "checkout", "--detach", expected], check=True)
-        actual = subprocess.check_output(
-            ["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True
-        ).strip()
-    if actual != expected:
-        raise RuntimeError(f"MIGC source commit mismatch: expected {expected}, got {actual}")
-    for required in ("migc/migc_pipeline.py", "migc/migc_utils.py", "inference_single_image.py"):
-        if not (checkout / required).is_file():
-            raise FileNotFoundError(f"Pinned MIGC source missing {required}")
-    return checkout
-
-
-def prepare_migc_checkpoint(cfg: dict[str, Any], force: bool) -> dict[str, Any]:
+def download_gdrive_file(*, file_id: str, path: Path, force: bool, min_size: int) -> dict[str, Any]:
     try:
         import gdown
     except ImportError as error:
-        raise RuntimeError("Missing gdown; install method requirements first") from error
+        raise RuntimeError("Missing gdown; run through run_baseline.py so requirements install first") from error
 
-    c = cfg["migc"]
-    path = resolve_path(str(c["checkpoint"]))
     path.parent.mkdir(parents=True, exist_ok=True)
-    marker_path = resolve_path(str(c["prepared_marker"]))
-    old_marker: dict[str, Any] = {}
-    if marker_path.is_file():
-        try:
-            old_marker = json.loads(marker_path.read_text(encoding="utf-8"))
-        except Exception:
-            old_marker = {}
-
-    if path.is_file() and not force:
-        actual = sha256_file(path)
-        recorded = old_marker.get("migc_checkpoint", {}).get("sha256")
-        if path.stat().st_size > 100_000_000 and (recorded is None or recorded == actual):
-            print(f"[skip] MIGC checkpoint: {rel(path)}", flush=True)
-            return {"path": rel(path), "sha256": actual, "size_bytes": path.stat().st_size}
-        print("[warn] existing MIGC checkpoint failed validation; replacing", flush=True)
-        path.unlink(missing_ok=True)
+    if path.is_file() and not force and path.stat().st_size >= min_size:
+        return {"path": rel(path), "size_bytes": path.stat().st_size, "sha256": sha256_file(path)}
 
     temp = path.with_name(path.name + ".part")
     temp.unlink(missing_ok=True)
-    print("[download] public MIGC_SD14.ckpt from upstream Google Drive", flush=True)
-    result = gdown.download(id=str(c["google_drive_id"]), output=str(temp), quiet=False)
+    result = gdown.download(id=file_id, output=str(temp), quiet=False)
     if result is None or not temp.is_file():
         temp.unlink(missing_ok=True)
-        raise RuntimeError("gdown failed to download MIGC_SD14.ckpt")
-    if temp.stat().st_size <= 100_000_000:
+        raise RuntimeError(f"gdown failed for Google Drive id={file_id}")
+    if temp.stat().st_size < min_size:
         size = temp.stat().st_size
         temp.unlink(missing_ok=True)
-        raise RuntimeError(f"MIGC checkpoint is unexpectedly small: {size} bytes")
+        raise RuntimeError(f"Downloaded file is unexpectedly small: {size} bytes")
     os.replace(temp, path)
-    return {"path": rel(path), "sha256": sha256_file(path), "size_bytes": path.stat().st_size}
+    return {"path": rel(path), "size_bytes": path.stat().st_size, "sha256": sha256_file(path)}
+
+
+def prepare_migc(cfg: dict[str, Any], force: bool) -> dict[str, Any]:
+    c = cfg["migc"]
+    path = resolve_path(str(c["checkpoint"]))
+    print("[download] MIGC_SD14.ckpt", flush=True)
+    info = download_gdrive_file(
+        file_id=str(c["google_drive_id"]),
+        path=path,
+        force=force,
+        min_size=100_000_000,
+    )
+    print(f"[ok] MIGC sha256={info['sha256']}", flush=True)
+    return info
+
+
+def prepare_elite(cfg: dict[str, Any], force: bool) -> dict[str, Any]:
+    try:
+        import gdown
+    except ImportError as error:
+        raise RuntimeError("Missing gdown") from error
+
+    c = cfg["elite"]
+    global_path = resolve_path(str(c["global_mapper"]))
+    local_path = resolve_path(str(c["local_mapper"]))
+    if (
+        global_path.is_file()
+        and local_path.is_file()
+        and global_path.stat().st_size > 1_000_000
+        and local_path.stat().st_size > 1_000_000
+        and not force
+    ):
+        print(f"[skip] ELITE mappers: {rel(global_path)}, {rel(local_path)}", flush=True)
+    else:
+        download_dir = resolve_path(str(c["download_dir"]))
+        if force and download_dir.exists():
+            shutil.rmtree(download_dir)
+        download_dir.mkdir(parents=True, exist_ok=True)
+        print("[download] ELITE pretrained checkpoint folder", flush=True)
+        result = gdown.download_folder(
+            url=str(c["checkpoint_folder_url"]),
+            output=str(download_dir),
+            quiet=False,
+            use_cookies=False,
+        )
+        if not result:
+            raise RuntimeError(
+                "Could not download the public ELITE checkpoint folder. "
+                "Download global_mapper.pt and local_mapper.pt from the ELITE project and place them under "
+                f"{rel(global_path.parent)}."
+            )
+        found_global = next(download_dir.rglob("global_mapper.pt"), None)
+        found_local = next(download_dir.rglob("local_mapper.pt"), None)
+        if found_global is None or found_local is None:
+            raise FileNotFoundError(
+                "ELITE checkpoint folder downloaded, but global_mapper.pt/local_mapper.pt were not found"
+            )
+        global_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(found_global, global_path)
+        shutil.copy2(found_local, local_path)
+
+    for path in (global_path, local_path):
+        if not path.is_file() or path.stat().st_size <= 1_000_000:
+            raise FileNotFoundError(f"Invalid ELITE mapper: {rel(path)}")
+    return {
+        "global_mapper": {"path": rel(global_path), "sha256": sha256_file(global_path), "size_bytes": global_path.stat().st_size},
+        "local_mapper": {"path": rel(local_path), "sha256": sha256_file(local_path), "size_bytes": local_path.stat().st_size},
+    }
+
+
+def prepare_realistic_vision(cfg: dict[str, Any], force: bool) -> dict[str, Any]:
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError as error:
+        raise RuntimeError("Missing huggingface_hub") from error
+
+    c = cfg["realistic_vision"]
+    path = resolve_path(str(c["path"]))
+    expected = str(c["sha256"])
+    if path.is_file() and not force and sha256_file(path) == expected:
+        print(f"[skip] Realistic Vision: {rel(path)}", flush=True)
+        return {"path": rel(path), "sha256": expected, "size_bytes": path.stat().st_size}
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"[download] {c['repo_id']}/{c['filename']}", flush=True)
+    cached = Path(
+        hf_hub_download(
+            repo_id=str(c["repo_id"]),
+            filename=str(c["filename"]),
+            revision=str(c.get("revision", "main")),
+        )
+    )
+    temp = path.with_name(path.name + ".part")
+    temp.unlink(missing_ok=True)
+    shutil.copyfile(cached, temp)
+    actual = sha256_file(temp)
+    if actual != expected:
+        temp.unlink(missing_ok=True)
+        raise RuntimeError(f"Realistic Vision checksum mismatch: expected {expected}, got {actual}")
+    os.replace(temp, path)
+    return {"path": rel(path), "sha256": actual, "size_bytes": path.stat().st_size}
 
 
 def snapshot_has_weights(path: Path) -> bool:
-    if not (path / "config.json").is_file() and not (path / "model_index.json").is_file():
+    if not path.is_dir():
         return False
-    patterns = ("*.safetensors", "*.bin")
-    return any(any(path.rglob(pattern)) for pattern in patterns)
+    return any(path.rglob("*.safetensors")) or any(path.rglob("*.bin"))
 
 
-def prepare_hf_snapshot(*, repo_id: str, revision: str, local: Path, force: bool, label: str) -> dict[str, Any]:
+def prepare_snapshot(
+    *, repo_id: str, revision: str, local: Path, force: bool, label: str, allow_patterns: list[str] | None = None
+) -> dict[str, Any]:
     try:
         from huggingface_hub import HfApi, snapshot_download
     except ImportError as error:
         raise RuntimeError("Missing huggingface_hub") from error
 
-    if local.is_dir() and snapshot_has_weights(local) and not force:
-        meta_path = local / ".cpr_snapshot.json"
-        if meta_path.is_file():
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                if meta.get("repo_id") == repo_id:
-                    print(f"[skip] {label}: {rel(local)}", flush=True)
-                    return meta
-            except Exception:
-                pass
+    meta_path = local / ".cpr_snapshot.json"
+    if local.is_dir() and snapshot_has_weights(local) and meta_path.is_file() and not force:
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if meta.get("repo_id") == repo_id and meta.get("requested_revision") == revision:
+                print(f"[skip] {label}: {rel(local)}", flush=True)
+                return meta
+        except Exception:
+            pass
 
     if force and local.exists():
         shutil.rmtree(local)
     local.mkdir(parents=True, exist_ok=True)
-
-    api = HfApi()
-    info = api.model_info(repo_id, revision=revision)
+    info = HfApi().model_info(repo_id, revision=revision)
     resolved_revision = str(info.sha)
     print(f"[download] {label}: {repo_id}@{resolved_revision}", flush=True)
-    snapshot_download(
-        repo_id=repo_id,
-        revision=resolved_revision,
-        local_dir=str(local),
-        local_dir_use_symlinks=False,
-        ignore_patterns=["*.h5", "*.msgpack", "*.onnx", "*.tflite", "*.ckpt", "*.bin"],
-    )
+    kwargs: dict[str, Any] = {
+        "repo_id": repo_id,
+        "revision": resolved_revision,
+        "local_dir": str(local),
+        "local_dir_use_symlinks": False,
+    }
+    if allow_patterns is not None:
+        kwargs["allow_patterns"] = allow_patterns
+    snapshot_download(**kwargs)
     if not snapshot_has_weights(local):
         raise FileNotFoundError(f"Incomplete {label} snapshot: {rel(local)}")
     meta = {
@@ -203,99 +295,90 @@ def prepare_hf_snapshot(*, repo_id: str, revision: str, local: Path, force: bool
         "resolved_revision": resolved_revision,
         "path": rel(local),
     }
-    write_json(local / ".cpr_snapshot.json", meta)
+    write_json(meta_path, meta)
     return meta
 
 
-def prepare_large_models(cfg: dict[str, Any], force: bool) -> dict[str, Any]:
+def prepare_foundation_models(cfg: dict[str, Any], force: bool) -> dict[str, Any]:
     models: dict[str, Any] = {}
-    for key, label in (
-        ("captioner", "BLIP2 captioner"),
-        ("layout_llm", "Qwen1.5-32B layout LLM"),
-        ("stable_diffusion", "Stable Diffusion 1.5"),
-    ):
+    for key, label in (("captioner", "BLIP2 captioner"), ("layout_llm", "Qwen layout LLM")):
         c = cfg[key]
-        models[key] = prepare_hf_snapshot(
+        models[key] = prepare_snapshot(
             repo_id=str(c["repo_id"]),
             revision=str(c.get("revision", "main")),
             local=resolve_path(str(c["local_snapshot"])),
             force=force,
             label=label,
         )
+
+    c = cfg["sd15_components"]
+    models["sd15_components"] = prepare_snapshot(
+        repo_id=str(c["repo_id"]),
+        revision=str(c.get("revision", "main")),
+        local=resolve_path(str(c["local_snapshot"])),
+        force=force,
+        label="Stable Diffusion 1.5 text components",
+        allow_patterns=[
+            "text_encoder/*",
+            "tokenizer/*",
+            "scheduler/*",
+            "feature_extractor/*",
+            "model_index.json",
+        ],
+    )
     return models
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Prepare P10 Imagine-and-Seek reproduction assets")
+    parser = argparse.ArgumentParser(description="Prepare P10 Imagine-and-Seek official-source CPR assets")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     parser.add_argument("--force", action="store_true")
-    parser.add_argument(
-        "--skip-large-models",
-        action="store_true",
-        help="Prepare LinCIR/MIGC only. Useful only with proxy.mode=precomputed or manual model snapshots.",
-    )
     args = parser.parse_args()
+
     config_path = resolve_path(args.config)
     cfg = load_yaml(config_path)
-    proxy_mode = str(cfg["proxy"]["mode"])
-    need_generator = proxy_mode == "generate"
-    skip_large = bool(args.skip_large_models) or not need_generator
-
-    tracker = PhaseTracker(METHOD_ID, total=5 if need_generator else 2)
+    tracker = PhaseTracker(METHOD_ID, total=7)
 
     with tracker.phase("Prepare pinned P5 LinCIR dependency"):
         run_lincir_preparer(cfg, args.force)
 
-    if not need_generator:
-        with tracker.phase("Validate precomputed-proxy mode"):
-            manifest = resolve_path(str(cfg["proxy"]["manifest"]))
-            print(f"precomputed proxy manifest expected at {rel(manifest)}", flush=True)
-        tracker.finish()
-        return
-
-    with tracker.phase("Pin public MIGC source"):
-        migc_source = prepare_migc_source(cfg, args.force)
+    with tracker.phase("Pin released Imagine-and-Seek source"):
+        source = prepare_author_source(cfg, args.force)
 
     with tracker.phase("Prepare public MIGC checkpoint"):
-        migc_ckpt = prepare_migc_checkpoint(cfg, args.force)
+        migc = prepare_migc(cfg, args.force)
 
-    with tracker.phase("Prepare BLIP2, Qwen1.5-32B, and SD1.5 snapshots"):
-        if skip_large:
-            models = {}
-            missing = []
-            for key in ("captioner", "layout_llm", "stable_diffusion"):
-                local = resolve_path(str(cfg[key]["local_snapshot"]))
-                if not snapshot_has_weights(local):
-                    missing.append(rel(local))
-                else:
-                    meta_path = local / ".cpr_snapshot.json"
-                    models[key] = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else {"path": rel(local)}
-            if missing:
-                raise FileNotFoundError(
-                    "Large model snapshots are missing while --skip-large-models was requested:\n  - "
-                    + "\n  - ".join(missing)
-                )
-        else:
-            models = prepare_large_models(cfg, args.force)
+    with tracker.phase("Prepare public ELITE global/local mappers"):
+        elite = prepare_elite(cfg, args.force)
 
-    with tracker.phase("Write P10 reproduction marker"):
+    with tracker.phase("Prepare released Realistic Vision generator"):
+        realistic_vision = prepare_realistic_vision(cfg, args.force)
+
+    with tracker.phase("Prepare BLIP2, Qwen and SD1.5 components"):
+        foundation = prepare_foundation_models(cfg, args.force)
+
+    with tracker.phase("Write reproducibility marker"):
         marker = resolve_path(str(cfg["migc"]["prepared_marker"]))
         payload = {
-            "schema": 1,
+            "schema": 2,
             "method": str(cfg["method"]),
-            "implementation_status": "REPRODUCED",
+            "implementation_status": "OFFICIAL_SOURCE_ADAPTED",
             "config": rel(config_path),
-            "migc_source": {
-                "repository": str(cfg["migc"]["repository"]),
-                "commit": str(cfg["migc"]["commit"]),
-                "checkout": rel(migc_source),
+            "author_source": {
+                "repository": str(cfg["author_source"]["repository"]),
+                "commit": str(cfg["author_source"]["commit"]),
+                "checkout": rel(source),
             },
-            "migc_checkpoint": {
-                **migc_ckpt,
-                "status": str(cfg["migc"]["checkpoint_status"]),
+            "migc_checkpoint": migc,
+            "elite": elite,
+            "realistic_vision": realistic_vision,
+            "foundation_models": foundation,
+            "cpr_adaptation": {
+                "query_mode": "direct_full_scene",
+                "elite_reference_mask": str(cfg["proxy"]["reference_mask"]),
+                "uses_gt_target_box": False,
+                "uses_cpr_labels": False,
             },
-            "foundation_models": models,
-            "reference_conditioning": str(cfg["migc"]["reference_conditioning"]),
         }
         write_json(marker, payload)
         print(f"[ok] prepared marker: {rel(marker)}", flush=True)

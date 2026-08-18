@@ -1,78 +1,83 @@
-# P10. Imagine and Seek (IP-CIR) — reproduced full-scene CPR adapter
+# P10. Imagine and Seek — official-source CPR adapter
 
-Paper: **Imagine and Seek: Improving Composed Image Retrieval with an Imagined Proxy** (CVPR 2025).
+Published CPR adapter for **Imagine and Seek (IP-CIR)** from *Imagine and Seek: Improving Composed Image Retrieval with an Imagined Proxy* (CVPR 2025).
 
-This directory is deliberately marked **REPRODUCED**, not `OFFICIAL_RELEASED`. No author IP-CIR repository or final IP-CIR checkpoint is assumed. IP-CIR is training-free; this adapter reconstructs its inference equations and proxy-generation recipe from the paper using public foundation-model code.
+This directory replaces the earlier paper-guided reproduction. A public author project is now available at `LeyRio/Imagine-and-Seek`; this adapter pins and imports that released source while keeping the benchmark's canonical score-matrix/evaluator contract.
 
-## What is preserved from the paper
-
-The scorer follows the paper's two central equations. For each generated proxy feature `f_p`, original query-image feature `f_q`, and semantic perturbation `f_s = f_t - f_o`:
+## Status
 
 ```text
-f_RP = f_p
-     + max(f_p)/max(f_q) * f_q
-     + max(f_p)/max(f_s) * f_s
+Implementation status: OFFICIAL_SOURCE_ADAPTED
+CPR supervision: No
+GT target box / target identity used: No
+Training on CPR: No
 ```
 
-The proxy score `S_p` is then combined with baseline retrieval score `S_t`:
+IP-CIR itself is training-free. Running this method is inference/reproduction, not training.
+
+## What is official vs benchmark-specific
+
+Preserved from the released project:
+
+- pinned author source and MIGC implementation;
+- released `MIGC_SD14.ckpt`;
+- ELITE global/local mapper architecture and weights;
+- Realistic Vision V6.0 B1 VAE generator;
+- Qwen-family layout planning;
+- MIGC + ELITE visual-reference injection;
+- five proxy images per query;
+- robust proxy representation and multiplicative retrieval fusion.
+
+Benchmark adaptation:
+
+- query/gallery data come from `data/queries.jsonl` and `data/gallery.jsonl`;
+- query is **direct full scene**;
+- instead of CIRCO/CIRR-specific object masks, every `ref=image` layout instance receives the complete query scene as the ELITE visual concept and a full-scene mask;
+- no GroundingDINO/SAM/GLIP build is required for P10 because those released components are only used to derive/filter object masks in the original dataset pipeline; this CPR adapter intentionally does not use a GT/object-specific target mask;
+- LinCIR P5 is the base retrieval branch;
+- the normal benchmark evaluator still removes the query image and computes metrics.
+
+The released author source is pinned to:
 
 ```text
-S_b = S_t * S_p
-S_f = lambda * S_t + (1 - lambda) * S_b
+repository: https://github.com/LeyRio/Imagine-and-Seek.git
+commit: 2f615824bd7a6958083c85d8ad5e5e20549e22cb
 ```
 
-The paper generates **5 imagined proxies per query**. This implementation also uses five by default.
+## Kaggle compatibility
 
-## CPR adaptation
+The released project was developed around Python 3.9 / Torch 2.2.2 and a large legacy environment. This adapter **does not downgrade Kaggle's Torch/CUDA stack**. `requirements.txt` installs only the Python packages needed by the benchmark-side adapter and MIGC/ELITE import path.
 
-- **Query:** complete reference scene + canonical `queries.jsonl[text]` modification.
-- **Gallery:** complete scene image; no person crop and no GT person box.
-- **Base retriever:** existing P5 LinCIR full-scene adapter.
-- **SINGLE / MULTI / RELATIONAL:** all use the same direct full-scene IP-CIR path. There is no SetMatch layer.
-- **CPR supervision:** No.
-- **Query-image exclusion:** not done here; the benchmark evaluator owns exclusion.
-
-## Important reproduction choices
-
-The paper describes BLIP2 captions, Qwen1.5-32B layout inference, MIGC/Stable Diffusion proxy generation, and an ELITE-style reference-image conditioning path. The public MIGC repository exposes text/layout-controlled generation but does not provide an IP-CIR author implementation of that exact reference-image-conditioned branch.
-
-Therefore the bundled generator uses:
+`diffusers==0.21.1` is distributed as source on newer Python versions, so pip can legitimately print:
 
 ```text
-query image
- -> BLIP2 captions
-captions + modification
- -> Qwen1.5-32B target scene/layout JSON
-layout
- -> public MIGC + Stable Diffusion 1.5
- -> 5 proxy images
+Installing build dependencies: started
 ```
 
-The original query image is still injected into `f_RP` exactly through the paper's query-image residual term. This is a **paper-guided reproduction approximation**, not a claim of bit-exact author inference.
+That line alone is not an error. A real installation failure will end with `ERROR:` or a non-zero return code.
 
-The paper uses five proxies but does not clearly specify a multi-proxy aggregation rule in the released text. This adapter uses:
+## Models/assets
+
+`download_checkpoint.py` prepares:
+
+1. P5 LinCIR assets;
+2. pinned `LeyRio/Imagine-and-Seek` source;
+3. public `MIGC_SD14.ckpt`;
+4. ELITE `global_mapper.pt` and `local_mapper.pt`;
+5. Realistic Vision `realisticVisionV60B1_v60B1VAE.safetensors`;
+6. BLIP2 captioner;
+7. Qwen layout planner;
+8. Stable Diffusion 1.5 text/tokenizer components needed to load the single-file Realistic Vision checkpoint offline.
+
+The default Qwen model is:
 
 ```text
-S_p = mean_j cosine(f_RP_j, gallery)
+Qwen/Qwen1.5-7B-Chat
 ```
 
-and records `proxy.aggregation = mean_similarity` in `run.json`.
+loaded with bitsandbytes 4-bit. The released project primarily reports `Qwen1.5-32B-Chat-GPTQ-Int4`, but AutoGPTQ is fragile on Kaggle/Python 3.12. The author README explicitly allows other Qwen/LLM choices. If you have sufficient resources, change `layout_llm.repo_id` in `config.yaml`.
 
-The default `lambda=0.3` is fixed in config and **not tuned on CPR labels**. It is an adapter choice and should remain frozen for the reported main result unless a separate validation-only study is explicitly declared.
-
-## Files
-
-```text
-methods/published/10_imagine_seek/
-├── config.yaml
-├── requirements.txt
-├── download_checkpoint.py
-├── prepare_proxies.py
-├── run.py
-└── README.md
-```
-
-## End-to-end run
+## Run
 
 From repository root:
 
@@ -80,55 +85,117 @@ From repository root:
 python run_baseline.py imagine_seek
 ```
 
-The first run is expensive because the reproduction needs LinCIR, BLIP2, Qwen1.5-32B, MIGC, and Stable Diffusion assets.
+The end-to-end runner performs:
 
-For debugging individual stages:
+```text
+install requirements
+-> prepare external assets
+-> run P10
+   -> run/load P5 LinCIR
+   -> BLIP2 captions
+   -> Qwen target layouts
+   -> released MIGC + ELITE proxy generation
+   -> CLIP-L proxy features
+   -> robust proxy representation
+   -> IP-CIR score fusion
+-> official evaluate.py
+-> build_tables.py
+```
+
+Long stages are cached. If generation is interrupted, existing proxy PNGs are reused on the next run.
+
+## Useful debugging commands
+
+Prepare assets only:
 
 ```bash
-python methods/published/10_imagine_seek/download_checkpoint.py
-python methods/published/10_imagine_seek/prepare_proxies.py --stage captions
-python methods/published/10_imagine_seek/prepare_proxies.py --stage layouts
-python methods/published/10_imagine_seek/prepare_proxies.py --stage generate
-python methods/published/10_imagine_seek/run.py
+python methods/published/10_imagine_and_seek/download_checkpoint.py
 ```
 
-## Precomputed proxy mode
+Generate captions only:
 
-If exact author proxies, a better proxy generator, or proxies generated in another environment are available, set:
-
-```yaml
-proxy:
-  mode: precomputed
-  manifest: runs/imagine_seek/cache/proxy_manifest.jsonl
+```bash
+python methods/published/10_imagine_and_seek/prepare_proxies.py --stage captions
 ```
 
-The manifest must have one row per canonical query in exact order:
+Generate layouts only:
 
-```json
-{
-  "query_index": 0,
-  "image_id": "...",
-  "original_captions": ["..."],
-  "target_captions": ["..."],
-  "proxy_paths": ["path/to/proxy_00.png", "... five total ..."]
-}
+```bash
+python methods/published/10_imagine_and_seek/prepare_proxies.py --stage layouts
 ```
 
-This lets the retrieval/scoring implementation stay unchanged when the proxy generator is improved.
+Generate proxy images only:
 
-## Output contract
+```bash
+python methods/published/10_imagine_and_seek/prepare_proxies.py --stage generate
+```
+
+Run scorer after proxies exist:
+
+```bash
+python methods/published/10_imagine_and_seek/run.py
+```
+
+## Retrieval computation
+
+The released retrieval code first averages the five proxy-image features:
+
+```text
+f_p = mean(proxy_1, ..., proxy_5)
+```
+
+Then builds the robust proxy representation:
+
+```text
+f_s = f_t - f_o
+
+f_RP = f_p
+     + max(f_p)/max(f_q) * f_q
+     + max(f_p)/max(f_s) * f_s
+```
+
+where:
+
+```text
+f_q = reference/query image feature
+f_o = original/reference caption feature
+f_t = imagined target caption feature
+```
+
+The final score follows the released source:
+
+```text
+S_p = f_RP @ gallery_features.T
+S_b = S_t * S_p
+S_f = lambda * S_t + (1 - lambda) * S_b
+```
+
+with default:
+
+```text
+lambda = 0.3
+```
+
+`S_t` is the P5 LinCIR complete-gallery score matrix. No query image is removed inside P10; exclusion belongs to `evaluate.py`.
+
+## Expected output
 
 ```text
 runs/imagine_seek/
 ├── cache/
 │   ├── query_captions.jsonl
 │   ├── layouts.jsonl
+│   ├── proxy_jobs.jsonl
 │   ├── proxy_manifest.jsonl
-│   ├── proxies/...
+│   ├── proxies/
 │   ├── proxy_features.npy
 │   └── query_components.npz
+├── official_source/
+│   └── Imagine-and-Seek/
 ├── scores.npy
 └── run.json
 ```
 
-`scores.npy` preserves complete canonical query/gallery order and contains finite float scores only.
+## Important limitation
+
+The author source expects dataset-specific object masks and includes GroundingDINO/SAM/GLIP helpers. For CPR, using those helpers would introduce a second target-localization protocol and difficult legacy builds. This adapter therefore uses **full-scene ELITE conditioning**. It is a documented CPR boundary adaptation, not an oracle and not a hidden GT localization step.
