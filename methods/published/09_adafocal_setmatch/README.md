@@ -127,3 +127,11 @@ The adapter uses the official released model class, official CAAM/Attention Acti
 CPR Supervision: No
 GT box in main table: No
 ```
+
+### Released scalar checkpoint verification
+
+The released scalar checkpoint is verified before scoring. If its CAAM tensors
+use release-time names, the adapter remaps only the 30 CAAM parameters after a
+one-to-one proof using tensor shapes and architecture-stable Transformer/CRM
+signatures. The reconstructed full state is then loaded with `strict=True`.
+No arbitrary fuzzy state-dict matching is used.

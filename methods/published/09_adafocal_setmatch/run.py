@@ -306,6 +306,261 @@ def _strip_state_prefix(state_dict: dict[str, Any], prefix: str) -> dict[str, An
     return {key[len(prefix):]: value for key, value in state_dict.items()}
 
 
+def _shape(value: Any) -> tuple[int, ...]:
+    return tuple(int(x) for x in value.shape)
+
+
+def _caam_parameter_signature(key: str) -> str | None:
+    """Architecture-stable signature for a CAAM parameter.
+
+    Outer module names may differ between the public source and the released
+    checkpoint. Inner PyTorch module paths for TransformerEncoderLayer remain
+    informative, so use only the structural suffix.
+    """
+    # Most of CRM: layer index + exact TransformerEncoderLayer parameter path.
+    marker = "layers."
+    pos = key.find(marker)
+    if pos >= 0:
+        return key[pos:]
+
+    # Mapping head in the public CRM. If the release used the same inner module
+    # name this is exact; otherwise its four tensor shapes are unique inside CAAM
+    # and the resolver can safely fall back to unique-shape matching.
+    marker = "output_head."
+    pos = key.find(marker)
+    if pos >= 0:
+        return key[pos:]
+
+    if key.endswith("cls_token"):
+        return "cls_token"
+    return None
+
+
+def repair_released_adafocal_caam_names(
+    state_dict: dict[str, Any],
+    target: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Repair only a provable one-to-one rename of released AdaFocal CAAM keys.
+
+    The official scalar release observed in this benchmark has the same tensor
+    count as the public model, while 30 CAAM tensor *names* differ.  This helper
+    refuses arbitrary fuzzy matching. It accepts a repair only when:
+
+      * all already matching names also match tensor shapes;
+      * every missing target tensor is CAAM-only;
+      * source unexpected and target missing counts are identical;
+      * each renamed tensor has a unique source candidate by shape plus an
+        architecture-stable CAAM signature (or a unique CAAM shape);
+      * the resulting state dict exactly equals the model key set and shapes.
+
+    This makes the final load suitable for ``strict=True``.
+    """
+    source_keys = set(state_dict)
+    target_keys = set(target)
+
+    # First validate every name that already overlaps.
+    overlapping = source_keys & target_keys
+    shape_errors = [
+        key for key in overlapping if _shape(state_dict[key]) != _shape(target[key])
+    ]
+    if shape_errors:
+        return state_dict, {
+            "applied": False,
+            "strategy": "verified_caam_structural_rename",
+            "reason": "overlapping_shape_mismatch",
+            "keys": shape_errors[:20],
+        }
+
+    unexpected = source_keys - target_keys
+    missing = target_keys - source_keys
+
+    info: dict[str, Any] = {
+        "applied": False,
+        "strategy": "verified_caam_structural_rename",
+        "source_keys": len(source_keys),
+        "target_keys": len(target_keys),
+        "overlap_keys": len(overlapping),
+        "unexpected_count": len(unexpected),
+        "missing_count": len(missing),
+    }
+
+    if not unexpected and not missing:
+        info["reason"] = "already_exact"
+        return state_dict, info
+
+    if len(source_keys) != len(target_keys) or len(unexpected) != len(missing):
+        info.update(
+            {
+                "reason": "not_a_pure_rename",
+                "unexpected_preview": sorted(unexpected)[:30],
+                "missing_preview": sorted(missing)[:30],
+            }
+        )
+        return state_dict, info
+
+    # Never rename base BLIP-2, Q-Former, visual encoder or projection weights.
+    caam_target_prefixes = ("crm_module.", "contextual_probe_tokens")
+    if not missing or not all(key.startswith(caam_target_prefixes) for key in missing):
+        info.update(
+            {
+                "reason": "missing_keys_are_not_caam_only",
+                "unexpected_preview": sorted(unexpected)[:30],
+                "missing_preview": sorted(missing)[:30],
+            }
+        )
+        return state_dict, info
+
+    remaining_sources = set(unexpected)
+    mapping: dict[str, str] = {}  # target_key -> source_key
+    decisions: list[dict[str, Any]] = []
+
+    # Resolve the strongly structured CRM Transformer keys first, then unique
+    # shapes (head/CLS/probe). Sorting puts deep layer paths before the probe.
+    def target_priority(key: str) -> tuple[int, str]:
+        sig = _caam_parameter_signature(key)
+        return (0 if sig and sig.startswith("layers.") else 1, key)
+
+    for target_key in sorted(missing, key=target_priority):
+        target_value = target[target_key]
+        target_shape = _shape(target_value)
+        shape_candidates = [
+            source_key
+            for source_key in remaining_sources
+            if _shape(state_dict[source_key]) == target_shape
+        ]
+
+        target_sig = _caam_parameter_signature(target_key)
+        signature_candidates: list[str] = []
+        if target_sig is not None:
+            signature_candidates = [
+                source_key
+                for source_key in shape_candidates
+                if _caam_parameter_signature(source_key) == target_sig
+            ]
+
+        chosen: str | None = None
+        reason: str | None = None
+
+        if len(signature_candidates) == 1:
+            chosen = signature_candidates[0]
+            reason = "shape+structural_signature"
+        elif target_key == "contextual_probe_tokens":
+            probe_named = [
+                source_key
+                for source_key in shape_candidates
+                if "probe" in source_key.lower()
+            ]
+            if len(probe_named) == 1:
+                chosen = probe_named[0]
+                reason = "shape+probe_name"
+            elif len(shape_candidates) == 1:
+                chosen = shape_candidates[0]
+                reason = "unique_caam_shape"
+        elif len(shape_candidates) == 1:
+            # Covers cls_token and the four output-head parameters even if the
+            # release used a different outer/inner head name.
+            chosen = shape_candidates[0]
+            reason = "unique_caam_shape"
+
+        if chosen is None:
+            info.update(
+                {
+                    "reason": "ambiguous_caam_mapping",
+                    "target_key": target_key,
+                    "target_shape": target_shape,
+                    "shape_candidates": sorted(shape_candidates)[:20],
+                    "signature": target_sig,
+                    "signature_candidates": sorted(signature_candidates)[:20],
+                    "resolved_pairs": decisions[:30],
+                    "unexpected_preview": sorted(unexpected)[:40],
+                    "missing_preview": sorted(missing)[:40],
+                }
+            )
+            return state_dict, info
+
+        mapping[target_key] = chosen
+        remaining_sources.remove(chosen)
+        decisions.append(
+            {
+                "source_key": chosen,
+                "target_key": target_key,
+                "shape": target_shape,
+                "proof": reason,
+            }
+        )
+
+    if remaining_sources:
+        info.update(
+            {
+                "reason": "unconsumed_unexpected_keys",
+                "keys": sorted(remaining_sources)[:40],
+                "resolved_pairs": decisions[:30],
+            }
+        )
+        return state_dict, info
+
+    # Build in target order. Existing exact-name values stay exact; only missing
+    # CAAM keys receive the proven source tensor.
+    remapped: dict[str, Any] = {}
+    for target_key in target:
+        if target_key in state_dict:
+            remapped[target_key] = state_dict[target_key]
+        else:
+            remapped[target_key] = state_dict[mapping[target_key]]
+
+    if set(remapped) != target_keys:
+        info["reason"] = "post_remap_keyset_mismatch"
+        return state_dict, info
+
+    post_shape_errors = [
+        key for key in target if _shape(remapped[key]) != _shape(target[key])
+    ]
+    if post_shape_errors:
+        info.update(
+            {
+                "reason": "post_remap_shape_mismatch",
+                "keys": post_shape_errors[:20],
+            }
+        )
+        return state_dict, info
+
+    # Optional extra evidence: count how many source/target tensors also occupy
+    # the same ordinal state_dict position. Do not require it, because an outer
+    # module refactor can move the CAAM block without changing its semantics.
+    positional_agreement = 0
+    source_items = list(state_dict.items())
+    target_items = list(target.items())
+    if len(source_items) == len(target_items):
+        for (source_key, source_value), (target_key, target_value) in zip(
+            source_items, target_items
+        ):
+            mapped_target = (
+                source_key
+                if source_key in target_keys
+                else next(
+                    (tk for tk, sk in mapping.items() if sk == source_key),
+                    None,
+                )
+            )
+            if (
+                mapped_target == target_key
+                and _shape(source_value) == _shape(target_value)
+            ):
+                positional_agreement += 1
+
+    info.update(
+        {
+            "applied": True,
+            "reason": "verified_caam_structural_rename",
+            "rename_count": len(mapping),
+            "rename_pairs": decisions,
+            "positional_agreement": positional_agreement,
+            "total_keys": len(target_items),
+        }
+    )
+    return remapped, info
+
+
 def resolve_checkpoint_state_dict(
     checkpoint_obj: Any,
     model: torch.nn.Module,
@@ -389,12 +644,16 @@ def resolve_checkpoint_state_dict(
             f"model_class={class_key}; top_candidates={preview}"
         )
 
+    repaired_state, caam_rename_info = repair_released_adafocal_caam_names(
+        state_dict, target
+    )
+
     # Remove entries whose names overlap but tensor shapes differ; load_state_dict
     # raises on shape mismatch even with strict=False.
     compatible = {
         key: value
-        for key, value in state_dict.items()
-        if key in target and tuple(value.shape) == tuple(target[key].shape)
+        for key, value in repaired_state.items()
+        if key in target and _shape(value) == _shape(target[key])
     }
     info = {
         "candidate_path": candidate_path,
@@ -402,8 +661,9 @@ def resolve_checkpoint_state_dict(
         "checkpoint_tensor_keys": len(state_dict),
         "compatible_keys": len(compatible),
         "model_keys": len(target),
-        "exact_name_overlap": exact,
-        "shape_match_overlap": shape_match,
+        "exact_name_overlap_before_caam_repair": exact,
+        "shape_match_overlap_before_caam_repair": shape_match,
+        "caam_rename": caam_rename_info,
     }
     return compatible, info
 
@@ -446,11 +706,22 @@ def load_adafocal(
     )
     del checkpoint_obj
 
-    msg = model.load_state_dict(state_dict, strict=False)
+    model_state = model.state_dict()
+    is_complete = (
+        len(state_dict) == len(model_state)
+        and set(state_dict) == set(model_state)
+        and all(_shape(state_dict[key]) == _shape(model_state[key]) for key in model_state)
+    )
+
+    if is_complete:
+        # The pinned release is a full-model checkpoint. Once the rename is
+        # proven, strict=True guarantees that no weight is silently skipped.
+        msg = model.load_state_dict(state_dict, strict=True)
+    else:
+        msg = model.load_state_dict(state_dict, strict=False)
+
     model.eval()
 
-    # Released scalar AdaFocal must provide every CAAM/query/target projection
-    # parameter.  Base BLIP-2 keys may legitimately come from from_pretrained().
     critical_prefixes = (
         "crm_module.",
         "contextual_probe_tokens",
@@ -458,26 +729,48 @@ def load_adafocal(
         "vision_proj.",
     )
     critical_target_keys = [
-        key for key in model.state_dict() if key.startswith(critical_prefixes)
+        key for key in model_state if key.startswith(critical_prefixes)
     ]
     loaded_keys = set(state_dict)
     critical_not_loaded = [key for key in critical_target_keys if key not in loaded_keys]
     if critical_not_loaded:
+        missing_all = [key for key in model_state if key not in loaded_keys]
+        extra_all = [key for key in state_dict if key not in model_state]
         raise RuntimeError(
-            "AdaFocal checkpoint namespace resolved, but critical scalar-model "
-            "weights are still absent after normalization: "
-            + ", ".join(critical_not_loaded[:12])
+            "AdaFocal checkpoint could not be proven equivalent to the public "
+            "scalar-model state_dict. Refusing a partial/fuzzy load. "
+            "critical_missing="
+            + repr(critical_not_loaded[:30])
+            + "; all_missing="
+            + repr(missing_all[:40])
+            + "; unexpected="
+            + repr(extra_all[:40])
             + f"; load_info={checkpoint_load_info}"
         )
 
+    caam_info = checkpoint_load_info.get("caam_rename", {})
     print(
         "[AdaFocal] checkpoint namespace: "
         f"{checkpoint_load_info['candidate_path']} "
         f"prefix={checkpoint_load_info['stripped_prefix'] or '<none>'} "
         f"compatible={checkpoint_load_info['compatible_keys']}/"
-        f"{checkpoint_load_info['model_keys']}",
+        f"{checkpoint_load_info['model_keys']} "
+        f"caam_rename={caam_info.get('applied', False)} "
+        f"rename_count={caam_info.get('rename_count', 0)}",
         flush=True,
     )
+    if caam_info.get("applied"):
+        preview = [
+            (item["source_key"], item["target_key"])
+            for item in caam_info.get("rename_pairs", [])[:6]
+        ]
+        print(
+            "[AdaFocal] verified CAAM rename: "
+            f"{caam_info.get('rename_count')} tensors; "
+            f"positional_agreement={caam_info.get('positional_agreement')}/"
+            f"{caam_info.get('total_keys')}; preview={preview}",
+            flush=True,
+        )
 
     preprocess = targetpad_transform(
         float(model_cfg["target_ratio"]), int(model_cfg["input_size"])
@@ -971,6 +1264,11 @@ def main() -> None:
     with tracker.phase("Load config and manifests"):
         parser = argparse.ArgumentParser()
         parser.add_argument("--config", default=str(DEFAULT_CONFIG))
+        parser.add_argument(
+            "--preflight-only",
+            action="store_true",
+            help="Load and strictly verify selector + official AdaFocal checkpoint, then exit before detection.",
+        )
         args = parser.parse_args()
         config_path = resolve_path(args.config)
         cfg = load_yaml(config_path)
@@ -1018,6 +1316,12 @@ def main() -> None:
             f"prefix={checkpoint_load_info['stripped_prefix'] or '<none>'}"
         )
 
+    if args.preflight_only:
+        tracker.log(
+            "Preflight passed: selector and official AdaFocal checkpoint are fully verified; "
+            "stopping before person detection."
+        )
+        return
 
     with tracker.phase("Prepare shared predicted person detections"):
         s5_method_dir = resolve_path(str(cfg["shared_protocol"]["method_dir"]))
