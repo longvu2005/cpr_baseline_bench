@@ -1,5 +1,5 @@
 method: imagine_seek
-display_name: Imagine and Seek (LDRE-L + IP-CIR, official-source CPR adapter)
+display_name: Imagine and Seek (LDRE-L + IP-CIR, mounted-assets streaming CPR adapter)
 group: Published / SOTA Baselines
 cpr_supervision: 'No'
 
@@ -26,15 +26,31 @@ isolated_env:
   auto_gptq_version: '0.7.1'
   # Sum across visible CUDA devices. A 2x16-GiB runtime can pass this check.
   minimum_total_gpu_gib: 23.0
-  # Paper-faithful models are large. Fail explicitly rather than silently downgrade.
-  minimum_free_disk_gib: 68.0
+  # Only writable local state is counted here. The two giant paper-faithful models
+  # are mounted read-only from /kaggle/input on Kaggle (or downloaded only on a
+  # large server). This is intentionally NOT a smaller-model fallback.
+  minimum_local_free_disk_gib: 15.0
+  full_download_minimum_free_disk_gib: 72.0
   small_model_fallback: false
+
+asset_storage:
+  # Safe Kaggle mode: discover the exact giant checkpoints under read-only inputs.
+  # You can also set IPCIR_BLIP2_DIR / IPCIR_QWEN32_DIR explicitly.
+  external_search_roots:
+    - /kaggle/input
+  require_external_large_assets_on_kaggle: true
+  allow_large_network_download_off_kaggle: true
+  captioner_env: IPCIR_BLIP2_DIR
+  layout_llm_env: IPCIR_QWEN32_DIR
 
 proxy:
   count_per_query: 5
   aggregation: mean_feature_then_robust
   manifest: runs/imagine_seek/cache/proxy_manifest.jsonl
-  image_dir: runs/imagine_seek/cache/proxies
+  # Do not persist 14,875 PNGs. Generate -> CLIP-L encode -> discard.
+  persist_proxy_images: false
+  audit_image_stride: 250
+  audit_image_dir: runs/imagine_seek/cache/proxy_audit
   jobs: runs/imagine_seek/cache/proxy_jobs.jsonl
   # CPR has no author-provided object masks/shared_concept annotations. We therefore
   # reuse the complete query image as the ELITE visual reference without GT boxes.
@@ -70,7 +86,10 @@ layout_llm:
 
 migc:
   checkpoint: checkpoints/imagine_seek/weights/MIGC_SD14.ckpt
-  google_drive_id: 107fnQ9Fpu5K0UtqnHlKja7hqe-GwjAmz
+  repo_id: limuloo1999/MIGC
+  revision: bbebfba1a462868a2dc10a21147d46acbb33b935
+  filename: MIGC_SD14.ckpt
+  sha256: 81756dd19f7c75f9bba1ead1e6f8fcdfb00030cabb01dc46edd85d950236884c
   prepared_marker: checkpoints/imagine_seek/prepared.json
   generation:
     num_inference_steps: 50
@@ -122,6 +141,7 @@ retrieval:
   source_features_meta: runs/imagine_seek/cache/source_features.meta.json
   proxy_features: runs/imagine_seek/cache/proxy_features.npy
   proxy_features_meta: runs/imagine_seek/cache/proxy_features.meta.json
+  proxy_features_state: runs/imagine_seek/cache/proxy_features.state.json
   text_features: runs/imagine_seek/cache/text_features.npz
   text_features_meta: runs/imagine_seek/cache/text_features.meta.json
 

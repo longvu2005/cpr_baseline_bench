@@ -73,8 +73,8 @@ os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 
 METHOD_ID = "imagine_seek"
-ADAPTER_VERSION = "2026-08-18-v4-official-source-ldre-l-strict-isolated"
-FEATURE_SCHEMA = 4
+ADAPTER_VERSION = "2026-08-19-v5-ldre-l-mounted-assets-streamed-proxies"
+FEATURE_SCHEMA = 5
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -298,8 +298,12 @@ def validate_proxy_manifest(cfg: dict[str, Any], queries: Sequence[dict[str, Any
     for qi, row in enumerate(rows):
         if row.get("query_index") != qi or row.get("image_id") != queries[qi].get("image_id"):
             raise ValueError(f"Proxy manifest alignment mismatch at {qi}")
-        if len(row.get("proxy_paths", [])) != count:
+        if int(row.get("proxy_count", -1)) != count:
             raise ValueError(f"Proxy count mismatch at {qi}")
+        if int(row.get("proxy_feature_index", -1)) != qi:
+            raise ValueError(f"Proxy feature index mismatch at {qi}")
+        if row.get("storage_mode") != "stream_generate_encode_discard":
+            raise ValueError(f"Unexpected proxy storage mode at {qi}: {row.get('storage_mode')!r}")
     return manifest, rows
 
 
@@ -412,7 +416,7 @@ def main() -> None:
         if int(model.text_projection.shape[1]) != dim:
             raise RuntimeError(f"Unexpected CLIP projection dim {model.text_projection.shape[1]}")
 
-    with tracker.phase("Encode/cache gallery, query source, and proxy image features"):
+    with tracker.phase("Encode/cache gallery + source; load streamed proxy CLIP-L features"):
         gallery_paths = [gallery_path(row, gi) for gi, row in enumerate(gallery)]
         clip_sha = sha256_file(clip_ckpt)
         gallery_meta = {
@@ -430,21 +434,24 @@ def main() -> None:
         source = np.asarray(gallery_features[qidx], dtype=np.float32)
         source = source / np.maximum(np.linalg.norm(source, axis=-1, keepdims=True), 1e-12)
 
-        proxy_paths = [resolve_path(p) for row in proxy_rows for p in row["proxy_paths"]]
-        proxy_meta = {
-            "schema": FEATURE_SCHEMA, "adapter": ADAPTER_VERSION,
-            "proxy_manifest_sha256": sha256_file(proxy_manifest), "clip_sha256": clip_sha,
-            "preprocess": "targetpad_1.25",
-        }
-        flat_proxy = encode_images(
-            paths=proxy_paths, model=model, transform=transform, device=device,
-            batch_size=int(cfg["runtime"]["clip_image_batch_size"]),
-            out=resolve_path(str(cfg["retrieval"]["proxy_features"])),
-            meta_path=resolve_path(str(cfg["retrieval"]["proxy_features_meta"])),
-            meta=proxy_meta, dim=dim, desc="IP-CIR encode proxies",
-        )
+        # official_proxy_worker.py encodes each generated proxy immediately in the
+        # same released CLIP-L/target-pad feature space, then discards the PNG. This
+        # avoids ~15k proxy images consuming Kaggle's 20-GiB writable filesystem.
+        proxy_feature_path = resolve_path(str(cfg["retrieval"]["proxy_features"]))
+        proxy_state_path = resolve_path(str(cfg["retrieval"]["proxy_features_state"]))
+        proxy_state = read_json(proxy_state_path)
         count = int(cfg["proxy"]["count_per_query"])
-        proxy_mean = np.asarray(flat_proxy).reshape(len(queries), count, dim).mean(axis=1).astype(np.float32)
+        if proxy_state is None or proxy_state.get("clip_sha256") != clip_sha:
+            raise RuntimeError("Streamed proxy feature state is missing or was encoded with a different CLIP-L checkpoint")
+        flat_proxy = np.load(proxy_feature_path, mmap_mode="r", allow_pickle=False)
+        expected_proxy_shape = (len(queries), count, dim)
+        if flat_proxy.shape != expected_proxy_shape or flat_proxy.dtype != np.float32:
+            raise ValueError(
+                f"Streamed proxy features {flat_proxy.shape}/{flat_proxy.dtype}, expected {expected_proxy_shape}/float32"
+            )
+        if not np.isfinite(np.asarray(flat_proxy)).all():
+            raise RuntimeError("Streamed proxy features contain NaN/Inf or incomplete rows")
+        proxy_mean = np.asarray(flat_proxy).mean(axis=1).astype(np.float32, copy=False)
 
     with tracker.phase("Encode 15 paired LDRE captions and reproduce released debiasing"):
         ncap = int(cfg["retrieval"]["nums_caption"])
@@ -518,6 +525,7 @@ def main() -> None:
                 "layout_llm": cfg["layout_llm"]["repo_id"],
                 "proxy_count": int(cfg["proxy"]["count_per_query"]),
                 "proxy_reference": "full query scene used as ELITE concept mask",
+                "proxy_storage": "generate -> CLIP-L targetpad encode -> discard; sparse audit PNGs only",
             },
             "cpr_adapter_boundary": {
                 "reason": "CPR lacks author CIRCO shared_concept/object-mask annotations",

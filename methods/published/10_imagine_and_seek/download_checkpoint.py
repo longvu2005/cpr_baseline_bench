@@ -24,6 +24,9 @@ import yaml
 ROOT = Path(__file__).resolve().parents[3]
 METHOD_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG = METHOD_DIR / "config.yaml"
+P10_HF_HOME = ROOT / "runs" / "imagine_seek" / "hf_cache"
+os.environ.setdefault("HF_HOME", str(P10_HF_HOME))
+os.environ.setdefault("HF_HUB_CACHE", str(P10_HF_HOME / "hub"))
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -77,20 +80,148 @@ def output(command: list[str], *, cwd: Path = ROOT) -> str:
     return subprocess.check_output(command, cwd=str(cwd), text=True).strip()
 
 
-def ensure_free_disk(cfg: dict[str, Any]) -> dict[str, float]:
+def _json_file(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _model_weight_bytes(path: Path) -> int:
+    return sum(
+        item.stat().st_size
+        for item in path.glob("model-*.safetensors")
+        if item.is_file()
+    )
+
+
+def _validate_large_model(kind: str, path: Path) -> tuple[bool, str]:
+    """Validate model identity without reading multi-GB tensors into memory."""
+    config_path = path / "config.json"
+    index_path = path / "model.safetensors.index.json"
+    config = _json_file(config_path)
+    if config is None or not index_path.is_file():
+        return False, "missing config.json or model.safetensors.index.json"
+    weight_bytes = _model_weight_bytes(path)
+    if kind == "captioner":
+        text = config.get("text_config") if isinstance(config.get("text_config"), dict) else {}
+        vision = config.get("vision_config") if isinstance(config.get("vision_config"), dict) else {}
+        ok = (
+            config.get("model_type") == "blip-2"
+            and int(text.get("hidden_size", -1)) == 4096
+            and int(vision.get("image_size", -1)) == 364
+            and weight_bytes >= 28_000_000_000
+        )
+        return ok, f"BLIP2 signature weight_bytes={weight_bytes}"
+    if kind == "layout_llm":
+        quant = config.get("quantization_config") if isinstance(config.get("quantization_config"), dict) else {}
+        ok = (
+            config.get("model_type") == "qwen2"
+            and int(config.get("hidden_size", -1)) == 5120
+            and int(config.get("num_hidden_layers", -1)) == 64
+            and int(quant.get("bits", -1)) == 4
+            and str(quant.get("quant_method", "")).lower() == "gptq"
+            and weight_bytes >= 17_000_000_000
+        )
+        return ok, f"Qwen32 GPTQ signature weight_bytes={weight_bytes}"
+    raise ValueError(kind)
+
+
+def _candidate_model_dirs(roots: list[Path]) -> list[Path]:
+    result: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for cfg_path in root.rglob("config.json"):
+            parent = cfg_path.parent.resolve()
+            if parent not in seen:
+                seen.add(parent)
+                result.append(parent)
+    return result
+
+
+def discover_external_large_assets(cfg: dict[str, Any], *, fail_if_missing: bool) -> dict[str, Any]:
+    storage = cfg["asset_storage"]
+    roots = [Path(str(x)).resolve() for x in storage.get("external_search_roots", [])]
+    candidates = _candidate_model_dirs(roots)
+    found: dict[str, Any] = {}
+    missing: list[str] = []
+    specs = (
+        ("captioner", str(storage["captioner_env"]), cfg["captioner"]),
+        ("layout_llm", str(storage["layout_llm_env"]), cfg["layout_llm"]),
+    )
+    for kind, env_name, model_cfg in specs:
+        selected: Path | None = None
+        source = None
+        explicit = os.environ.get(env_name, "").strip()
+        search = [Path(explicit).resolve()] if explicit else candidates
+        diagnostics: list[str] = []
+        for candidate in search:
+            ok, detail = _validate_large_model(kind, candidate)
+            if ok:
+                selected = candidate
+                source = f"env:{env_name}" if explicit else "auto:/kaggle/input"
+                break
+            if explicit:
+                diagnostics.append(f"{candidate}: {detail}")
+        if selected is None:
+            missing.append(kind)
+            found[kind] = {
+                "found": False,
+                "expected_repo_id": str(model_cfg["repo_id"]),
+                "env_override": env_name,
+                "diagnostics": diagnostics,
+            }
+        else:
+            found[kind] = {
+                "found": True,
+                "path": str(selected),
+                "source": source,
+                "expected_repo_id": str(model_cfg["repo_id"]),
+                "config_sha256": sha256_file(selected / "config.json"),
+                "index_sha256": sha256_file(selected / "model.safetensors.index.json"),
+                "weight_bytes": _model_weight_bytes(selected),
+            }
+            print(f"[mount] {kind}: {selected}", flush=True)
+
+    if missing and fail_if_missing:
+        names = ", ".join(missing)
+        raise RuntimeError(
+            "Missing paper-faithful large model input(s): " + names + ".\n"
+            "On Kaggle, do NOT download these into /kaggle/working. Add the exact "
+            "Hugging Face models as Notebook Inputs / Kaggle Models, then rerun.\n"
+            "Required: Salesforce/blip2-opt-6.7b-coco and "
+            "Qwen/Qwen1.5-32B-Chat-GPTQ-Int4.\n"
+            "If Kaggle mounts them under unusual paths, set IPCIR_BLIP2_DIR and/or "
+            "IPCIR_QWEN32_DIR to the model directory containing config.json and model shards."
+        )
+    return found
+
+
+def ensure_local_free_disk(cfg: dict[str, Any], external: dict[str, Any]) -> dict[str, float | bool]:
     usage = shutil.disk_usage(ROOT)
     free_gib = usage.free / 1024**3
-    required = float(cfg["isolated_env"]["minimum_free_disk_gib"])
-    print(f"[preflight] free disk={free_gib:.1f} GiB; required={required:.1f} GiB", flush=True)
+    local_required = float(cfg["isolated_env"]["minimum_local_free_disk_gib"])
+    both_mounted = all(external.get(k, {}).get("found") for k in ("captioner", "layout_llm"))
+    required = local_required if both_mounted else float(cfg["isolated_env"]["full_download_minimum_free_disk_gib"])
+    print(
+        f"[preflight] writable free={free_gib:.1f} GiB; required={required:.1f} GiB; "
+        f"large_models_mounted={both_mounted}",
+        flush=True,
+    )
     if free_gib < required:
         raise RuntimeError(
-            "Insufficient free disk for the paper-faithful P10 assets. "
-            f"Need at least {required:.1f} GiB free, found {free_gib:.1f} GiB. "
-            "Do not switch to smaller models for final benchmark reporting. "
-            "Use a larger runtime/server or mount pre-downloaded checkpoints."
+            f"Insufficient writable disk for the selected P10 storage mode: need {required:.1f} GiB, "
+            f"found {free_gib:.1f} GiB. Large model mounts are required on Kaggle; "
+            "do not lower the threshold or switch to smaller models for final reporting."
         )
-    return {"free_gib_at_preflight": round(free_gib, 3), "required_gib": required}
-
+    return {
+        "free_gib_at_preflight": round(free_gib, 3),
+        "required_gib": required,
+        "large_models_mounted": both_mounted,
+    }
 
 def env_python(cfg: dict[str, Any]) -> Path:
     return resolve_path(str(cfg["isolated_env"]["python"]))
@@ -108,21 +239,22 @@ def prepare_env(cfg: dict[str, Any], force: bool) -> dict[str, Any]:
     # causes the exact pins to be re-asserted and the probe to be rerun.
     if not py.is_file():
         env_dir.parent.mkdir(parents=True, exist_ok=True)
-        run([uv, "python", "install", str(env_cfg["python_version"])])
-        run([uv, "venv", "--python", str(env_cfg["python_version"]), "--seed", str(env_dir)])
+        run([uv, "python", "install", str(env_cfg["python_version"])], env={"UV_NO_CACHE": "1"})
+        run([uv, "venv", "--python", str(env_cfg["python_version"]), "--seed", str(env_dir)], env={"UV_NO_CACHE": "1"})
 
     torch_spec = f"torch=={env_cfg['torch_version']}"
     tv_spec = f"torchvision=={env_cfg['torchvision_version']}"
     run([
-        uv, "pip", "install", "--python", str(py),
+        uv, "pip", "install", "--python", str(py), "--no-cache",
         "--index-url", str(env_cfg["torch_index_url"]), torch_spec, tv_spec,
-    ])
+    ], env={"UV_NO_CACHE": "1"})
     run([
-        uv, "pip", "install", "--python", str(py), "-r", str(METHOD_DIR / "generator_requirements.txt")
-    ])
+        uv, "pip", "install", "--python", str(py), "--no-cache",
+        "-r", str(METHOD_DIR / "generator_requirements.txt")
+    ], env={"UV_NO_CACHE": "1"})
     # AutoGPTQ's CUDA-12.1 0.7.1 wheel is built against torch 2.2.1+cu121.
     run([
-        str(py), "-m", "pip", "install",
+        str(py), "-m", "pip", "install", "--no-cache-dir",
         f"auto-gptq=={env_cfg['auto_gptq_version']}", "--no-build-isolation",
     ])
 
@@ -291,24 +423,14 @@ print(json.dumps({"resolved_revision": resolved, "cached_path": path}))
 
 def prepare_migc(cfg: dict[str, Any], py: Path) -> dict[str, Any]:
     c = cfg["migc"]
-    path = resolve_path(str(c["checkpoint"]))
-    if path.is_file() and path.stat().st_size > 100_000_000:
-        return {"path": rel(path), "size_bytes": path.stat().st_size, "sha256": sha256_file(path)}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".part")
-    tmp.unlink(missing_ok=True)
-    code = (
-        "import gdown; "
-        f"r=gdown.download(id={str(c['google_drive_id'])!r}, output={str(tmp)!r}, quiet=False); "
-        "print('GDOWN_RESULT='+str(r))"
+    return hf_file(
+        py,
+        str(c["repo_id"]),
+        str(c["revision"]),
+        str(c["filename"]),
+        resolve_path(str(c["checkpoint"])),
+        str(c["sha256"]),
     )
-    run([str(py), "-c", code])
-    if not tmp.is_file() or tmp.stat().st_size < 100_000_000:
-        tmp.unlink(missing_ok=True)
-        raise RuntimeError("Failed to download a valid public MIGC_SD14.ckpt")
-    os.replace(tmp, path)
-    return {"path": rel(path), "size_bytes": path.stat().st_size, "sha256": sha256_file(path)}
-
 
 def prepare_openai_clip(cfg: dict[str, Any], py: Path) -> dict[str, Any]:
     root = resolve_path(str(cfg["retrieval"]["clip_download_root"]))
@@ -323,7 +445,71 @@ def prepare_openai_clip(cfg: dict[str, Any], py: Path) -> dict[str, Any]:
     return {"name": str(cfg["retrieval"]["clip_name"]), "path": rel(path), "sha256": sha256_file(path)}
 
 
-def prepare_assets(cfg: dict[str, Any], py: Path) -> dict[str, Any]:
+def _verify_external_snapshot_identity(
+    py: Path, *, repo_id: str, revision: str, external: Path
+) -> dict[str, Any]:
+    """Compare tiny config/index files against the pinned HF revision."""
+    payload = json.dumps({"repo_id": repo_id, "revision": revision})
+    lines = [
+        "import hashlib, json",
+        "from huggingface_hub import HfApi, hf_hub_download",
+        f"cfg=json.loads({payload!r})",
+        "resolved=str(HfApi().model_info(cfg['repo_id'], revision=cfg['revision']).sha)",
+        "out={'resolved_revision':resolved}",
+        "for name in ('config.json','model.safetensors.index.json'):",
+        "    p=hf_hub_download(repo_id=cfg['repo_id'], revision=resolved, filename=name)",
+        "    out[name]=hashlib.sha256(open(p,'rb').read()).hexdigest()",
+        "print(json.dumps(out))",
+    ]
+    reference = _isolated_json(py, "\n".join(lines))
+    local = {
+        "config.json": sha256_file(external / "config.json"),
+        "model.safetensors.index.json": sha256_file(external / "model.safetensors.index.json"),
+    }
+    for name in local:
+        if local[name] != reference[name]:
+            raise RuntimeError(
+                f"Mounted model does not match pinned {repo_id}@{reference['resolved_revision']}: "
+                f"{name} sha256 {local[name]} != {reference[name]}"
+            )
+    return {
+        "repo_id": repo_id,
+        "requested_revision": revision,
+        "resolved_revision": reference["resolved_revision"],
+        "source": "external_read_only_mount",
+        "path": str(external),
+        "config_sha256": local["config.json"],
+        "index_sha256": local["model.safetensors.index.json"],
+        "weight_bytes": _model_weight_bytes(external),
+    }
+
+
+def prepare_large_model(
+    cfg: dict[str, Any], py: Path, *, key: str, external: dict[str, Any]
+) -> dict[str, Any]:
+    c = cfg[key]
+    local = resolve_path(str(c["local_snapshot"]))
+    entry = external.get(key, {})
+    if entry.get("found"):
+        mounted = Path(str(entry["path"])).resolve()
+        identity = _verify_external_snapshot_identity(
+            py, repo_id=str(c["repo_id"]), revision=str(c["revision"]), external=mounted
+        )
+        replace_with_symlink(local, mounted)
+        identity["local_alias"] = rel(local)
+        print(f"[ok] {key} uses read-only mount: {mounted}", flush=True)
+        return identity
+
+    return hf_snapshot(
+        py,
+        str(c["repo_id"]),
+        str(c["revision"]),
+        local,
+        allow_patterns=["*.json", "*.txt", "*.model", "*.safetensors", "*.safetensors.index.json", "*.py"],
+    )
+
+
+def prepare_assets(cfg: dict[str, Any], py: Path, external: dict[str, Any]) -> dict[str, Any]:
     assets: dict[str, Any] = {}
     assets["migc"] = prepare_migc(cfg, py)
 
@@ -343,16 +529,8 @@ def prepare_assets(cfg: dict[str, Any], py: Path) -> dict[str, Any]:
         resolve_path(str(rv["path"])), str(rv["sha256"]),
     )
 
-    cap = cfg["captioner"]
-    assets["captioner"] = hf_snapshot(
-        py, str(cap["repo_id"]), str(cap["revision"]), resolve_path(str(cap["local_snapshot"])),
-        allow_patterns=["*.json", "*.txt", "*.model", "*.safetensors", "*.safetensors.index.json"],
-    )
-    llm = cfg["layout_llm"]
-    assets["layout_llm"] = hf_snapshot(
-        py, str(llm["repo_id"]), str(llm["revision"]), resolve_path(str(llm["local_snapshot"])),
-        allow_patterns=["*.json", "*.txt", "*.model", "*.safetensors", "*.safetensors.index.json", "*.py"],
-    )
+    assets["captioner"] = prepare_large_model(cfg, py, key="captioner", external=external)
+    assets["layout_llm"] = prepare_large_model(cfg, py, key="layout_llm", external=external)
     clipv = cfg["elite"]
     assets["clip_vision"] = hf_snapshot(
         py, str(clipv["clip_vision_repo_id"]), str(clipv["clip_vision_revision"]),
@@ -379,13 +557,25 @@ def main() -> None:
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--env-only", action="store_true", help="Create and validate only the isolated environment")
+    parser.add_argument("--check-inputs", action="store_true", help="Only discover mounted giant model inputs; install/download nothing")
     args = parser.parse_args()
     config_path = resolve_path(args.config)
     cfg = load_yaml(config_path)
 
+    on_kaggle = Path("/kaggle/working").is_dir()
+    external = discover_external_large_assets(
+        cfg,
+        fail_if_missing=(on_kaggle and not args.check_inputs and bool(cfg["asset_storage"].get("require_external_large_assets_on_kaggle", True))),
+    )
+    if args.check_inputs:
+        print(json.dumps({"on_kaggle": on_kaggle, "external_assets": external}, indent=2), flush=True)
+        if not all(external.get(k, {}).get("found") for k in ("captioner", "layout_llm")):
+            raise SystemExit(2)
+        return
+
     tracker = PhaseTracker("imagine_seek_prepare", total=2 if args.env_only else 7)
-    with tracker.phase("Resource preflight"):
-        disk = ensure_free_disk(cfg) if not args.env_only else {"skipped_for_env_only": True}
+    with tracker.phase("Resource/storage preflight"):
+        disk = ensure_local_free_disk(cfg, external) if not args.env_only else {"skipped_for_env_only": True}
     with tracker.phase("Create/validate isolated Python 3.10 IP-CIR environment"):
         env_info = prepare_env(cfg, args.force)
     if args.env_only:
@@ -397,7 +587,7 @@ def main() -> None:
     with tracker.phase("Import-preflight released MIGC+ELITE adapter"):
         worker_preflight(cfg, config_path, "import")
     with tracker.phase("Download/cache exact public model assets"):
-        assets = prepare_assets(cfg, env_python(cfg))
+        assets = prepare_assets(cfg, env_python(cfg), external)
     with tracker.phase("Pipeline-preflight MIGC + ELITE + Realistic Vision"):
         worker_preflight(cfg, config_path, "pipeline")
     with tracker.phase("Write reproducibility marker"):
@@ -414,6 +604,7 @@ def main() -> None:
             },
             "isolated_env": env_info,
             "resource_preflight": disk,
+            "external_asset_discovery": external,
             "assets": assets,
             "cpr_adaptation": {
                 "dense_caption_boundary": "HF BLIP2 OPT-6.7B COCO corresponding to released LAVIS caption_coco_opt6.7b",

@@ -1,0 +1,105 @@
+method: wiser
+display_name: WISER
+group: Published / SOTA Baselines
+cpr_supervision: 'No'
+
+paper:
+  title: 'WISER: Wider Search, Deeper Thinking, and Adaptive Fusion for Training-Free Zero-Shot Composed Image Retrieval'
+  venue: CVPR 2026
+  arxiv: '2602.23029'
+  training_free: true
+
+author_source:
+  repository: https://github.com/Physicsmile/WISER.git
+  commit: c48c114e498aaa4e1db271e8f265ec24700509c0
+  local_checkout: runs/wiser/official_source/WISER
+
+isolated_env:
+  path: runs/wiser/.venv
+  python: runs/wiser/.venv/bin/python
+  python_version: '3.10'
+  torch_version: '2.5.1'
+  torchvision_version: '0.20.1'
+  torch_index_url: https://download.pytorch.org/whl/cu121
+  minimum_free_disk_gib: 70
+
+caption_env:
+  path: runs/wiser/.venv_caption
+  python: runs/wiser/.venv_caption/bin/python
+  python_version: '3.10'
+  torch_version: '2.1.2'
+  torchvision_version: '0.16.2'
+  torch_index_url: https://download.pytorch.org/whl/cu121
+
+models:
+  bagel:
+    repo_id: ByteDance-Seed/BAGEL-7B-MoT
+    revision: main
+    local_dir: checkpoints/wiser/BAGEL-7B-MoT
+    max_mem_per_gpu: 80GiB
+    offload_folder: runs/wiser/offload
+  verifier:
+    repo_id: Qwen/Qwen2.5-VL-7B-Instruct
+    revision: main
+    local_dir: checkpoints/wiser/Qwen2.5-VL-7B-Instruct
+    min_pixels: 3136
+    max_pixels: 1605632
+  refiner:
+    provider: openai
+    model: gpt-4o
+    api_key_env: OPENAI_API_KEY
+  clip:
+    name: ViT-B-32
+    pretrained: laion2b_s34b_b79k
+    cache_dir: checkpoints/wiser/open_clip
+  captioner:
+    name: blip2_t5
+    model_type: pretrain_flant5xxl
+    prompt: 'Describe the image in complete detail. You must especially focus on all the objects in the image.'
+
+wiser:
+  topk_per_path: 50
+  confidence_threshold: 0.7
+  max_check_num: 1
+  modifier_prompt: structural_modifier_prompt
+
+adaptation:
+  query_text_field: text
+  query_image: canonical_query_image_full_scene
+  gallery_image: canonical_gallery_full_scene
+  localization: none
+  setmatch: false
+  use_target_ids: false
+  use_full_positive_ids: false
+  full_gallery_completion: dual_path_best_rank
+
+data:
+  gallery_manifest: data/gallery.jsonl
+  query_manifest: data/queries.jsonl
+
+runtime:
+  device: cuda:0
+  caption_device: cuda:0
+  image_batch_size: 64
+  text_batch_size: 128
+  score_batch_size: 256
+  num_workers: 4
+
+cache:
+  dir: runs/wiser/cache
+  captions: runs/wiser/cache/gallery_captions.jsonl
+  captions_meta: runs/wiser/cache/gallery_captions.meta.json
+  gallery_features: runs/wiser/cache/gallery_features.npy
+  gallery_features_meta: runs/wiser/cache/gallery_features.meta.json
+  query_generation: runs/wiser/cache/query_generation.jsonl
+  query_generation_meta: runs/wiser/cache/query_generation.meta.json
+  edited_images_dir: runs/wiser/cache/edited_images
+  refined_images_dir: runs/wiser/cache/refined_images
+  verifier_dir: runs/wiser/cache/verifier
+  suggestions_dir: runs/wiser/cache/suggestions
+
+checkpoint:
+  prepared_marker: checkpoints/wiser/prepared.json
+
+output:
+  dir: runs/wiser

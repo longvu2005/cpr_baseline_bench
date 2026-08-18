@@ -1,0 +1,26 @@
+# Installed inside runs/wiser/.venv by download_checkpoint.py.
+# torch/torchvision are installed separately from the CUDA wheel index.
+numpy==1.26.4
+pandas>=2.0,<3
+scipy>=1.10,<2
+pillow>=10,<12
+tqdm>=4.66,<5
+requests>=2.31,<3
+PyYAML>=6,<7
+omegaconf>=2.3,<3
+sentencepiece>=0.2,<1
+safetensors>=0.4,<1
+tokenizers>=0.20,<0.22
+accelerate>=1.2,<2
+diffusers>=0.30,<0.36
+transformers==4.51.3
+opencv-python-headless>=4.9,<5
+timm>=1.0,<2
+einops>=0.8,<1
+scikit-image>=0.22,<1
+open_clip_torch==2.31.0
+qwen-vl-utils>=0.0.10,<0.1
+openai>=1.60,<2
+termcolor>=2.4,<4
+wandb>=0.17,<1
+huggingface_hub>=0.27,<1

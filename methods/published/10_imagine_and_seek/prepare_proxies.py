@@ -14,6 +14,8 @@ import math
 import os
 import re
 import subprocess
+
+import numpy as np
 import sys
 from pathlib import Path
 from typing import Any, Sequence
@@ -476,19 +478,32 @@ def build_jobs(
 
 def validate_manifest(cfg: dict[str, Any], queries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     path = resolve_path(str(cfg["proxy"]["manifest"]))
+    if not path.is_file():
+        raise FileNotFoundError(path)
     rows = load_jsonl(path)
     if len(rows) != len(queries):
         raise ValueError(f"Proxy manifest rows={len(rows)}, expected={len(queries)}")
     count = int(cfg["proxy"]["count_per_query"])
+    dim = int(cfg["retrieval"]["projection_dim"])
+    feature_path = resolve_path(str(cfg["retrieval"]["proxy_features"]))
+    if not feature_path.is_file():
+        raise FileNotFoundError(f"Missing streamed proxy features: {feature_path}")
+    features = np.load(feature_path, mmap_mode="r", allow_pickle=False)
+    expected = (len(queries), count, dim)
+    if features.shape != expected or features.dtype != np.float32:
+        raise ValueError(f"Proxy features shape/dtype={features.shape}/{features.dtype}, expected={expected}/float32")
     for qi, row in enumerate(rows):
         if row.get("query_index") != qi or row.get("image_id") != queries[qi].get("image_id"):
             raise ValueError(f"Proxy manifest alignment error at row {qi}")
-        paths = row.get("proxy_paths")
-        if not isinstance(paths, list) or len(paths) != count:
+        if int(row.get("proxy_count", -1)) != count:
             raise ValueError(f"Proxy count error at query {qi}")
-        for p in paths:
-            if not resolve_path(str(p)).is_file():
-                raise FileNotFoundError(p)
+        if int(row.get("proxy_feature_index", -1)) != qi:
+            raise ValueError(f"Proxy feature index error at query {qi}")
+        if row.get("storage_mode") != "stream_generate_encode_discard":
+            raise ValueError(f"Unexpected proxy storage mode at query {qi}: {row.get('storage_mode')!r}")
+    # Full validation is only ~46 MB and catches interrupted rows before retrieval.
+    if not np.isfinite(np.asarray(features)).all():
+        raise RuntimeError("Proxy feature cache contains NaN/Inf or incomplete rows")
     return rows
 
 
@@ -520,7 +535,7 @@ def main() -> None:
                     captions = load_jsonl(resolve_path(str(cfg["cache"]["captions"])))
                 targets, layouts = generate_qwen_outputs(cfg, queries, captions, query_manifest, marker, args.force)
         elif stage == "proxies":
-            with tracker.phase("Generate/resume five released MIGC+ELITE proxies per query"):
+            with tracker.phase("Generate -> CLIP-L encode -> discard five MIGC+ELITE proxies per query"):
                 if captions is None:
                     captions = load_jsonl(resolve_path(str(cfg["cache"]["captions"])))
                 if targets is None:

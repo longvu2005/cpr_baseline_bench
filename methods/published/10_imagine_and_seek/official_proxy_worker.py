@@ -25,9 +25,12 @@ from typing import Any, Sequence
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torchvision
+import torchvision.transforms.functional as TF
 import yaml
 from PIL import Image
+from torchvision.transforms import CenterCrop, Compose, InterpolationMode, Normalize, Resize, ToTensor
 
 ROOT = Path(__file__).resolve().parents[3]
 METHOD_DIR = Path(__file__).resolve().parent
@@ -73,6 +76,14 @@ def rel(path: Path) -> str:
         return str(path.resolve().relative_to(ROOT.resolve()))
     except Exception:
         return str(path.resolve())
+
+
+def sha256_file(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while chunk := f.read(chunk_size):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def stable_hash(value: Any) -> str:
@@ -204,6 +215,98 @@ def load_author_module(source: Path):
     if missing:
         raise RuntimeError(f"Released generator missing required symbols: {missing}")
     return module
+
+
+class TargetPad:
+    """Released LDRE target-pad transform used for CLIP-L retrieval features."""
+    def __init__(self, target_ratio: float, size: int):
+        self.target_ratio = float(target_ratio)
+        self.size = int(size)
+
+    def __call__(self, image: Image.Image) -> Image.Image:
+        w, h = image.size
+        actual_ratio = max(w, h) / min(w, h)
+        if actual_ratio < self.target_ratio:
+            return image
+        scaled_max_wh = max(w, h) / self.target_ratio
+        hp = max(int((scaled_max_wh - w) / 2), 0)
+        vp = max(int((scaled_max_wh - h) / 2), 0)
+        return TF.pad(image, [hp, vp, hp, vp], 0, "constant")
+
+
+def targetpad_transform(dim: int):
+    return Compose([
+        TargetPad(1.25, dim),
+        Resize(dim, interpolation=InterpolationMode.BICUBIC),
+        CenterCrop(dim),
+        lambda im: im.convert("RGB"),
+        ToTensor(),
+        Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
+    ])
+
+
+def load_prepared_marker(cfg: dict[str, Any]) -> dict[str, Any]:
+    path = resolve_path(str(cfg["migc"]["prepared_marker"]))
+    data = read_json(path)
+    if data is None:
+        raise FileNotFoundError(f"Missing prepared marker: {path}")
+    return data
+
+
+def load_retrieval_clip(cfg: dict[str, Any], marker: dict[str, Any], device: torch.device):
+    import clip
+    info = marker.get("assets", {}).get("openai_clip", {})
+    path = resolve_path(str(info.get("path", "")))
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing OpenAI CLIP-L checkpoint in marker: {path}")
+    expected = str(info.get("sha256", ""))
+    if expected and sha256_file(path) != expected:
+        raise RuntimeError("OpenAI CLIP-L checkpoint checksum mismatch")
+    model, _ = clip.load(str(path), device=device, jit=False)
+    model.eval()
+    transform = targetpad_transform(int(model.visual.input_resolution))
+    return model, transform, expected
+
+
+def encode_proxy_image(image: Image.Image, model, transform, device: torch.device) -> np.ndarray:
+    tensor = transform(image).unsqueeze(0).to(device, non_blocking=True)
+    with torch.inference_mode():
+        feature = F.normalize(model.encode_image(tensor).float(), dim=-1)[0]
+    return feature.cpu().numpy().astype(np.float32, copy=False)
+
+
+def load_proxy_feature_store(cfg: dict[str, Any], nq: int, count: int, dim: int, clip_sha: str):
+    path = resolve_path(str(cfg["retrieval"]["proxy_features"]))
+    state_path = resolve_path(str(cfg["retrieval"]["proxy_features_state"]))
+    shape = (nq, count, dim)
+    state = read_json(state_path)
+    valid_state = (
+        isinstance(state, dict)
+        and state.get("schema") == 5
+        and state.get("shape") == list(shape)
+        and state.get("clip_sha256") == clip_sha
+        and isinstance(state.get("fingerprints"), list)
+        and len(state["fingerprints"]) == nq
+    )
+    if path.is_file() and valid_state:
+        try:
+            array = np.load(path, mmap_mode="r+", allow_pickle=False)
+            if array.shape == shape and array.dtype == np.float32:
+                return path, state_path, array, state
+        except Exception:
+            pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    array = np.lib.format.open_memmap(path, mode="w+", dtype=np.float32, shape=shape)
+    array[:] = np.nan
+    array.flush()
+    state = {
+        "schema": 5,
+        "shape": list(shape),
+        "clip_sha256": clip_sha,
+        "fingerprints": [None] * nq,
+    }
+    write_json(state_path, state)
+    return path, state_path, array, state
 
 
 def diffusion_dtype(cfg: dict[str, Any]) -> torch.dtype:
@@ -410,10 +513,9 @@ def main() -> None:
 
     jobs_path = resolve_path(str(cfg["cache"]["proxy_jobs"]))
     jobs = load_jsonl(jobs_path)
-    output_dir = resolve_path(str(cfg["proxy"]["image_dir"]))
-    output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = resolve_path(str(cfg["proxy"]["manifest"]))
     count = int(cfg["proxy"]["count_per_query"])
+    dim = int(cfg["retrieval"]["projection_dim"])
     gen = cfg["migc"]["generation"]
     migc_param = {
         "MIGCsteps": int(gen["migc_steps"]),
@@ -422,21 +524,29 @@ def main() -> None:
     }
     base_seed = int(gen["seed"])
 
+    marker = load_prepared_marker(cfg)
+    retrieval_model, retrieval_transform, clip_sha = load_retrieval_clip(cfg, marker, device)
+    feature_path, state_path, feature_store, state = load_proxy_feature_store(
+        cfg, len(jobs), count, dim, clip_sha
+    )
+    audit_stride = int(cfg["proxy"].get("audit_image_stride", 0))
+    audit_dir = resolve_path(str(cfg["proxy"].get("audit_image_dir", "runs/imagine_seek/cache/proxy_audit")))
+    if audit_stride > 0:
+        audit_dir.mkdir(parents=True, exist_ok=True)
+
     rows: list[dict[str, Any]] = []
     for job in jobs:
         qi = int(job["query_index"])
         query_image = resolve_path(str(job["query_image"]))
-        paths = [output_dir / f"q{qi:05d}_p{pi:02d}.png" for pi in range(count)]
-        meta_path = output_dir / f"q{qi:05d}.meta.json"
         fp = generation_fingerprint(cfg, job)
-        valid = read_json(meta_path) == {"generation_fingerprint": fp} and all(
-            p.is_file() and p.stat().st_size > 1024 for p in paths
-        )
+        current = np.asarray(feature_store[qi])
+        valid = state["fingerprints"][qi] == fp and np.isfinite(current).all()
+        audit_path: Path | None = None
+
         if not valid:
-            for p in paths:
-                p.unlink(missing_ok=True)
             example, prompt, bboxes = build_author_input(author, job["layout"], query_image, pipe.tokenizer)
-            for pi, path in enumerate(paths):
+            query_features = np.empty((count, dim), dtype=np.float32)
+            for pi in range(count):
                 seed = base_seed + qi * 1009 + pi
                 random.seed(seed)
                 np.random.seed(seed % (2**32 - 1))
@@ -449,29 +559,55 @@ def main() -> None:
                         uncond, job["layout"], None, None, None,
                         llambda=1.0, num_steps=int(gen["num_inference_steps"]),
                     )
-                image.save(path)
-                print(f"[proxy] q={qi} {pi+1}/{count} -> {rel(path)}", flush=True)
-            write_json(meta_path, {"generation_fingerprint": fp})
+                query_features[pi] = encode_proxy_image(
+                    image, retrieval_model, retrieval_transform, device
+                )
+                if audit_stride > 0 and pi == 0 and qi % audit_stride == 0:
+                    audit_path = audit_dir / f"q{qi:05d}_p00.png"
+                    image.save(audit_path)
+                del image
+                print(f"[proxy->feature] q={qi} {pi+1}/{count}", flush=True)
+            feature_store[qi] = query_features
+            feature_store.flush()
+            state["fingerprints"][qi] = fp
+            write_json(state_path, state)
         else:
-            print(f"[proxy] cache q={qi}", flush=True)
+            if audit_stride > 0 and qi % audit_stride == 0:
+                candidate = audit_dir / f"q{qi:05d}_p00.png"
+                if candidate.is_file():
+                    audit_path = candidate
+            print(f"[proxy-feature] cache q={qi}", flush=True)
 
         rows.append({
-            "schema": 4,
+            "schema": 5,
             "query_index": qi,
             "image_id": job.get("image_id"),
             "original_captions": list(job["original_captions"]),
             "target_captions": list(job["target_captions"]),
             "scene_prompt": job.get("scene_prompt", ""),
             "layout": job["layout"],
-            "proxy_paths": [rel(p) for p in paths],
+            "proxy_feature_file": rel(feature_path),
+            "proxy_feature_index": qi,
+            "proxy_count": count,
+            "audit_proxy_path": rel(audit_path) if audit_path is not None else None,
             "author_source": "LeyRio/Imagine-and-Seek",
             "reference_conditioning": "MIGC+ELITE_full_scene_mask_no_GT",
             "generation_fingerprint": fp,
+            "storage_mode": "stream_generate_encode_discard",
         })
-        # Incremental manifest makes long runs resumable.
         write_jsonl(manifest_path, rows)
 
-    print(f"[ok] proxy manifest={rel(manifest_path)} rows={len(rows)}", flush=True)
+    if not np.isfinite(np.asarray(feature_store)).all():
+        raise RuntimeError("Proxy feature store contains incomplete/non-finite rows")
+    print(
+        f"[ok] proxy manifest={rel(manifest_path)} rows={len(rows)}; "
+        f"features={rel(feature_path)}; persisted_proxy_pngs<=~{(len(rows)+max(audit_stride,1)-1)//max(audit_stride,1) if audit_stride else 0}",
+        flush=True,
+    )
+    del retrieval_model, pipe, image_encoder, mapper, mapper_local, uncond
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":

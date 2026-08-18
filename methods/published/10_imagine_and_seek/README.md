@@ -1,111 +1,115 @@
-# P10 — Imagine and Seek (LDRE-L + IP-CIR)
+# P10. Imagine and Seek — strict mounted-assets CPR adapter
 
-Paper: **Imagine and Seek: Improving Composed Image Retrieval with an Imagined Proxy**, CVPR 2025.
+Paper: **Imagine and Seek: Improving Composed Image Retrieval with an Imagined Proxy** (CVPR 2025).
 
-This folder is a **strict official-source CPR adapter** for the paper's **CLIP-L/14 branch: LDRE + IP-CIR**. IP-CIR is training-free and plug-and-play: it improves a baseline similarity `S_t` using an imagined-proxy similarity. The adapter never reads CPR target IDs/images, positive labels, GT identity labels, or GT boxes.
+This implementation targets the released **LDRE-L + IP-CIR** configuration while adapting only the dataset boundary needed for the CPR benchmark. It uses the released Imagine-and-Seek source pinned at `LeyRio/Imagine-and-Seek@2f615824bd7a6958083c85d8ad5e5e20549e22cb` and does **not** train or tune on CPR labels.
 
-## Why this replacement exists
-
-The previous P10 in the repository could fail before inference because it installed the released legacy stack (`transformers`, `diffusers`, `numpy`, etc.) directly into Kaggle's Python 3.12 environment. It also mixed P5 LinCIR-L with IP-CIR. The paper's reported branches are **LDRE + IP-CIR with CLIP-L/14** and **LinCIR + IP-CIR with CLIP-G/14**; therefore substituting the repository's LinCIR-L is not the paper configuration.
-
-This replacement fixes both structurally:
-
-- phase 2 only installs tiny bootstrap packages;
-- all legacy IP-CIR dependencies live in an isolated Python-3.10 environment;
-- the retrieval side implements the released LDRE-L caption/debias path and then IP-CIR balancing;
-- there is no automatic small-model fallback.
-
-## Fidelity choices
-
-Default final configuration:
-
-- Author source: `LeyRio/Imagine-and-Seek` pinned to `2f615824bd7a6958083c85d8ad5e5e20549e22cb`.
-- Dense captions: BLIP-2 OPT-6.7B COCO, **15** samples/query, matching the released `caption_coco_opt6.7b` preprocessing choice.
-- Editing/layout LLM: `Qwen/Qwen1.5-32B-Chat-GPTQ-Int4`.
-- Layout prompt: released `prompt/prompt_layout_v2.yaml`.
-- Text baseline: **LDRE-L**, OpenAI CLIP ViT-L/14, target-pad ratio 1.25, 15 paired original/edited captions and released negative-difference debiasing.
-- Proxy generator: Realistic Vision V6 + released MIGC + ELITE.
-- Proxy count: **5** images/query.
-- Robust-proxy weights `(source, semantic, proxy) = (1,1,1)`.
-- Fusion `lambda = 0.3`, fixed from the paper's CIRCO setting and **not tuned using CPR labels**.
-
-The final score is:
+## Status
 
 ```text
-St = LDRE-L edited-caption baseline similarity
-Sp = robust imagined-proxy similarity
-Sb = St * Sp
-Sf = lambda * St + (1-lambda) * Sb
+Implementation status: OFFICIAL_SOURCE_ADAPTED
+CPR supervision: No
+CPR training/tuning: No
+GT target identity: No
+GT target box: No
+Small-model fallback: No
 ```
 
-The robust proxy is built from the mean proxy feature, query-image feature, and semantic perturbation exactly in the released Eq. (1) form. The implementation intentionally preserves the released global scalar `max()` scaling.
+## Faithful profile
 
-## Unavoidable CPR adaptation boundary
+The final profile is intentionally not the earlier Kaggle-small debug variant:
 
-The author's CIR datasets provide dataset-specific concepts/object masks (for example CIRCO `shared_concept`). CPR does not provide an author-compatible concept/mask, and using target identity or GT boxes would leak supervision. Therefore this adapter:
+- dense captions: BLIP-2 OPT-6.7B COCO, **15** samples/query;
+- editing/layout LLM: `Qwen/Qwen1.5-32B-Chat-GPTQ-Int4`;
+- proxy generator: Realistic Vision + MIGC + ELITE;
+- proxy count: **5/query**;
+- retrieval: CLIP ViT-L/14 / LDRE-L;
+- robust-proxy weights: `s_w=t_w=a_w=1`;
+- fusion: `lambda=0.3`, fixed from the paper CIRCO setting, never tuned on CPR.
 
-- generates dense captions from the **query image only**;
-- applies the CPR instruction using the released LDRE editing prompt;
-- feeds the released layout prompt with the first dense visual concept plus the CPR rule;
-- uses the complete query image as ELITE's visual reference mask for image-referenced instances;
-- never inspects target images/IDs/positives/GT boxes.
+The CPR-specific boundary uses the complete reference scene as the ELITE visual reference because the CPR benchmark does not provide the author dataset's `shared_concept`/object-mask annotations. This is recorded as an adaptation rather than represented as exact dataset preprocessing.
 
-This is recorded as `OFFICIAL_SOURCE_ADAPTED`, not `OFFICIAL_EXACT`.
+## Why the two giant models are mounted on Kaggle
+
+Kaggle's writable `/kaggle/working` space is too small for the exact BLIP2-OPT6.7B and Qwen32B-GPTQ snapshots plus the generator environment. V5 therefore requires those two exact snapshots to be mounted read-only under `/kaggle/input` on Kaggle. It verifies their architecture/quantization signature before doing any expensive work, and during checkpoint preparation it also verifies the mounted `config.json` and safetensor index against the pinned Hugging Face revisions.
+
+Use:
+
+```bash
+python methods/published/10_imagine_and_seek/download_checkpoint.py --check-inputs
+```
+
+Expected discovery lines:
+
+```text
+[mount] captioner: /kaggle/input/...
+[mount] layout_llm: /kaggle/input/...
+```
+
+If auto-discovery cannot locate them, set:
+
+```bash
+export IPCIR_BLIP2_DIR=/kaggle/input/.../model-directory
+export IPCIR_QWEN32_DIR=/kaggle/input/.../model-directory
+```
+
+Each directory must contain `config.json`, `model.safetensors.index.json`, and all model safetensor shards.
+
+## Streaming proxy storage
+
+Persisting `2,975 × 5 = 14,875` generated PNGs would waste the remaining writable disk. V5 instead performs:
+
+```text
+MIGC+ELITE proxy
+    -> CLIP-L targetpad encode
+    -> normalized 768-D feature
+    -> discard proxy image
+```
+
+The resumable feature store is:
+
+```text
+runs/imagine_seek/cache/proxy_features.npy
+runs/imagine_seek/cache/proxy_features.state.json
+```
+
+Only sparse audit images are retained under `runs/imagine_seek/cache/proxy_audit/`.
+
+## Scoring
+
+For the five normalized proxy features, released retrieval first computes their mean `f_p`. With source image feature `f_q` and semantic direction `f_s`, the robust imagined-proxy feature is:
+
+```text
+f_RP = a_w f_p
+     + s_w max(f_p)/max(f_q) f_q
+     + t_w max(f_p)/max(f_s) f_s
+```
+
+Then, with baseline text similarity `S_t` and robust proxy similarity `S_p`:
+
+```text
+S_b = S_t * S_p
+S_f = lambda * S_t + (1-lambda) * S_b
+```
+
+The method writes a **complete** `Q × G` score matrix and does not remove the query image internally; exclusion remains evaluator-owned.
 
 ## Environment isolation
 
-`requirements.txt` is intentionally tiny. The root benchmark's phase 2 must **not** downgrade the notebook ML stack.
-
-Phase 3 creates:
+`requirements.txt` contains only host bootstrap requirements (`PyYAML`, `uv`). `download_checkpoint.py` creates an isolated Python 3.10 environment under:
 
 ```text
 runs/imagine_seek/env/ipcir_py310
 ```
 
-with:
+This prevents the released legacy stack from replacing Kaggle's system Torch/Transformers environment.
 
-```text
-Python       3.10
-Torch        2.2.1+cu121
-Torchvision  0.17.1+cu121
-Transformers 4.43.3
-Diffusers    0.21.1
-AutoGPTQ     0.7.1
-```
-
-`run.py` re-execs itself inside this environment before importing Torch/CLIP.
-
-## Install verification
-
-After replacing the method folder, run this **before** the baseline:
+## Recommended Kaggle order
 
 ```bash
 python methods/published/10_imagine_and_seek/verify_install.py
-```
-
-It fails if the host `requirements.txt` still contains `torch`, `transformers`, `diffusers`, `bitsandbytes`, or a NumPy pin. This prevents accidentally running the stale P10 again.
-
-Environment-only diagnosis:
-
-```bash
-python methods/published/10_imagine_and_seek/download_checkpoint.py --env-only
-```
-
-## Final run
-
-```bash
+python methods/published/10_imagine_and_seek/download_checkpoint.py --check-inputs
 python run_baseline.py imagine_seek
 ```
 
-Caption, Qwen, and proxy generation are resumable. The method writes the canonical full score matrix:
-
-```text
-runs/imagine_seek/scores.npy   # [num_queries, num_gallery], float32
-runs/imagine_seek/run.json
-```
-
-The method does not remove the query image internally; the global evaluator keeps ownership of exclusion.
-
-## Resource policy
-
-This is the **final benchmark configuration**, not a small Kaggle approximation. The downloader performs explicit disk/GPU preflight and stops rather than silently replacing Qwen-32B or BLIP-2 OPT-6.7B with smaller models. If the runtime cannot hold the released-scale configuration, use a larger runtime or pre-mounted checkpoints; do not report a smoke-test model as P10.
+If `--check-inputs` fails, mount the exact giant models first. Do **not** lower model size or the storage checks for a final reported P10 result.

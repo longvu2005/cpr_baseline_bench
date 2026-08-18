@@ -1,0 +1,4 @@
+# Isolated legacy stack used only for official WISER step-1 gallery captioning.
+numpy==1.26.4
+transformers==4.26.1
+salesforce-lavis==1.0.2
