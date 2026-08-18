@@ -1,5 +1,5 @@
 method: imagine_seek
-display_name: Imagine and Seek (IP-CIR, official-source CPR adapter)
+display_name: Imagine and Seek (LDRE-L + IP-CIR, official-source CPR adapter)
 group: Published / SOTA Baselines
 cpr_supervision: 'No'
 
@@ -13,61 +13,64 @@ author_source:
   repository: https://github.com/LeyRio/Imagine-and-Seek.git
   commit: 2f615824bd7a6958083c85d8ad5e5e20549e22cb
   local_checkout: runs/imagine_seek/official_source/Imagine-and-Seek
-  auto_clone: true
-  # The released project is adapted only at its dataset/path boundary and proxy masking boundary.
-  # We reuse its MIGC + ELITE implementation, mapper classes and generation function.
   adaptation: cpr_full_scene_reference_mask
 
-base_retriever:
-  method: lincir
-  method_dir: methods/published/05_lincir
-  config: methods/published/05_lincir/config.yaml
-  scores: runs/lincir/scores.npy
-  gallery_features: runs/lincir/cache/gallery_features.npy
-  clip_snapshot: checkpoints/lincir/hf/clip-vit-large-patch14
-  projection_dim: 768
-  auto_prepare: true
-  auto_run: true
+isolated_env:
+  python_version: '3.10'
+  path: runs/imagine_seek/env/ipcir_py310
+  python: runs/imagine_seek/env/ipcir_py310/bin/python
+  # AutoGPTQ 0.7.1 CUDA-12.1 wheel is built against torch 2.2.1+cu121.
+  torch_version: '2.2.1'
+  torchvision_version: '0.17.1'
+  torch_index_url: https://download.pytorch.org/whl/cu121
+  auto_gptq_version: '0.7.1'
+  # Sum across visible CUDA devices. A 2x16-GiB runtime can pass this check.
+  minimum_total_gpu_gib: 23.0
+  # Paper-faithful models are large. Fail explicitly rather than silently downgrade.
+  minimum_free_disk_gib: 68.0
+  small_model_fallback: false
 
 proxy:
-  mode: generate
   count_per_query: 5
   aggregation: mean_feature_then_robust
   manifest: runs/imagine_seek/cache/proxy_manifest.jsonl
   image_dir: runs/imagine_seek/cache/proxies
   jobs: runs/imagine_seek/cache/proxy_jobs.jsonl
-  # Direct full-scene CPR adaptation: ELITE receives the complete reference scene as
-  # the visual concept for every image-referenced subject. No GT target box/identity is used.
+  # CPR has no author-provided object masks/shared_concept annotations. We therefore
+  # reuse the complete query image as the ELITE visual reference without GT boxes.
   reference_mask: full_scene
 
 captioner:
-  repo_id: Salesforce/blip2-opt-2.7b
-  revision: main
-  local_snapshot: checkpoints/imagine_seek/hf/blip2-opt-2.7b
-  captions_per_query: 5
-  max_new_tokens: 48
+  # Released src/dense_caption_generator.py uses LAVIS blip2_opt
+  # model_type=caption_coco_opt6.7b and NUM_CAPTION=15. This HF checkpoint is the
+  # corresponding BLIP-2 OPT-6.7B COCO model, used to make the step self-contained.
+  repo_id: Salesforce/blip2-opt-6.7b-coco
+  revision: 0d580de59320a25a4d2c386387bcef310d5f286e
+  local_snapshot: checkpoints/imagine_seek/hf/blip2-opt-6.7b-coco
+  captions_per_query: 15
+  max_length: 30
+  min_length: 1
+  num_beams: 5
   do_sample: true
-  top_p: 0.92
-  temperature: 0.85
+  top_p: 0.9
+  temperature: 1.0
+  repetition_penalty: 1.0
+  length_penalty: 1.0
 
 layout_llm:
-  # The released IP-CIR project primarily reports Qwen1.5-32B-Chat-GPTQ-Int4.
-  # AutoGPTQ is brittle on Kaggle/Python 3.12, so this default uses the same Qwen1.5
-  # family with bitsandbytes 4-bit. Change repo_id to Qwen/Qwen1.5-14B-Chat or
-  # Qwen/Qwen1.5-32B-Chat if your GPU/storage allows it.
-  repo_id: Qwen/Qwen1.5-7B-Chat
-  revision: 5f4f5e69ac7f1d508f8369e977de208b4803444b
-  local_snapshot: checkpoints/imagine_seek/hf/Qwen1.5-7B-Chat
-  max_new_tokens: 900
-  do_sample: false
-  temperature: 0.0
-  target_captions_per_query: 5
-  load_in_4bit: true
+  # Released README: this GPTQ-Int4 checkpoint is the model primarily used.
+  repo_id: Qwen/Qwen1.5-32B-Chat-GPTQ-Int4
+  revision: 3f80d8ef25653269d3c8c3366f865a975d8988a2
+  local_snapshot: checkpoints/imagine_seek/hf/Qwen1.5-32B-Chat-GPTQ-Int4
+  layout_max_new_tokens: 1100
+  edit_max_new_tokens: 96
+  target_captions_per_query: 15
+  parse_retries: 3
+  prompt_file: prompt/prompt_layout_v2.yaml
 
 migc:
   checkpoint: checkpoints/imagine_seek/weights/MIGC_SD14.ckpt
   google_drive_id: 107fnQ9Fpu5K0UtqnHlKja7hqe-GwjAmz
-  checkpoint_status: PUBLIC_REIMPLEMENTED_UPSTREAM_WEIGHT
   prepared_marker: checkpoints/imagine_seek/prepared.json
   generation:
     num_inference_steps: 50
@@ -77,11 +80,16 @@ migc:
     seed: 42000
 
 elite:
-  checkpoint_folder_url: https://drive.google.com/drive/folders/1VkiVZzA_i9gbfuzvHaLH2VYh7kOTzE0x?usp=sharing
-  download_dir: checkpoints/imagine_seek/weights/elite_download
+  repo_id: ELITE-library/ELITE
+  revision: main
+  global_filename: checkpoints/global_mapper.pt
+  local_filename: checkpoints/local_mapper.pt
   global_mapper: checkpoints/imagine_seek/weights/global_mapper.pt
   local_mapper: checkpoints/imagine_seek/weights/local_mapper.pt
-  clip_vision_snapshot: checkpoints/lincir/hf/clip-vit-large-patch14
+  local_sha256: 56e20d8937aa1c2dd6850ce72a88dda6473ec0ac7a3fb81ffdd560d387eb80e4
+  clip_vision_repo_id: openai/clip-vit-large-patch14
+  clip_vision_revision: main
+  clip_vision_snapshot: checkpoints/imagine_seek/hf/clip-vit-large-patch14
 
 realistic_vision:
   repo_id: aishuu/Realistic_Vision_V6.0_B1VAE
@@ -91,34 +99,44 @@ realistic_vision:
   sha256: e5f3cbc5f7669457d3bec1fd492420995fb9a79e735dce438b81af61fd5d77f0
 
 sd15_components:
-  # Needed by diffusers.from_single_file to construct the released Realistic Vision checkpoint offline.
   repo_id: stable-diffusion-v1-5/stable-diffusion-v1-5
   revision: main
   local_snapshot: checkpoints/imagine_seek/hf/stable-diffusion-v1-5-components
 
-representation:
-  # Author retrieval code uses the same three-term robust proxy representation:
-  # proxy + scaled source feature + scaled semantic direction.
-  query_residual_weight: 1.0
-  semantic_residual_weight: 1.0
+retrieval:
+  # Released args.py defaults to LDRE-L / CLIP ViT-L/14.
+  clip_name: ViT-L/14
+  clip_download_root: checkpoints/imagine_seek/openai_clip
+  projection_dim: 768
+  nums_caption: 15
+  use_debiased_sample: true
+  debiased_temperature: 0.01
+  negative_topk: 50
+  source_weight: 1.0
+  semantic_weight: 1.0
+  proxy_weight: 1.0
   denominator_epsilon: 1.0e-6
-  normalize_proxy_representation: false
-  original_caption_reduce: mean_then_normalize
-  target_caption_reduce: mean_then_normalize
+  gallery_features: runs/imagine_seek/cache/gallery_features.npy
+  gallery_features_meta: runs/imagine_seek/cache/gallery_features.meta.json
+  source_features: runs/imagine_seek/cache/source_features.npy
+  source_features_meta: runs/imagine_seek/cache/source_features.meta.json
+  proxy_features: runs/imagine_seek/cache/proxy_features.npy
+  proxy_features_meta: runs/imagine_seek/cache/proxy_features.meta.json
+  text_features: runs/imagine_seek/cache/text_features.npz
+  text_features_meta: runs/imagine_seek/cache/text_features.meta.json
 
 fusion:
-  # Released source default: 0.3. No CPR label is used to tune this value.
+  # Fixed from the paper's CIRCO setting (closest multi-positive protocol).
+  # This value is NOT tuned on CPR labels.
   lambda_text: 0.3
+  source: paper_CIRCO_fixed_no_CPR_tuning
 
 runtime:
   device: cuda
   caption_dtype: float16
-  llm_dtype: float16
-  diffusion_dtype: float16
-  clip_dtype: float16
-  clip_image_batch_size: 32
-  clip_text_batch_size: 64
-  score_batch_size: 128
+  diffusion_dtype: float32
+  clip_image_batch_size: 64
+  score_batch_size: 64
   num_workers: 4
 
 data:
@@ -127,11 +145,10 @@ data:
 
 cache:
   captions: runs/imagine_seek/cache/query_captions.jsonl
+  captions_state: runs/imagine_seek/cache/query_captions.state.json
+  target_captions: runs/imagine_seek/cache/target_captions.jsonl
   layouts: runs/imagine_seek/cache/layouts.jsonl
-  proxy_features: runs/imagine_seek/cache/proxy_features.npy
-  proxy_features_meta: runs/imagine_seek/cache/proxy_features.meta.json
-  query_components: runs/imagine_seek/cache/query_components.npz
-  query_components_meta: runs/imagine_seek/cache/query_components.meta.json
+  proxy_jobs: runs/imagine_seek/cache/proxy_jobs.jsonl
 
 output:
   dir: runs/imagine_seek
