@@ -57,7 +57,7 @@ Each directory must contain `config.json`, `model.safetensors.index.json`, and a
 
 ## Streaming proxy storage
 
-Persisting `2,975 × 5 = 14,875` generated PNGs would waste the remaining writable disk. V5 instead performs:
+Persisting five generated PNGs per query would waste the remaining writable disk. V5 instead performs:
 
 ```text
 MIGC+ELITE proxy
@@ -113,3 +113,7 @@ python run_baseline.py imagine_seek
 ```
 
 If `--check-inputs` fails, mount the exact giant models first. Do **not** lower model size or the storage checks for a final reported P10 result.
+
+
+Stage-2 input mapping and GROUP behavior are described in
+[data/README.md](../../../data/README.md).

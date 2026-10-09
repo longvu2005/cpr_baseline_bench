@@ -162,7 +162,7 @@ For a query containing `m` subjects:
 4. compute the text-to-person cosine-similarity matrix;
 5. solve maximum-weight Hungarian assignment.
 
-This ensures different subjects are assigned to different detected people for MULTI / RELATIONAL queries.
+This ensures different subjects are assigned to different detected people for DUAL / RELATIONAL queries.
 
 If there are fewer detected persons than query subjects, or localization cannot produce a valid one-to-one assignment, the query is treated as unmatched.
 
@@ -257,7 +257,7 @@ the gallery image receives:
 
 which is the configured unmatched score.
 
-### SINGLE case
+### INDIVIDUAL case
 
 For a one-person query:
 
@@ -702,3 +702,7 @@ detect person
 If S10 performs strongly, it suggests that explicit person decomposition and CLIP-space composition already explain a meaningful portion of CPR performance.
 
 If S10 remains substantially below learned binding approaches, that supports the need for stronger structured conditioning or learned person-text binding beyond simple feature interpolation and Hungarian matching.
+
+
+Stage-2 input mapping and GROUP behavior are described in
+[data/README.md](../../../data/README.md).

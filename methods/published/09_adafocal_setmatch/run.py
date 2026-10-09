@@ -40,7 +40,7 @@ from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "adafocal_setmatch"
-ADAPTER_VERSION = "2026-08-18-v3-checkpoint-namespace-preflight"
+ADAPTER_VERSION = "2026-10-09-v4-stage2-text-routing"
 TARGET_FEATURE_SCHEMA = 1
 
 
@@ -787,9 +787,8 @@ def load_adafocal(
 
 
 def query_compose_text(query: dict[str, Any], subject: dict[str, Any]) -> str:
-    # Preserve the benchmark's established RELATIONAL behavior: every anchored
-    # subject receives the complete relational instruction.
-    if str(query.get("case", "")).strip() == "RELATIONAL":
+    # Cross-Subject wording is preserved without consuming the case label.
+    if str(query.get("relation_text") or "").strip():
         full = str(query.get("text") or "").strip()
         if full:
             return full
@@ -1214,7 +1213,7 @@ def aggregate_setmatch(
 
     eligible = np.flatnonzero(counts >= m)
 
-    # Fast exact specialization for the common two-person MULTI case.
+    # Fast exact specialization for two-person matching.
     if m == 2:
         for gi in eligible:
             start, end = int(offsets[gi]), int(offsets[gi + 1])

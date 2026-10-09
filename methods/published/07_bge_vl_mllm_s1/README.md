@@ -46,7 +46,7 @@ or label-driven localization. `target_ids`, positives, case annotations and GT
 boxes are never consumed. Every query is scored against the complete canonical
 gallery; query-image exclusion remains the evaluator's responsibility.
 
-SINGLE, MULTI and RELATIONAL rows all use exactly the same full-scene query and
+INDIVIDUAL, DUAL and RELATIONAL rows all use exactly the same full-scene query and
 full textual instruction. This is intentional: the model is being measured as
 a universal composed retrieval encoder, not extended with a CPR-specific set
 module.
@@ -99,3 +99,7 @@ runs/bge_vl_mllm_s1/
 ```
 
 Do not commit the checkpoint, feature caches, or score matrix.
+
+
+Stage-2 input mapping and GROUP behavior are described in
+[data/README.md](../../../data/README.md).

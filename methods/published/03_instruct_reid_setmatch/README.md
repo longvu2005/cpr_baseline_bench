@@ -165,7 +165,7 @@ For `m` query targets and `n` gallery persons:
 3. otherwise use maximum-weight Hungarian one-to-one assignment;
 4. aggregate assigned scores with the strict minimum (AND-style SetMatch).
 
-For SINGLE, this reduces to the maximum pair score over detected gallery persons.
+For INDIVIDUAL, this reduces to the maximum pair score over detected gallery persons.
 
 The unmatched score is:
 
@@ -175,9 +175,9 @@ The unmatched score is:
 
 which is intentionally far below ordinary negative squared feature distances while remaining finite.
 
-## MULTI and RELATIONAL
+## DUAL and RELATIONAL
 
-**MULTI** uses distinct query target detections, one Instruct-ReID feature per target, Hungarian matching, and strict-min aggregation.
+**DUAL** uses distinct query target detections, one Instruct-ReID feature per target, Hungarian matching, and strict-min aggregation.
 
 **RELATIONAL** has no extra relation classifier. When `relation_text` is present, every target receives the full canonical query instruction. This deliberately tests how far the person-level Instruct-ReID model generalizes to CPR relations without adding a learned relation module.
 
@@ -223,3 +223,7 @@ outputs/instruct_reid_setmatch/metrics.json
 ```
 
 `scores.npy` preserves the complete canonical query × gallery matrix. The method does not remove the query image; the official benchmark evaluator owns self-image exclusion.
+
+
+Stage-2 input mapping and GROUP behavior are described in
+[data/README.md](../../../data/README.md).

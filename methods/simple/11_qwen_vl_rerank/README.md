@@ -35,7 +35,7 @@ For every top-K candidate, Qwen receives:
 1. the full canonical query/reference scene;
 2. the full candidate gallery scene;
 3. the canonical query-level `text` instruction;
-4. one fixed verifier prompt shared across SINGLE/MULTI/RELATIONAL.
+4. one fixed verifier prompt shared across all four case types.
 
 It does **not** receive `target_ids`, `full_positive_ids`, GT boxes, or GT identity labels during main inference.
 
@@ -182,3 +182,7 @@ Maybe a cheap conventional retriever only needs a strong MLLM verifier on its sh
 ```
 
 If S11 becomes very strong, retrieval-plus-verification is an important conventional baseline. If it still fails, the remaining difficulty is not simply shortlist semantic verification.
+
+
+Stage-2 input mapping and GROUP behavior are described in
+[data/README.md](../../../data/README.md).

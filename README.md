@@ -24,6 +24,28 @@ validate_data.py
 
 ---
 
+## Prepare Stage-2 Data
+
+Place the flattened JSONL export in `data/source/export_stage2.jsonl`, then run:
+
+```bash
+python link_gallery.py --source /path/to/images
+python prepare_data.py
+python validate_data.py
+```
+
+The input fields, adapter mapping, positive filtering, and GROUP limitations
+are documented in [data/README.md](data/README.md). The benchmark uses one common
+gallery containing TRAIN, VAL, and TEST metadata images and supports INDIVIDUAL, DUAL, GROUP, and
+RELATIONAL queries. Query counts come from the input rather than a fixed pilot
+count. `records.jsonl` and the old nested annotation schema are no longer used.
+
+After changing the export, rebuild the manifests and rerun the baselines.
+The runner records manifest hashes with each score matrix; evaluated tables
+include only results for the current manifests.
+
+---
+
 ## Run One Baseline End-to-End
 
 From the repository root, pass only the method name:
@@ -184,7 +206,7 @@ checkpoint source/status
 original backbone
 what is preserved from official code
 what is adapted for this CPR benchmark
-SINGLE / MULTI / RELATIONAL behavior
+INDIVIDUAL / DUAL / GROUP / RELATIONAL behavior
 ```
 
 Clearly distinguish:
@@ -280,7 +302,7 @@ relation_text
 
 Use only inputs that are justified by the original method or by an explicitly documented benchmark adapter.
 
-If a published method does not natively support scene-level target localization, `MULTI`, or `RELATIONAL`, define a deterministic adaptation and document it clearly.
+If a published method does not natively support scene-level target localization, `DUAL`, `GROUP`, or `RELATIONAL`, define a deterministic adaptation and document it clearly.
 
 Do not silently change the original retrieval method while still presenting it as the published baseline.
 

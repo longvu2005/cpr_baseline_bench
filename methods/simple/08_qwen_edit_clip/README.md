@@ -58,7 +58,7 @@ so a valid cache can be reused across methods.
 
 ## Fixed edit instruction template
 
-One prompt template is used for **every** query and every case type. There are no SINGLE/MULTI/RELATIONAL-specific prompts.
+One prompt template is used for **every** query and every case type. There are no INDIVIDUAL/DUAL/GROUP/RELATIONAL-specific prompts.
 
 The canonical field `queries.jsonl["text"]` is inserted only into the `{modification}` slot:
 
@@ -161,8 +161,8 @@ There is no CPR training, validation tuning, checkpoint selection by benchmark s
 
 S8 has no explicit SetMatch or case-specific module:
 
-- **SINGLE:** edit the full query scene into the desired target scene, then retrieve with CLIP image-to-image similarity.
-- **MULTI:** the same prompt asks the editor to keep all required people present when the modification requires them.
+- **INDIVIDUAL:** edit the full query scene into the desired target scene, then retrieve with CLIP image-to-image similarity.
+- **DUAL:** the same prompt asks the editor to keep all required people present when the modification requires them.
 - **RELATIONAL:** the same prompt asks the editor to preserve or update relations in the scene when the modification requires them.
 
 This is deliberately a test of whether a strong generic image editor can perform CPR composition directly in pixel space.
@@ -218,3 +218,7 @@ that ordinary CLIP image retrieval becomes sufficient?
 ```
 
 If S8 performs strongly, this supports the view that generic image-editing composition can already capture much of CPR. If it performs weakly or fails visibly through identity drift, missing people, or wrong relations, that supports the need for explicit person-aware retrieval and structured composition rather than pure generative editing.
+
+
+Stage-2 input mapping and GROUP behavior are described in
+[data/README.md](../../../data/README.md).

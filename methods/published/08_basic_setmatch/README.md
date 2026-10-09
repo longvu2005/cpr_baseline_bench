@@ -62,12 +62,12 @@ If the reference image has fewer predicted person candidates than query subjects
 
 ### No-person gallery policy
 
-If the detector finds no person in a gallery scene, that scene gets one full-scene fallback candidate. SINGLE queries can still score it; a MULTI query requiring more slots receives the normal SetMatch unmatched score.
+If the detector finds no person in a gallery scene, that scene gets one full-scene fallback candidate. INDIVIDUAL queries can still score it; a DUAL query requiring more slots receives the normal SetMatch unmatched score.
 
-## SINGLE / MULTI / RELATIONAL
+## INDIVIDUAL / DUAL / RELATIONAL
 
-- **SINGLE:** one selected query person; gallery score is the best BASIC person score in that scene.
-- **MULTI:** one BASIC target per query subject, followed by one-to-one SetMatch.
+- **INDIVIDUAL:** one selected query person; gallery score is the best BASIC person score in that scene.
+- **DUAL:** one BASIC target per query subject, followed by one-to-one SetMatch.
 - **RELATIONAL:** because BASIC has no dedicated relation module, when `relation_text` is present the adapter uses the full canonical query text as the BASIC text input for each selected subject. This preserves relational wording without adding a learned relation classifier. The SetMatch rule remains unchanged.
 
 ## Runtime artifacts
@@ -150,3 +150,7 @@ The fingerprint includes the adapter/config, gallery/query manifests, pinned-sou
 - BASIC statistics/corpora/synthetic normalization: **official repository resources**.
 - Detector / target selector: benchmark adaptation only, not part of the BASIC paper.
 - CPR supervision: **No**.
+
+
+Stage-2 input mapping and GROUP behavior are described in
+[data/README.md](../../../data/README.md).

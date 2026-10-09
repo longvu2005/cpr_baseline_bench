@@ -4,6 +4,9 @@ import csv
 import json
 from pathlib import Path
 
+from benchmark_data import manifest_fingerprint
+from prepare_data import CASE_TYPES
+
 ROOT = Path(__file__).resolve().parent
 OUTPUTS_DIR = ROOT / "outputs"
 TABLES_DIR = ROOT / "tables"
@@ -22,14 +25,8 @@ MAIN_COLUMNS = [
     "Full-R@10",
 ]
 
-CASE_COLUMNS = [
-    "Method",
-    "SINGLE mAP",
-    "SINGLE R@1",
-    "MULTI mAP",
-    "MULTI R@1",
-    "RELATIONAL mAP",
-    "RELATIONAL R@1",
+CASE_COLUMNS = ["Method"] + [
+    f"{case} {metric}" for case in CASE_TYPES for metric in ("mAP", "R@1")
 ]
 
 
@@ -51,6 +48,8 @@ def collect_results():
     if not OUTPUTS_DIR.is_dir():
         return results
 
+    current_data = manifest_fingerprint(ROOT)
+
     for method_dir in sorted(OUTPUTS_DIR.iterdir()):
         if not method_dir.is_dir():
             continue
@@ -62,6 +61,9 @@ def collect_results():
             continue
 
         metrics = load_json(metrics_path)
+        if metrics.get("data_fingerprint") != current_data:
+            print(f"Skipping previous-data result: {method_dir.name}; rerun this baseline.")
+            continue
 
         if not run_path.is_file():
             raise RuntimeError(
@@ -164,34 +166,11 @@ def build_case_table(results):
     for result in results:
         cases = result["metrics"].get("cases", {})
 
-        single = cases.get("SINGLE", {})
-        multi = cases.get("MULTI", {})
-        relational = cases.get("RELATIONAL", {})
-
-        rows.append(
-            {
-                "Method": result["method"],
-                "SINGLE mAP": format_metric(
-                    single.get("Full-mAP")
-                ),
-                "SINGLE R@1": format_metric(
-                    single.get("Full-R@1")
-                ),
-                "MULTI mAP": format_metric(
-                    multi.get("Full-mAP")
-                ),
-                "MULTI R@1": format_metric(
-                    multi.get("Full-R@1")
-                ),
-                "RELATIONAL mAP": format_metric(
-                    relational.get("Full-mAP")
-                ),
-                "RELATIONAL R@1": format_metric(
-                    relational.get("Full-R@1")
-                ),
-                "_group": result["group"],
-            }
-        )
+        row = {"Method": result["method"], "_group": result["group"]}
+        for case in CASE_TYPES:
+            for metric in ("mAP", "R@1"):
+                row[f"{case} {metric}"] = format_metric(cases.get(case, {}).get(f"Full-{metric}"))
+        rows.append(row)
 
     return rows
 
@@ -279,7 +258,7 @@ def main():
 
     if not results:
         raise RuntimeError(
-            "No outputs/*/metrics.json found."
+            "No evaluated results match the current manifests. Run a baseline first."
         )
 
     group_order = {

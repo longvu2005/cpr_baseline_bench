@@ -96,7 +96,7 @@ The CPR adapter preserves that official composition format exactly and substitut
 a photo of * , {queries.jsonl["text"]}
 ```
 
-There is one fixed template for the entire benchmark. No prompt differs by SINGLE, MULTI, or RELATIONAL case.
+There is one fixed template for the entire benchmark. No prompt differs by INDIVIDUAL, DUAL, or RELATIONAL case.
 
 ## CPR adaptation
 
@@ -131,12 +131,12 @@ case annotations for routing
 
 The query image is not removed inside the method. `evaluate.py` owns benchmark self-image exclusion.
 
-## SINGLE / MULTI / RELATIONAL
+## INDIVIDUAL / DUAL / RELATIONAL
 
 There is no case-specific branch.
 
-- **SINGLE:** full scene + full instruction goes through standard Pic2Word composition.
-- **MULTI:** same full scene + full instruction path; there is no person decomposition or SetMatch.
+- **INDIVIDUAL:** full scene + full instruction goes through standard Pic2Word composition.
+- **DUAL:** same full scene + full instruction path; there is no person decomposition or SetMatch.
 - **RELATIONAL:** same full instruction is passed directly through the same Pic2Word prompt.
 
 This is intentional: P4 measures how far a mature zero-shot CIR method can go **without person-aware adaptation**.
@@ -206,3 +206,7 @@ How strong is a mature zero-shot composed-image retrieval method when applied di
 ```
 
 A strong P4 result would show that generic language-space recomposition transfers well to CPR. A large gap to person-aware methods would quantify the value of explicit person-level reasoning/binding.
+
+
+Stage-2 input mapping and GROUP behavior are described in
+[data/README.md](../../../data/README.md).

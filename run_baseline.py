@@ -16,6 +16,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shlex
@@ -26,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from benchmark_progress import format_duration
-from benchmark_data import describe_gallery_link, ensure_gallery_layout
+from benchmark_data import describe_gallery_link, ensure_gallery_layout, manifest_fingerprint
 
 ROOT = Path(__file__).resolve().parent
 METHOD_ROOTS = (
@@ -214,6 +215,10 @@ def run_pipeline(
     print(flush=True)
     print(f"[1/{total}] Validate gallery data", flush=True)
     gallery_root = ensure_gallery_layout(ROOT, repair=True)
+    subprocess.run(
+        [sys.executable, "-u", "validate_data.py", "--skip-image-files"],
+        cwd=ROOT, check=True,
+    )
     print(f"Gallery: {describe_gallery_link(ROOT)}", flush=True)
     print(f"Files  : validated canonical gallery at {gallery_root}", flush=True)
     print(f"[1/{total}] done in {format_duration(perf_counter() - started)}: Validate gallery data", flush=True)
@@ -260,12 +265,21 @@ def run_pipeline(
             "this method has no download_checkpoint.py and declares no automated checkpoint preparation.",
         )
 
+    data_fingerprint = manifest_fingerprint(ROOT)
     run_step(
         4,
         total,
         "Inference",
         [sys.executable, "-u", str(method.run_path.relative_to(ROOT))],
     )
+    if manifest_fingerprint(ROOT) != data_fingerprint:
+        raise RuntimeError("Manifests changed during inference; rerun this baseline.")
+    run_path = ROOT / "runs" / method.method_id / "run.json"
+    run = json.loads(run_path.read_text(encoding="utf-8"))
+    if run.get("method") != method.method_id:
+        raise ValueError(f"Inference wrote mismatched method metadata: {run_path}")
+    run["data_fingerprint"] = data_fingerprint
+    run_path.write_text(json.dumps(run, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     run_step(
         5,
         total,

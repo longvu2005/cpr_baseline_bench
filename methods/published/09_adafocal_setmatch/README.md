@@ -11,7 +11,7 @@ This adapter intentionally separates the **official AdaFocal model** from the **
 3. For each selected subject, the **full reference scene** and its predicted person bbox are passed through the official **AdaFocal scalar** query branch. The bbox is transformed with the official TargetPad bbox transform before CAAM.
 4. Every detected gallery person is cropped and encoded by the official AdaFocal target branch.
 5. AdaFocal pairwise similarity is computed between each anchored query and every gallery-person candidate. It matches the official scoring rule: cosine-like dot product to all target Q-Former tokens, then max over target tokens.
-6. For MULTI queries, SetMatch performs Hungarian max-sum assignment and uses the strict minimum assigned score as the image score.
+6. For DUAL queries, SetMatch performs Hungarian max-sum assignment and uses the strict minimum assigned score as the image score.
 7. RELATIONAL queries use the full instruction for every anchored subject, matching the benchmark's existing SetMatch convention.
 
 The main-table path never reads a GT target box. A future `AdaFocal-GT Oracle` should be a separate method/row.
@@ -101,13 +101,13 @@ AdaFocal(a, p)
   )
 ```
 
-For a SINGLE query:
+For a INDIVIDUAL query:
 
 ```text
 image_score = max score among detected gallery persons
 ```
 
-For MULTI:
+For DUAL:
 
 ```text
 pairwise matrix
@@ -135,3 +135,7 @@ use release-time names, the adapter remaps only the 30 CAAM parameters after a
 one-to-one proof using tensor shapes and architecture-stable Transformer/CRM
 signatures. The reconstructed full state is then loaded with `strict=True`.
 No arbitrary fuzzy state-dict matching is used.
+
+
+Stage-2 input mapping and GROUP behavior are described in
+[data/README.md](../../../data/README.md).

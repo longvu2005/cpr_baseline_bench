@@ -74,10 +74,10 @@ When the gallery has fewer detected persons than the query (`n < m`), or when th
 
 Extra gallery persons are allowed and are left unmatched.
 
-## SINGLE / MULTI / RELATIONAL behavior
+## INDIVIDUAL / DUAL / RELATIONAL behavior
 
-- `SINGLE`: still uses **all predicted persons in the reference image**, not a text-selected subject. This is intentional because S5 tests a pure detect+ReID reduction.
-- `MULTI`: same person-set construction; maximum-weight Hungarian assignment followed by strict minimum.
+- `INDIVIDUAL`: still uses **all predicted persons in the reference image**, not a text-selected subject. This is intentional because S5 tests a pure detect+ReID reduction.
+- `DUAL`: same person-set construction; maximum-weight Hungarian assignment followed by strict minimum.
 - `RELATIONAL`: relation text is ignored. The method can succeed only when person identity/set evidence alone is sufficient.
 
 ## Caches
@@ -183,3 +183,7 @@ outputs/groundingdino_clipreid_set/run.json
 The pinned official CLIP-ReID ViT implementation constructs parts of the model directly on CUDA. Therefore this adapter intentionally requires a CUDA runtime rather than pretending to support CPU/MPS through an unverified rewrite of the official implementation.
 
 Grounding DINO is imported directly from the pinned official checkout instead of being installed as a wheel. During artifact preparation, `download_checkpoint.py` makes a best-effort in-place build of the optional CUDA/C++ `_C` extension; build failure is non-fatal. If `_C` is usable, inference uses it. Otherwise `run.py` switches only the deformable-attention call to Grounding DINO's own pure-PyTorch fallback implementation. The selected backend is recorded in the detection-cache fingerprint and `run.json`, so caches are not silently mixed across backends.
+
+
+Stage-2 input mapping and GROUP behavior are described in
+[data/README.md](../../../data/README.md).

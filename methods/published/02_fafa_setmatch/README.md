@@ -58,7 +58,7 @@ methods that natively require an anchor/box: FAFA itself is not box-conditioned.
 Predicted crops here are the instance construction required to apply **SetMatch
 [1]** to multi-person scene images.
 
-## MULTI adaptation: SetMatch [1]
+## DUAL adaptation: SetMatch [1]
 
 FAFA is natively a one-reference-person / one-target-person CPR method. For each
 benchmark query:
@@ -70,7 +70,7 @@ benchmark query:
 4. compute maximum-weight **one-to-one Hungarian matching**;
 5. take the **minimum score among the matched target slots** as the image score.
 
-The current pilot has exactly two targets for MULTI/RELATIONAL. `run.py` uses an
+The current pilot has exactly two targets for DUAL/RELATIONAL. `run.py` uses an
 algebraically equivalent vectorized two-row specialization for speed and checks
 the same maximum-sum one-to-one assignment objective; the generic SciPy Hungarian
 path remains as the fallback for future queries with more than two targets.
@@ -79,7 +79,7 @@ If a gallery image has fewer predicted persons than the number of targets, the
 matrix is padded with `setmatch.unmatched_score` (default `-1.0`). Thus every
 target slot must be matched and there is no partial credit.
 
-For SINGLE, SetMatch reduces to the best FAFA score over predicted persons in the
+For INDIVIDUAL, SetMatch reduces to the best FAFA score over predicted persons in the
 gallery image.
 
 ## Query text behavior
@@ -163,3 +163,7 @@ outputs/fafa_setmatch/
 ├── metrics.json
 └── run.json
 ```
+
+
+Stage-2 input mapping and GROUP behavior are described in
+[data/README.md](../../../data/README.md).

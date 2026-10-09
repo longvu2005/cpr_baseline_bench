@@ -12,6 +12,7 @@ unless every manifest image exists below it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,18 @@ from typing import Any, Sequence
 
 GALLERY_ENV = "CPR_GALLERY_SOURCE"
 CANONICAL_GALLERY_PREFIX = ("data", "gallery")
+
+
+def manifest_fingerprint(repo_root: Path) -> dict[str, str]:
+    """Identify the exact ordered manifests used by scores and result tables."""
+    result = {}
+    for name in ("gallery", "queries"):
+        digest = hashlib.sha256()
+        with (repo_root / "data" / f"{name}.jsonl").open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        result[f"{name}_sha256"] = digest.hexdigest()
+    return result
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -67,7 +80,7 @@ def _relative_paths(gallery_rows: Sequence[dict[str, Any]]) -> list[Path]:
 
 
 def _probe_paths(relative_paths: Sequence[Path]) -> list[Path]:
-    """Pick deterministic probes before paying for a full 17k-file audit."""
+    """Pick deterministic probes before paying for a full gallery-file audit."""
     n = len(relative_paths)
     positions = sorted({0, n // 4, n // 2, (3 * n) // 4, n - 1})
     return [relative_paths[index] for index in positions]

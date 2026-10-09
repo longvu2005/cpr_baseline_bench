@@ -8,17 +8,12 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from prepare_data import CASE_TYPES, GALLERY_SPLITS, select_gallery_images
+
 ROOT = Path(__file__).resolve().parent
 GALLERY_PATH = ROOT / "data/gallery.jsonl"
 QUERIES_PATH = ROOT / "data/queries.jsonl"
-
-EXPECTED_GALLERY = 17000
-EXPECTED_QUERIES = 2975
-EXPECTED_CASES = {
-    "SINGLE": 2671,
-    "MULTI": 225,
-    "RELATIONAL": 79,
-}
+IMAGES_PATH = ROOT / "data/source/images.jsonl"
 
 
 def fail(message: str) -> None:
@@ -65,14 +60,13 @@ def main() -> None:
     gallery = read_jsonl(GALLERY_PATH)
     queries = read_jsonl(QUERIES_PATH)
 
+    source_images = select_gallery_images(read_jsonl(IMAGES_PATH))
+    require(bool(source_images), "Source metadata has no TRAIN/VAL/TEST images")
     require(
-        len(gallery) == EXPECTED_GALLERY,
-        f"Expected {EXPECTED_GALLERY} gallery images, got {len(gallery)}",
+        [row.get("image_id") for row in gallery] == [str(row["image_id"]) for row in source_images],
+        "Gallery must contain all TRAIN/VAL/TEST metadata images in image_idx order; run prepare_data.py",
     )
-    require(
-        len(queries) == EXPECTED_QUERIES,
-        f"Expected {EXPECTED_QUERIES} queries, got {len(queries)}",
-    )
+    require(bool(queries), "Query manifest is empty; run prepare_data.py first")
 
     image_ids: list[Any] = []
     gallery_by_id: dict[Any, dict[str, Any]] = {}
@@ -83,6 +77,9 @@ def main() -> None:
             require(key in row, f"Gallery row {gi}: missing {key}")
 
         image_id = row["image_id"]
+        require(row.get("gallery_idx") == gi, f"Gallery row {gi}: gallery_idx/order mismatch")
+        require(row.get("source_split") == source_images[gi]["source_split"],
+                f"Gallery row {gi}: source_split mismatch")
         require(image_id not in gallery_by_id, f"Duplicate gallery image_id: {image_id!r}")
         require(
             isinstance(row["person_ids"], list) and bool(row["person_ids"]),
@@ -110,9 +107,14 @@ def main() -> None:
 
     for qi, q in enumerate(queries):
         for key in (
+            "query_idx",
             "query_id",
             "image_id",
+            "path",
+            "target_image_id",
             "text",
+            "final_desc",
+            "final_change",
             "case",
             "subjects",
             "target_ids",
@@ -121,17 +123,22 @@ def main() -> None:
             require(key in q, f"Query row {qi}: missing {key}")
 
         query_id = q["query_id"]
+        require(q["query_idx"] == qi, f"{query_id}: query_idx/order mismatch")
         require(query_id not in query_ids, f"Duplicate query_id: {query_id!r}")
         query_ids.add(query_id)
 
         case = str(q["case"])
         require(
-            case in {"SINGLE", "MULTI", "RELATIONAL"},
+            case in CASE_TYPES,
             f"{query_id}: invalid case {case!r}",
         )
         cases[case] += 1
 
         require(q["image_id"] in gallery_by_id, f"{query_id}: query image not in gallery")
+        require(
+            q["path"] == gallery_by_id[q["image_id"]]["path"],
+            f"{query_id}: query path differs from gallery path",
+        )
         require(
             isinstance(q["text"], str) and bool(q["text"].strip()),
             f"{query_id}: empty text",
@@ -148,27 +155,21 @@ def main() -> None:
             f"{query_id}: duplicate target identity",
         )
 
-        if case == "SINGLE":
-            require(len(target_ids) == 1, f"{query_id}: SINGLE must have exactly 1 identity")
-        else:
-            require(len(target_ids) >= 2, f"{query_id}: {case} must have >=2 identities")
-
         subjects = q["subjects"]
         require(
             isinstance(subjects, list) and bool(subjects),
             f"{query_id}: subjects must be a non-empty list",
         )
-        require(
-            len(subjects) == len(target_ids),
-            f"{query_id}: subjects/target_ids count mismatch",
-        )
-
         subject_identity_ids: list[str] = []
         subject_ids: list[Any] = []
         relation_text = str(q.get("relation_text") or "").strip()
         for si, subject in enumerate(subjects):
             require(isinstance(subject, dict), f"{query_id}: subject {si} must be an object")
-            require("identity_id" in subject, f"{query_id}: subject {si} missing identity_id")
+            identity_ids = subject.get("identity_ids")
+            require(
+                isinstance(identity_ids, list) and bool(identity_ids),
+                f"{query_id}: subject {si} needs non-empty identity_ids",
+            )
             require("subject_id" in subject, f"{query_id}: subject {si} missing subject_id")
             require(
                 bool(str(subject.get("select_text") or "").strip()),
@@ -179,12 +180,12 @@ def main() -> None:
                 bool(modify_text or relation_text),
                 f"{query_id}: subject {si} has no modify_text and no relation_text fallback",
             )
-            subject_identity_ids.append(str(subject["identity_id"]))
+            subject_identity_ids.extend(str(identity_id) for identity_id in identity_ids)
             subject_ids.append(subject["subject_id"])
 
         require(
             subject_identity_ids == target_ids_str,
-            f"{query_id}: subjects[].identity_id must match target_ids in order",
+            f"{query_id}: flattened subjects[].identity_ids must match target_ids in order",
         )
         require(
             len(subject_ids) == len(set(subject_ids)),
@@ -206,6 +207,10 @@ def main() -> None:
             len(positives) == len(set(positives)),
             f"{query_id}: duplicate Full positive image id",
         )
+        require(
+            q["target_image_id"] in positives,
+            f"{query_id}: annotated target_image_id is not a Full positive",
+        )
 
         for positive_id in positives:
             require(
@@ -224,19 +229,16 @@ def main() -> None:
                 f"{query_id}: Full positive {positive_id} does not contain all target identities",
             )
 
-    require(
-        dict(cases) == EXPECTED_CASES,
-        f"Unexpected case counts: {dict(cases)}; expected {EXPECTED_CASES}",
-    )
-
     print()
-    print("CPR pilot data validation: OK")
+    print("CPR data validation: OK")
     print("-----------------------------")
     print(f"Gallery      : {len(gallery):,}")
+    image_counts = Counter(row["source_split"] for row in gallery)
+    for split in GALLERY_SPLITS:
+        print(f"Gallery {split:5s}: {image_counts[split]:,}")
     print(f"Queries      : {len(queries):,}")
-    print(f"SINGLE       : {cases['SINGLE']:,}")
-    print(f"MULTI        : {cases['MULTI']:,}")
-    print(f"RELATIONAL   : {cases['RELATIONAL']:,}")
+    for case in CASE_TYPES:
+        print(f"{case:13s}: {cases[case]:,}")
     if args.skip_image_files:
         print("Image files  : skipped by request")
     else:

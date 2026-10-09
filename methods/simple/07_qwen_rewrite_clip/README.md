@@ -61,7 +61,7 @@ so a valid cache can be reused across methods.
 
 ## Fixed prompt template
 
-One prompt is used for **every** query and every case type. There are no SINGLE/MULTI/RELATIONAL-specific prompts.
+One prompt is used for **every** query and every case type. There are no INDIVIDUAL/DUAL/GROUP/RELATIONAL-specific prompts.
 
 The canonical field `queries.jsonl["text"]` is inserted only into the `{modification}` slot:
 
@@ -170,8 +170,8 @@ There is no CPR training, validation tuning, prompt selection by benchmark score
 
 S7 has no explicit SetMatch or case-specific module:
 
-- **SINGLE:** Qwen rewrites the scene + text into one target caption, then CLIP retrieves globally.
-- **MULTI:** the same prompt asks Qwen to describe all required people when the modification requires them.
+- **INDIVIDUAL:** Qwen rewrites the scene + text into one target caption, then CLIP retrieves globally.
+- **DUAL:** the same prompt asks Qwen to describe all required people when the modification requires them.
 - **RELATIONAL:** the same prompt asks Qwen to preserve visible relationships when the modification requires them.
 
 This is deliberately a test of whether generic multimodal understanding + language rewrite is already sufficient without a CPR-specific architecture.
@@ -216,3 +216,7 @@ that ordinary CLIP text-to-image retrieval becomes sufficient after rewriting?
 ```
 
 If S7 performs strongly, a substantial part of CPR may be solvable through generic multimodal query understanding and language-space recomposition. If it remains clearly below a CPR-specific method, the result supports the need for explicit person-level composition, binding, or structured retrieval rather than caption rewriting alone.
+
+
+Stage-2 input mapping and GROUP behavior are described in
+[data/README.md](../../../data/README.md).

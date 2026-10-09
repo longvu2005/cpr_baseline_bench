@@ -53,7 +53,6 @@ class QueryTarget:
     modify_text: str
     select_text: str
     subject_id: Any = None
-    identity_id: Any = None
 
 
 @dataclass(frozen=True)
@@ -204,7 +203,6 @@ def parse_query_targets(query: dict[str, Any], qi: int) -> list[QueryTarget]:
                 modify_text=modify_text,
                 select_text=select_text,
                 subject_id=subject.get("subject_id"),
-                identity_id=subject.get("identity_id"),
             )
         )
 
@@ -977,7 +975,7 @@ def setmatch_two_targets_all_images(
 ) -> np.ndarray:
     """Exact two-target specialization of maximum-weight Hungarian SetMatch.
 
-    The pilot MULTI/RELATIONAL schema has exactly two target subjects. For two
+    The DUAL/RELATIONAL exports have two textual Subject slots. For two
     rows, the maximum-weight one-to-one assignment can be solved from each
     row's best/second-best columns, yielding exactly the same assignment
     objective as Hungarian while avoiding millions of tiny SciPy calls.

@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 
 from benchmark_progress import PhaseTracker, progress_bar
+from benchmark_data import manifest_fingerprint
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
@@ -85,6 +86,7 @@ def main() -> None:
     args = parser.parse_args()
 
     method = args.method
+    data_fingerprint = manifest_fingerprint(ROOT)
     gallery = load_jsonl(DATA_DIR / "gallery.jsonl")
     queries = load_jsonl(DATA_DIR / "queries.jsonl")
 
@@ -106,6 +108,9 @@ def main() -> None:
         raise ValueError(
             "run.json must declare higher_is_better=true because the official evaluator ranks scores descending."
         )
+    recorded_data = run.get("data_fingerprint")
+    if recorded_data is not None and recorded_data != data_fingerprint:
+        raise ValueError("Score manifests have changed; rerun inference with run_baseline.py.")
 
     scores = np.load(scores_path, mmap_mode="r", allow_pickle=False)
     expected_shape = (len(queries), len(gallery))
@@ -181,6 +186,7 @@ def main() -> None:
 
     metrics = {
         "method": method,
+        "data_fingerprint": data_fingerprint,
         "overall": {key: float(np.mean(values)) for key, values in all_m.items()},
         "cases": {
             case: {key: float(np.mean(values)) for key, values in case_values.items()}

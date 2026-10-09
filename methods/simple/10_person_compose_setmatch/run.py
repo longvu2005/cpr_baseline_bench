@@ -28,7 +28,7 @@ from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "per_person_clip_compose_setmatch"
-ADAPTER_VERSION = "2026-08-14-v2-py312-s5-sync-fixed-alpha"
+ADAPTER_VERSION = "2026-10-09-v3-stage2-text-routing"
 PERSON_FEATURE_SCHEMA = 1
 ALPHA_SCHEMA = 1
 
@@ -265,8 +265,7 @@ def hungarian_maximize(similarity: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def query_compose_text(query: dict[str, Any], subject: dict[str, Any]) -> str:
-    case = str(query.get("case", "")).strip()
-    if case == "RELATIONAL":
+    if str(query.get("relation_text") or "").strip():
         text = str(query.get("text") or "").strip()
         if text:
             return text

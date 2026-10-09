@@ -65,7 +65,7 @@ g = MagicLens(gallery_scene, "")["multimodal_embed_norm"]
 score(q, g) = q @ g
 ```
 
-There is **no** detector, box crop, identity supervision, target-id lookup, positive-label use, target localization, or SetMatch. `SINGLE`, `MULTI`, and `RELATIONAL` queries all use the same scene-level MagicLens rule. This limitation is deliberate: adding person matching would change the published method into a different adapter.
+There is **no** detector, box crop, identity supervision, target-id lookup, positive-label use, target localization, or SetMatch. `INDIVIDUAL`, `DUAL`, and `RELATIONAL` queries all use the same scene-level MagicLens rule. This limitation is deliberate: adding person matching would change the published method into a different adapter.
 
 The method also does **not** remove the query image from the score matrix. The repository evaluator owns query-image exclusion.
 
@@ -73,7 +73,7 @@ The method also does **not** remove the query image from the score matrix. The r
 
 The official Scenic/OpenAI CLIP tokenizer has a fixed context length of 77 tokens. CPR instructions can be longer than that, so this adapter sets `tokenizer_truncate: true`. This uses Scenic's own CLIP-compatible truncation path: if the tokenized instruction is longer than 77 tokens, it keeps the first 76 positions and places the CLIP end-of-text token in position 77.
 
-This is a model-input constraint, not an instruction rewrite: the source field remains the canonical `queries.jsonl["text"]`, there is no LLM summarization or hand-authored shortening, and no target labels are consulted. Long `MULTI`/`RELATIONAL` instructions may lose tail information; that limitation is reported as part of the direct MagicLens baseline rather than introducing a custom splitting or SetMatch mechanism.
+This is a model-input constraint, not an instruction rewrite: the source field remains the canonical `queries.jsonl["text"]`, there is no LLM summarization or hand-authored shortening, and no target labels are consulted. Long `DUAL`/`RELATIONAL` instructions may lose tail information; that limitation is reported as part of the direct MagicLens baseline rather than introducing a custom splitting or SetMatch mechanism.
 
 ## Environment
 
@@ -166,3 +166,7 @@ with higher score meaning a better match. `evaluate.py` and `build_tables.py` re
 ## Cache correctness
 
 Gallery/query feature caches are keyed by the adapter version, full config SHA256, canonical manifest SHA256, official checkpoint SHA256, pinned source commits, preprocessing settings, and query composition settings. A stale cache is rejected rather than reused by shape alone.
+
+
+Stage-2 input mapping and GROUP behavior are described in
+[data/README.md](../../../data/README.md).

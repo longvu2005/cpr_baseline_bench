@@ -66,7 +66,7 @@ The benchmark uses full scene images, while Word4Per is natively a cropped-perso
 
 The adapter does **not** use PIPA GT boxes, identity-to-box mappings, `target_ids`, or positive labels for localization or retrieval scoring.
 
-## MULTI / RELATIONAL adaptation: SetMatch
+## DUAL / RELATIONAL adaptation: SetMatch
 
 Word4Per is applied independently to every target subject. Every predicted gallery person is encoded with Word4Per's image encoder, giving a target-by-gallery-person cosine-similarity matrix.
 
@@ -78,7 +78,7 @@ For each gallery image:
 
 This is an AND-style SetMatch rule: every target must be supported, and one strong target cannot compensate for one weak/missing target.
 
-For SINGLE, this reduces to the best Word4Per score over predicted persons in the gallery image.
+For INDIVIDUAL, this reduces to the best Word4Per score over predicted persons in the gallery image.
 
 SetMatch and predicted scene localization are benchmark adaptations; they are not claimed to be part of the original Word4Per paper.
 
@@ -133,3 +133,7 @@ outputs/word4per_setmatch/
 ├── metrics.json
 └── run.json
 ```
+
+
+Stage-2 input mapping and GROUP behavior are described in
+[data/README.md](../../../data/README.md).

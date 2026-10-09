@@ -43,7 +43,6 @@ class QueryTarget:
     modify_text: str
     select_text: str
     subject_id: Any = None
-    identity_id: Any = None
 
 
 @dataclass(frozen=True)
@@ -192,7 +191,6 @@ def parse_query_targets(query: dict[str, Any], qi: int) -> list[QueryTarget]:
                 modify_text=modify_text,
                 select_text=select_text,
                 subject_id=subject.get("subject_id"),
-                identity_id=subject.get("identity_id"),
             )
         )
 
