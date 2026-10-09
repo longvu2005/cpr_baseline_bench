@@ -1,0 +1,154 @@
+{
+  "adapter_version": "2026-08-13-v2-offline-artifacts-setmatch",
+  "method": "fafa_setmatch",
+  "display_name": "FAFA + SetMatch",
+  "group": "Published / SOTA Baselines",
+  "cpr_supervision": "No",
+  "paper": {
+    "title": "Automatic Synthetic Data and Fine-grained Adaptive Feature Alignment for Composed Person Retrieval",
+    "venue": "NeurIPS 2025",
+    "arxiv": "2311.16515"
+  },
+  "official_source": {
+    "repository": "https://github.com/Delong-liu-bupt/Composed_Person_Retrieval.git",
+    "commit": "0cc16936f031f7ad166be4cce1be33d0b44b728e",
+    "subdir": "FAFA_SynCPR",
+    "runtime_guard_version": "2026-08-13-v1-readonly-official-source",
+    "python_bytecode_writes_disabled": true,
+    "integrity_ignores_generated_python_bytecode_only": true,
+    "preflight_before_localization": true
+  },
+  "checkpoint": {
+    "path": "checkpoints/fafa/tuned_recall_at1_step.pt",
+    "status": "OFFICIAL_RELEASED",
+    "source_url": "https://drive.google.com/file/d/1Bf2Ia7zmxx5k3Dj-nRr3CLbAqc_zkM0y/view?usp=sharing",
+    "model_name": "blip2_fafa_cpr",
+    "model_type": "pretrain",
+    "load_strict": false,
+    "missing_key_count": 0,
+    "unexpected_key_count": 0
+  },
+  "fafa_scoring": {
+    "use_soft": true,
+    "fda_k": 6,
+    "fda_alpha": 0.5,
+    "fd_margin": 0.5,
+    "definition": "top-k mean similarity between composed query feature and FAFA target feature tokens",
+    "target_token_count": 32,
+    "embedding_dim": 256
+  },
+  "localization": {
+    "uses_gt_target_boxes": false,
+    "uses_target_ids_for_box_selection": false,
+    "uses_positive_labels_for_scoring": false,
+    "person_detector": "torchvision_fasterrcnn_resnet50_fpn_v2",
+    "detector_weights": "checkpoints/torchvision/fasterrcnn_resnet50_fpn_v2_coco-dd69338a.pth",
+    "score_threshold": 0.55,
+    "candidate_cache": "runs/fafa_setmatch/cache/197da2cf1569cc9c/person_candidates.jsonl",
+    "selector": "openai_clip",
+    "selector_model": "ViT-B/32",
+    "assignment": "hungarian",
+    "mean_assigned_clip_similarity": 0.3018271406522642,
+    "min_assigned_clip_similarity": 0.16844069957733154,
+    "queries_with_too_few_candidates": 0,
+    "full_scene_fallback_slots": 0,
+    "shortage_policy": "pad missing query-target slots with the full reference scene"
+  },
+  "setmatch": {
+    "assignment": "maximum-weight one-to-one Hungarian",
+    "aggregation": "minimum assigned target score",
+    "unmatched_score": -1.0,
+    "no_partial_credit": true
+  },
+  "data_schema": {
+    "gallery": "gallery.jsonl image_id + path; person_ids are not used for scoring/localization",
+    "query_reference": "queries.jsonl image_id -> gallery.image_id",
+    "target_selection_text": "subjects[].select_text",
+    "target_modification_text": "subjects[].modify_text; relation_text then query text fallback"
+  },
+  "query_case_counts": {
+    "DUAL": 308,
+    "INDIVIDUAL": 3671,
+    "GROUP": 151,
+    "RELATIONAL": 181
+  },
+  "query_target_count_histogram": {
+    "1": 3822,
+    "2": 489
+  },
+  "gallery_predicted_person_count_histogram": {
+    "1": 5892,
+    "2": 5475,
+    "3": 4101,
+    "4": 2692,
+    "5": 1988,
+    "6": 1482,
+    "7": 1254,
+    "8": 1055,
+    "9": 894,
+    "10": 5719
+  },
+  "relation_text_fallback_subjects": 0,
+  "runtime": {
+    "device": "cuda",
+    "detector_device": "cuda",
+    "image_batch_size": 64,
+    "query_batch_size": 64,
+    "score_person_batch_size": 2048,
+    "score_query_batch_size": 128,
+    "num_workers": 4
+  },
+  "config": "methods/published/02_fafa_setmatch/config.yaml",
+  "cache": {
+    "key": "197da2cf1569cc9c",
+    "dir": "runs/fafa_setmatch/cache/197da2cf1569cc9c",
+    "fingerprint": {
+      "adapter_version": "2026-08-13-v2-offline-artifacts-setmatch",
+      "config_sha256": "c95a37f9de12ddb5ae777a60c5ef63a2e79182c578e133baa009b5e902187dce",
+      "gallery_sha256": "4517f6a39a93b5e3fdd7c68696a772f936c75b79c438e3e6c77bef1c5c1e96c2",
+      "queries_sha256": "758f7b08047995c8f3833d9a6d45fdd3412456627ffa4608f26d52ae0db47d07",
+      "checkpoints": [
+        {
+          "path": "checkpoints/fafa/tuned_recall_at1_step.pt",
+          "size": 2725082222,
+          "mtime_ns": 1760977930000000000
+        },
+        {
+          "path": "checkpoints/fafa/runtime_assets_ready.json",
+          "size": 2817,
+          "mtime_ns": 1791548233403317192
+        },
+        {
+          "path": "checkpoints/clip/ViT-B-32.pt",
+          "size": 353976522,
+          "mtime_ns": 1791548103140815529
+        },
+        {
+          "path": "checkpoints/torchvision/fasterrcnn_resnet50_fpn_v2_coco-dd69338a.pth",
+          "size": 175221657,
+          "mtime_ns": 1791548103883886860
+        }
+      ]
+    }
+  },
+  "num_queries": 4311,
+  "num_gallery": 30552,
+  "num_predicted_gallery_persons": 141199,
+  "scores": "runs/fafa_setmatch/scores.npy",
+  "higher_is_better": true,
+  "notes": [
+    "Canonical gallery/query ordering is preserved.",
+    "The query image remains in the score matrix; evaluate.py handles exclusion.",
+    "FAFA is loaded from the authors' pinned official implementation and released checkpoint.",
+    "Pinned-source and runtime-asset integrity are preflighted before expensive detector/CLIP localization.",
+    "Python bytecode writes are disabled; integrity checks ignore only generated .pyc/.pyo bytecode files and still reject real tracked source edits.",
+    "No CPR benchmark training, fine-tuning, checkpoint selection, or hyperparameter tuning is performed.",
+    "No GT PIPA target boxes or identity-to-box mapping are used in the main adapter.",
+    "SetMatch uses maximum-weight Hungarian matching followed by the minimum matched target score.",
+    "RELATIONAL text is not modeled jointly by native single-person FAFA; relation_text is only a per-target fallback when modify_text is empty."
+  ],
+  "data_fingerprint": {
+    "gallery_sha256": "4517f6a39a93b5e3fdd7c68696a772f936c75b79c438e3e6c77bef1c5c1e96c2",
+    "queries_sha256": "758f7b08047995c8f3833d9a6d45fdd3412456627ffa4608f26d52ae0db47d07"
+  }
+}
