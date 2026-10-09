@@ -58,6 +58,12 @@ localization:
     - modify_text
     - text
     checkpoint: checkpoints/clip/ViT-B-32.pt
+    # Case-agnostic: always anchor each Subject first (Hungarian), then expand.
+    # An extra crop must pass both CLIP >= threshold and
+    # CLIP >= its Subject's assigned anchor score - margin.
+    membership_threshold: 0.20
+    membership_margin: 0.03
+    max_members_per_subject: 5
 setmatch:
   enabled: true
   assignment: hungarian

@@ -46,8 +46,18 @@ This adapter therefore uses **predicted** person localization only:
    gallery/query image;
 2. for a query with multiple `subjects`, OpenAI CLIP (`ViT-B/32`) scores each
    `subjects[].select_text` against the predicted query-person crops;
-3. a one-to-one Hungarian assignment selects one predicted reference crop per
-   target subject.
+3. a one-to-one Hungarian assignment first chooses one **anchor crop** per
+   textual Subject, regardless of its absolute CLIP score;
+4. from the remaining detected people, a Subject may receive extra members if
+   `CLIP(subject, person) >= membership_threshold` **and**
+   `CLIP(subject, person) >= CLIP(subject, assigned_anchor) - membership_margin`;
+   extra people cannot be reused across Subjects and are capped by
+   `max_members_per_subject`. Fallback whole-scene crops are never extras.
+
+This rule does **not** read a case label, identity list, or ground-truth member
+count. Every Subject uses the same anchor-first/threshold-expansion policy.
+An INDIVIDUAL query can acquire erroneous extra members; that is a documented
+limitation of the zero-shot heuristic, not an oracle-corrected prediction.
 
 No PIPA identity-to-box mapping, GT person box, `target_ids`, or positive labels
 are used to localize a target or compute a retrieval score. The CLIP selector is
@@ -63,24 +73,26 @@ Predicted crops here are the instance construction required to apply **SetMatch
 FAFA is natively a one-reference-person / one-target-person CPR method. For each
 benchmark query:
 
-1. run FAFA independently for every target subject;
+1. run FAFA independently for **each predicted member** of every Subject,
+   reusing that Subject's modification text;
 2. run FAFA target encoding independently for every predicted person in a
    gallery image;
 3. build the target-person score matrix using the official FAFA soft-FDA score;
 4. compute maximum-weight **one-to-one Hungarian matching**;
 5. take the **minimum score among the matched target slots** as the image score.
 
-The current pilot has exactly two targets for DUAL/RELATIONAL. `run.py` uses an
-algebraically equivalent vectorized two-row specialization for speed and checks
-the same maximum-sum one-to-one assignment objective; the generic SciPy Hungarian
-path remains as the fallback for future queries with more than two targets.
+`run.py` uses an exact vectorized two-component specialization for speed;
+with three or more predicted members it uses the generic SciPy Hungarian solver.
+When the gallery has fewer people than components, a safe lower-bound shortcut
+avoids unnecessary assignments while preserving the padded SetMatch score.
 
 If a gallery image has fewer predicted persons than the number of targets, the
 matrix is padded with `setmatch.unmatched_score` (default `-1.0`). Thus every
 target slot must be matched and there is no partial credit.
 
-For INDIVIDUAL, SetMatch reduces to the best FAFA score over predicted persons in the
-gallery image.
+When exactly one query person is predicted, SetMatch reduces to the best FAFA
+score over predicted gallery people. Otherwise all predicted members must be
+matched to distinct gallery people, even with one textual Subject.
 
 ## Query text behavior
 
@@ -135,11 +147,10 @@ first. Missing/stale artifacts or real source edits therefore fail before the
 expensive person detector runs. The large FAFA model itself is still loaded only
 after detector/CLIP localization to avoid unnecessary GPU-memory overlap.
 
-Operational guard changes do not alter the FAFA/SetMatch scoring semantics and
-do not change `ADAPTER_VERSION`, so a valid cache produced by the previous v2
-adapter remains reusable. In particular, an existing `person_candidates.jsonl`
-with the same config/data/checkpoint fingerprint is loaded instead of rerunning
-the full gallery detector.
+The case-agnostic member-selection and scoring changes **do** alter the
+semantics; `ADAPTER_VERSION` is therefore bumped. The full cache key changes,
+so the prior v2 cache will not be reused (including its person detection cache).
+This is intentional for reproducibility. No official FAFA source or weights change.
 
 ## Run
 
@@ -167,3 +178,18 @@ outputs/fafa_setmatch/
 
 Stage-2 input mapping and GROUP behavior are described in
 [data/README.md](../../../data/README.md).
+
+## Baseline constraints
+
+- Inference uses public `subjects[]` and their selection/modification texts.
+  `case`, `case_type`, `identity_ids`, GT boxes and positive labels are not
+  consulted to choose members or compute scores. The Subject-list structure
+  itself must be a permitted query input in the evaluation protocol.
+- Membership thresholds are **fixed heuristics** (`config.yaml`), not tuned
+  on the evaluation set. FAFA/CLIP/detector weights are frozen.
+- All predicted group members receive the *same* Subject modification text:
+  there is no group-level or relation verifier and no guarantee that CLIP
+  discovers the true number of people.
+- Per-query predicted member counts, CLIP anchor similarities and fallback
+  statistics are recorded in `run.json` for auditability.
+

@@ -42,7 +42,7 @@ if str(ROOT) not in sys.path:
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "fafa_setmatch"
-ADAPTER_VERSION = "2026-08-13-v2-offline-artifacts-setmatch"
+ADAPTER_VERSION = "2026-10-10-v3-anchor-first-threshold-setmatch"
 # Runtime-only guard revision. Deliberately excluded from build_cache_key so this
 # non-semantic fix continues to reuse detector/feature caches produced by v2.
 RUNTIME_GUARD_VERSION = "2026-08-13-v1-readonly-official-source"
@@ -598,6 +598,59 @@ def load_clip_selector(selector_cfg: dict[str, Any], device: torch.device):
     return clip, model, preprocess
 
 
+def select_subject_members(
+    similarity: np.ndarray,
+    candidates: Sequence[BoxCandidate],
+    *,
+    threshold: float,
+    margin: float,
+    max_members: int,
+) -> tuple[list[list[int]], list[int]]:
+    """Select disjoint query people without case labels or oracle cardinalities.
+
+    First anchor every textual Subject with a maximum-sum Hungarian assignment,
+    ignoring thresholds. Then expand from unused, non-fallback person crops if
+    their CLIP similarity passes both an absolute threshold and the Subject's
+    assigned *anchor* score minus ``margin``. Resolve contested extras by the
+    highest similarity, breaking ties by Subject order.
+
+    All Subjects follow the same policy, including single-person queries.
+    """
+    if similarity.ndim != 2 or not np.isfinite(similarity).all():
+        raise ValueError("CLIP similarity must be a finite 2D matrix")
+    nsubjects, npeople = similarity.shape
+    if nsubjects < 1 or npeople < nsubjects or len(candidates) != npeople:
+        raise ValueError("Need at least one candidate per Subject")
+    if not np.isfinite([threshold, margin]).all() or margin < 0 or max_members < 1:
+        raise ValueError("Invalid membership threshold, margin, or member cap")
+
+    rows, cols = linear_sum_assignment(-similarity)
+    anchors = [-1] * nsubjects
+    for row, col in zip(rows, cols):
+        anchors[int(row)] = int(col)
+    if any(col < 0 for col in anchors):
+        raise RuntimeError("Hungarian did not assign every Subject an anchor")
+    members = [[col] for col in anchors]
+    used = set(anchors)
+
+    # Stable order ensures deterministic cap behavior when scores tie.
+    for col in np.argsort(-similarity.max(axis=0), kind="stable"):
+        col = int(col)
+        if col in used or candidates[col].fallback:
+            continue
+        eligible = [
+            row for row in range(nsubjects)
+            if len(members[row]) < max_members
+            and similarity[row, col] >= threshold
+            and similarity[row, col] >= similarity[row, anchors[row]] - margin
+        ]
+        if eligible:
+            owner = max(eligible, key=lambda row: (similarity[row, col], -row))
+            members[owner].append(col)
+            used.add(col)
+    return members, anchors
+
+
 @torch.no_grad()
 def select_query_target_boxes(
     queries: Sequence[dict[str, Any]],
@@ -607,16 +660,22 @@ def select_query_target_boxes(
     all_candidates: Sequence[Sequence[BoxCandidate]],
     localization_cfg: dict[str, Any],
     device: torch.device,
-) -> tuple[list[list[tuple[float, float, float, float]]], dict[str, Any]]:
+) -> tuple[list[list[list[tuple[float, float, float, float]]]], dict[str, Any]]:
     selector_cfg = localization_cfg["query_selector"]
     detector_cfg = localization_cfg["detector"]
     clip_module, clip_model, clip_preprocess = load_clip_selector(selector_cfg, device)
     threshold = float(detector_cfg.get("score_threshold", 0.55))
 
-    selected_per_query: list[list[tuple[float, float, float, float]]] = []
+    selected_per_query: list[list[list[tuple[float, float, float, float]]]] = []
     localization_scores: list[float] = []
+    predicted_member_counts: list[int] = []
+    extra_member_count = 0
+    selected_fallback_anchors = 0
     low_candidate_queries = 0
     full_scene_fallback_slots = 0
+    membership_threshold = float(selector_cfg["membership_threshold"])
+    membership_margin = float(selector_cfg["membership_margin"])
+    member_cap = int(selector_cfg["max_members_per_subject"])
 
     for qi, (query, targets) in enumerate(
         progress_bar(
@@ -659,19 +718,35 @@ def select_query_target_boxes(
         ).clamp_min(1e-12)
         sim = (text_features @ image_features.T).cpu().numpy()
 
-        rows, cols = linear_sum_assignment(-sim)
-        mapping = {int(r): int(c) for r, c in zip(rows, cols)}
-        if len(mapping) != len(targets):
-            raise RuntimeError(f"Query {qi}: incomplete target-localization assignment")
-
-        chosen = [boxes[mapping[i]].box for i in range(len(targets))]
-        selected_per_query.append(chosen)
-        localization_scores.extend(float(sim[i, mapping[i]]) for i in range(len(targets)))
+        memberships, anchors = select_subject_members(
+            sim,
+            boxes,
+            threshold=membership_threshold,
+            margin=membership_margin,
+            max_members=member_cap,
+        )
+        # Keep the Subject dimension: one Subject may map to several person crops.
+        selected_per_query.append(
+            [[boxes[person].box for person in members] for members in memberships]
+        )
+        predicted_member_counts.extend(len(members) for members in memberships)
+        extra_member_count += sum(len(members) - 1 for members in memberships)
+        selected_fallback_anchors += sum(boxes[col].fallback for col in anchors)
+        localization_scores.extend(float(sim[i, col]) for i, col in enumerate(anchors))
 
     stats = {
         "selector": str(selector_cfg.get("backend", "openai_clip")),
         "selector_model": str(selector_cfg.get("model", "ViT-B/32")),
-        "assignment": "hungarian",
+        "assignment": "hungarian_anchors_then_threshold_expansion",
+        "membership_threshold": membership_threshold,
+        "membership_margin": membership_margin,
+        "max_members_per_subject": member_cap,
+        "membership_policy": "case_agnostic_anchor_first_disjoint_extras",
+        "uses_case_labels_or_identity_counts": False,
+        "predicted_member_count_histogram": dict(sorted(Counter(predicted_member_counts).items())),
+        "predicted_total_query_components": sum(predicted_member_counts),
+        "extra_member_components": extra_member_count,
+        "selected_fallback_anchors": selected_fallback_anchors,
         "mean_assigned_clip_similarity": (
             float(np.mean(localization_scores)) if localization_scores else None
         ),
@@ -786,7 +861,7 @@ class QueryTargetDataset(Dataset):
         self,
         queries: Sequence[dict[str, Any]],
         targets: Sequence[Sequence[QueryTarget]],
-        boxes: Sequence[Sequence[tuple[float, float, float, float]]],
+        boxes: Sequence[Sequence[Sequence[tuple[float, float, float, float]]]],
         gallery: Sequence[dict[str, Any]],
         gallery_index: dict[Any, int],
         preprocess,
@@ -800,8 +875,13 @@ class QueryTargetDataset(Dataset):
             gi = gallery_index[query["image_id"]]
             if len(query_targets) != len(query_boxes):
                 raise AssertionError(f"Query {qi}: target/box count mismatch")
-            for target, box in zip(query_targets, query_boxes):
-                self.items.append((gi, box, target.modify_text, qi))
+            for target, member_boxes in zip(query_targets, query_boxes, strict=True):
+                if not member_boxes:
+                    raise AssertionError(f"Query {qi}: Subject has no selected person")
+                for box in member_boxes:
+                    # FAFA remains a single-person encoder. Every predicted group
+                    # member reuses its Subject's public modification text.
+                    self.items.append((gi, box, target.modify_text, qi))
 
     def __len__(self) -> int:
         return len(self.items)
@@ -1069,9 +1149,19 @@ def aggregate_component_scores(
                 target_scores, person_index, counts, unmatched_score
             )
         else:
-            # Generic exact Hungarian fallback for future schemas with >2
-            # targets. Current pilot data never enters this branch.
+            # One Subject can contain multiple predicted members, so >2 rows
+            # occur even when the query has only one or two textual Subjects.
+            # If too few gallery people exist, and the padding score is no
+            # greater than every real score, the exact SetMatch result is the
+            # padding score. Avoid millions of unnecessary Hungarian calls.
+            padding_is_lower_bound = (
+                unmatched_score <= -1.0
+                and bool((target_scores >= unmatched_score).all())
+            )
             for gi in range(len(gallery_offsets) - 1):
+                if padding_is_lower_bound and counts[gi] < num_targets:
+                    scores[qi, gi] = unmatched_score
+                    continue
                 p_start, p_end = int(gallery_offsets[gi]), int(gallery_offsets[gi + 1])
                 scores[qi, gi] = setmatch_image_score(
                     target_scores[:, p_start:p_end], unmatched_score
@@ -1214,7 +1304,7 @@ def main() -> None:
         f"across {len(gallery_boxes):,} gallery images (source={detector_weights})"
     )
 
-    tracker.advance("Select query target persons with CLIP + Hungarian")
+    tracker.advance("Select query members: Hungarian anchors + CLIP thresholds")
     selected_query_boxes, selector_stats = select_query_target_boxes(
         queries=queries,
         query_targets=query_targets,
@@ -1228,6 +1318,8 @@ def main() -> None:
         torch.cuda.empty_cache()
     tracker.log(
         f"query localization ready: mean_clip={selector_stats.get('mean_assigned_clip_similarity')} "
+        f"components={selector_stats['predicted_total_query_components']} "
+        f"extras={selector_stats['extra_member_components']} "
         f"fallback_slots={selector_stats.get('full_scene_fallback_slots')}"
     )
 
@@ -1369,9 +1461,13 @@ def main() -> None:
             "query_reference": "queries.jsonl image_id -> gallery.image_id",
             "target_selection_text": "subjects[].select_text",
             "target_modification_text": "subjects[].modify_text; relation_text then query text fallback",
+            "membership": "inferred from CLIP; never use case, IDs, or GT counts",
         },
         "query_case_counts": dict(case_counts),
         "query_target_count_histogram": {str(k): v for k, v in sorted(target_hist.items())},
+        "query_predicted_member_count_histogram": {
+            str(k): v for k, v in selector_stats["predicted_member_count_histogram"].items()
+        },
         "gallery_predicted_person_count_histogram": {
             str(k): v for k, v in sorted(gallery_person_hist.items())
         },
@@ -1411,6 +1507,8 @@ def main() -> None:
             ),
             "No CPR benchmark training, fine-tuning, checkpoint selection, or hyperparameter tuning is performed.",
             "No GT PIPA target boxes or identity-to-box mapping are used in the main adapter.",
+            "Subject anchors are assigned without threshold; extra members are selected by absolute CLIP threshold and distance from the assigned anchor.",
+            "The same case-agnostic query membership policy is applied to every Subject; public Subject slots are used but case and GT cardinality are not.",
             "SetMatch uses maximum-weight Hungarian matching followed by the minimum matched target score.",
             "RELATIONAL text is not modeled jointly by native single-person FAFA; relation_text is only a per-target fallback when modify_text is empty.",
         ],
