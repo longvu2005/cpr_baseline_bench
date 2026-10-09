@@ -44,7 +44,7 @@
     "person_detector": "torchvision_fasterrcnn_resnet50_fpn_v2",
     "detector_weights": "checkpoints/torchvision/fasterrcnn_resnet50_fpn_v2_coco-dd69338a.pth",
     "score_threshold": 0.55,
-    "candidate_cache": "runs/fafa_setmatch/cache/197da2cf1569cc9c/person_candidates.jsonl",
+    "candidate_cache": "runs/fafa_setmatch/cache/e70eb5cbc44055a1/person_candidates.jsonl",
     "selector": "openai_clip",
     "selector_model": "ViT-B/32",
     "assignment": "hungarian",
@@ -100,8 +100,8 @@
   },
   "config": "methods/published/02_fafa_setmatch/config.yaml",
   "cache": {
-    "key": "197da2cf1569cc9c",
-    "dir": "runs/fafa_setmatch/cache/197da2cf1569cc9c",
+    "key": "e70eb5cbc44055a1",
+    "dir": "runs/fafa_setmatch/cache/e70eb5cbc44055a1",
     "fingerprint": {
       "adapter_version": "2026-08-13-v2-offline-artifacts-setmatch",
       "config_sha256": "c95a37f9de12ddb5ae777a60c5ef63a2e79182c578e133baa009b5e902187dce",
@@ -116,17 +116,17 @@
         {
           "path": "checkpoints/fafa/runtime_assets_ready.json",
           "size": 2817,
-          "mtime_ns": 1791548233403317192
+          "mtime_ns": 1791563012283910128
         },
         {
           "path": "checkpoints/clip/ViT-B-32.pt",
           "size": 353976522,
-          "mtime_ns": 1791548103140815529
+          "mtime_ns": 1791562846473065709
         },
         {
           "path": "checkpoints/torchvision/fasterrcnn_resnet50_fpn_v2_coco-dd69338a.pth",
           "size": 175221657,
-          "mtime_ns": 1791548103883886860
+          "mtime_ns": 1791562847223147986
         }
       ]
     }
