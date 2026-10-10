@@ -1,5 +1,5 @@
 {
-  "adapter_version": "2026-08-13-v2-offline-artifacts-setmatch",
+  "adapter_version": "2026-10-10-v3-anchor-first-threshold-setmatch",
   "method": "fafa_setmatch",
   "display_name": "FAFA + SetMatch",
   "group": "Published / SOTA Baselines",
@@ -44,10 +44,25 @@
     "person_detector": "torchvision_fasterrcnn_resnet50_fpn_v2",
     "detector_weights": "checkpoints/torchvision/fasterrcnn_resnet50_fpn_v2_coco-dd69338a.pth",
     "score_threshold": 0.55,
-    "candidate_cache": "runs/fafa_setmatch/cache/e70eb5cbc44055a1/person_candidates.jsonl",
+    "candidate_cache": "runs/fafa_setmatch/cache/5533952e5cda3130/person_candidates.jsonl",
     "selector": "openai_clip",
     "selector_model": "ViT-B/32",
-    "assignment": "hungarian",
+    "assignment": "hungarian_anchors_then_threshold_expansion",
+    "membership_threshold": 0.2,
+    "membership_margin": 0.03,
+    "max_members_per_subject": 5,
+    "membership_policy": "case_agnostic_anchor_first_disjoint_extras",
+    "uses_case_labels_or_identity_counts": false,
+    "predicted_member_count_histogram": {
+      "1": 2651,
+      "2": 1262,
+      "3": 469,
+      "4": 215,
+      "5": 203
+    },
+    "predicted_total_query_components": 8457,
+    "extra_member_components": 3657,
+    "selected_fallback_anchors": 0,
     "mean_assigned_clip_similarity": 0.3018271406522642,
     "min_assigned_clip_similarity": 0.16844069957733154,
     "queries_with_too_few_candidates": 0,
@@ -64,7 +79,8 @@
     "gallery": "gallery.jsonl image_id + path; person_ids are not used for scoring/localization",
     "query_reference": "queries.jsonl image_id -> gallery.image_id",
     "target_selection_text": "subjects[].select_text",
-    "target_modification_text": "subjects[].modify_text; relation_text then query text fallback"
+    "target_modification_text": "subjects[].modify_text; relation_text then query text fallback",
+    "membership": "inferred from CLIP; never use case, IDs, or GT counts"
   },
   "query_case_counts": {
     "DUAL": 308,
@@ -75,6 +91,13 @@
   "query_target_count_histogram": {
     "1": 3822,
     "2": 489
+  },
+  "query_predicted_member_count_histogram": {
+    "1": 2651,
+    "2": 1262,
+    "3": 469,
+    "4": 215,
+    "5": 203
   },
   "gallery_predicted_person_count_histogram": {
     "1": 5892,
@@ -100,11 +123,11 @@
   },
   "config": "methods/published/02_fafa_setmatch/config.yaml",
   "cache": {
-    "key": "e70eb5cbc44055a1",
-    "dir": "runs/fafa_setmatch/cache/e70eb5cbc44055a1",
+    "key": "5533952e5cda3130",
+    "dir": "runs/fafa_setmatch/cache/5533952e5cda3130",
     "fingerprint": {
-      "adapter_version": "2026-08-13-v2-offline-artifacts-setmatch",
-      "config_sha256": "c95a37f9de12ddb5ae777a60c5ef63a2e79182c578e133baa009b5e902187dce",
+      "adapter_version": "2026-10-10-v3-anchor-first-threshold-setmatch",
+      "config_sha256": "f7e8d3f1e733cc7a6fde3053cb45c7241e877db3bd9ca672a64a6bb807c998ba",
       "gallery_sha256": "4517f6a39a93b5e3fdd7c68696a772f936c75b79c438e3e6c77bef1c5c1e96c2",
       "queries_sha256": "758f7b08047995c8f3833d9a6d45fdd3412456627ffa4608f26d52ae0db47d07",
       "checkpoints": [
@@ -116,17 +139,17 @@
         {
           "path": "checkpoints/fafa/runtime_assets_ready.json",
           "size": 2817,
-          "mtime_ns": 1791563012283910128
+          "mtime_ns": 1791579355853779312
         },
         {
           "path": "checkpoints/clip/ViT-B-32.pt",
           "size": 353976522,
-          "mtime_ns": 1791562846473065709
+          "mtime_ns": 1791579296017719826
         },
         {
           "path": "checkpoints/torchvision/fasterrcnn_resnet50_fpn_v2_coco-dd69338a.pth",
           "size": 175221657,
-          "mtime_ns": 1791562847223147986
+          "mtime_ns": 1791579296998806954
         }
       ]
     }
@@ -144,6 +167,8 @@
     "Python bytecode writes are disabled; integrity checks ignore only generated .pyc/.pyo bytecode files and still reject real tracked source edits.",
     "No CPR benchmark training, fine-tuning, checkpoint selection, or hyperparameter tuning is performed.",
     "No GT PIPA target boxes or identity-to-box mapping are used in the main adapter.",
+    "Subject anchors are assigned without threshold; extra members are selected by absolute CLIP threshold and distance from the assigned anchor.",
+    "The same case-agnostic query membership policy is applied to every Subject; public Subject slots are used but case and GT cardinality are not.",
     "SetMatch uses maximum-weight Hungarian matching followed by the minimum matched target score.",
     "RELATIONAL text is not modeled jointly by native single-person FAFA; relation_text is only a per-target fallback when modify_text is empty."
   ],

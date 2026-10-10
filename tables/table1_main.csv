@@ -1,2 +1,2 @@
 Method,CPR Supervision,ID-mAP,ID-R@1,ID-R@5,ID-R@10,Full-mAP,Full-R@1,Full-R@5,Full-R@10
-FAFA + SetMatch,No,26.94,68.87,86.01,90.44,44.84,38.11,61.70,69.94
+FAFA + SetMatch,No,22.47,62.40,80.35,85.32,34.45,30.43,48.83,55.63
