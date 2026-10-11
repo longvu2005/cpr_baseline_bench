@@ -1,4 +1,9 @@
-# FAFA + SetMatch
+# FAFA + Partial SetMatch
+
+Drop-in replacement for `methods/published/02_fafa_setmatch/`. The method ID stays
+`fafa_setmatch`, so the existing runner and evaluator commands remain valid.
+This update changes only the image-level matching/aggregation rule; FAFA,
+checkpoint, detector, CLIP membership thresholds and evaluation are unchanged.
 
 Published baseline adapter for **FAFA (Fine-grained Adaptive Feature Alignment)**
 from *Automatic Synthetic Data and Fine-grained Adaptive Feature Alignment for
@@ -68,7 +73,7 @@ methods that natively require an anchor/box: FAFA itself is not box-conditioned.
 Predicted crops here are the instance construction required to apply **SetMatch
 [1]** to multi-person scene images.
 
-## DUAL adaptation: SetMatch [1]
+## Multi-person adaptation: Partial SetMatch
 
 FAFA is natively a one-reference-person / one-target-person CPR method. For each
 benchmark query:
@@ -78,21 +83,72 @@ benchmark query:
 2. run FAFA target encoding independently for every predicted person in a
    gallery image;
 3. build the target-person score matrix using the official FAFA soft-FDA score;
-4. compute maximum-weight **one-to-one Hungarian matching**;
-5. take the **minimum score among the matched target slots** as the image score.
+4. compute maximum-weight **one-to-one rectangular Hungarian matching**;
+5. sum the matched scores, add a fixed background score for each missing
+   query component, and divide by the **total number of query components**.
 
-`run.py` uses an exact vectorized two-component specialization for speed;
-with three or more predicted members it uses the generic SciPy Hungarian solver.
-When the gallery has fewer people than components, a safe lower-bound shortcut
-avoids unnecessary assignments while preserving the padded SetMatch score.
+For `K` predicted query people and `N` gallery crops, let `m = min(K, N)`.
+Among all one-to-one assignments of exactly `m` real pairs, choose `M*` with the
+largest total FAFA similarity. The image score is:
 
-If a gallery image has fewer predicted persons than the number of targets, the
-matrix is padded with `setmatch.unmatched_score` (default `-1.0`). Thus every
-target slot must be matched and there is no partial credit.
+```text
+S(Q, I) = [sum_(i,j in M*) s_ij + (K - m) * b] / K
+b = setmatch.unmatched_score
+```
 
-When exactly one query person is predicted, SetMatch reduces to the best FAFA
-score over predicted gallery people. Otherwise all predicted members must be
-matched to distinct gallery people, even with one textual Subject.
+Missing components stay in the denominator. They are not dropped, and a missing
+person does not force the whole image to one floor score. For example, three
+components with two matched scores `0.90, 0.80` and `b=0.0` give
+`(0.90 + 0.80 + 0.0) / 3 = 0.5667`. These are illustrative scores.
+
+The matching objective and ranking score now agree: the missing term and
+denominator are fixed for a given image, so maximizing the real-pair sum also
+maximizes the final score. When `N >= K`, all query components must match real
+crops, even if some similarities are below `b`; dummy matches are **not** optional.
+
+`run.py` retains exact vectorized matching for two query components. For larger
+queries, gallery images with one or two crops also use exact vectorized formulas;
+the remaining cases use SciPy Hungarian. No greedy approximation is introduced.
+Zero-crop images receive `b` if supplied to the aggregator; the existing detector
+still keeps its whole-scene fallback crop when no person is found.
+
+When exactly one query person is predicted and `N > 0`, the rule reduces to the
+best FAFA score over gallery crops. Multiple predicted members are always matched
+to distinct gallery people where available, even with one textual Subject.
+
+### Fixed background score
+
+The shipped config uses `aggregation: mean` and **`unmatched_score: 0.0`**.
+This is an explicit, uncalibrated reference value, not an estimate from the
+uploaded files and not a claim about the empirical FAFA background distribution.
+`unmatched_score_source` records that distinction in `run.json`.
+
+If the final protocol requires an empirical background value, estimate it once
+from FAFA similarities of known non-corresponding person pairs on a **separate
+calibration/validation set**. One reproducible conservative rule is a fixed 5th
+percentile, chosen before inspecting test results:
+
+```python
+import numpy as np
+
+# Prepare this array from known non-corresponding calibration pairs only.
+background_scores = np.load("calibration_negative_person_scores.npy")
+if background_scores.size == 0 or not np.isfinite(background_scores).all():
+    raise ValueError("Need non-empty, finite calibration similarities")
+b = float(np.quantile(background_scores, 0.05, method="linear"))
+print(b)  # Copy into setmatch.unmatched_score in config.yaml.
+```
+
+Also set `unmatched_score_source` to describe the calibration split, sample
+construction and statistic, and keep the sampled scores as experimental evidence.
+Freeze `b` for every query, case and test run. Inference never estimates `b` from
+the current gallery or test labels. Do not call random gallery pairs confirmed
+negatives unless their non-correspondence is established.
+
+A missing slot contributes less than a particular real match only when `b` is
+below that match's similarity. The method therefore does not promise a universal
+penalty relative to every possible real crop. It also does not fix CLIP selecting
+too many query members or make FAFA jointly relation-aware.
 
 ## Query text behavior
 
@@ -125,7 +181,9 @@ The adapter:
 
 The adapter may also cache predicted person boxes and FAFA gallery-person
 features plus component-person FAFA scores under `runs/fafa_setmatch/cache/` to
-avoid recomputing them. The cache directory is fingerprinted by adapter/config/data
+avoid recomputing them. It also saves `query_component_offsets.npy` alongside
+`gallery_person_offsets.npy` so the raw score matrix has explicit row/column
+boundaries. The cache directory is fingerprinted by adapter/config/data
 and checkpoint identities so changing a model/config does not silently reuse stale
 features.
 
@@ -147,12 +205,22 @@ first. Missing/stale artifacts or real source edits therefore fail before the
 expensive person detector runs. The large FAFA model itself is still loaded only
 after detector/CLIP localization to avoid unnecessary GPU-memory overlap.
 
-The case-agnostic member-selection and scoring changes **do** alter the
-semantics; `ADAPTER_VERSION` is therefore bumped. The full cache key changes,
-so the prior v2 cache will not be reused (including its person detection cache).
+The Partial SetMatch scoring change **does** alter the semantics;
+`ADAPTER_VERSION` is therefore bumped to v4. The full cache key changes, so the
+prior v3 cache is not automatically reused (including its detection cache).
 This is intentional for reproducibility. No official FAFA source or weights change.
 
+Legacy configs with `aggregation: min`, non-Hungarian assignment, disabled
+SetMatch or a non-finite background score are rejected before localization.
+
 ## Run
+
+Extract the ZIP **from the repository root**, replacing the three method files.
+The included regression tests are independent of FAFA weights and CUDA:
+
+```bash
+python tests/test_fafa_partial_setmatch.py
+```
 
 Normal end-to-end command:
 
@@ -192,4 +260,7 @@ Stage-2 input mapping and GROUP behavior are described in
   discovers the true number of people.
 - Per-query predicted member counts, CLIP anchor similarities and fallback
   statistics are recorded in `run.json` for auditability.
+- Partial SetMatch is a benchmark adapter, **not** the authors' original FAFA
+  image-level method. Report the fixed background value and its provenance;
+  do not describe the default `0.0` as empirically calibrated.
 

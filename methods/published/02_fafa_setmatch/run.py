@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""FAFA + SetMatch adapter for the CPR baseline benchmark.
+"""FAFA + Partial SetMatch adapter for the CPR baseline benchmark.
 
 The retrieval model/scoring path is imported from the official FAFA_SynCPR
 implementation. Person boxes and query-target localization are predicted; no GT
@@ -42,9 +42,9 @@ if str(ROOT) not in sys.path:
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "fafa_setmatch"
-ADAPTER_VERSION = "2026-10-10-v3-anchor-first-threshold-setmatch"
+ADAPTER_VERSION = "2026-10-12-v4-partial-mean-setmatch"
 # Runtime-only guard revision. Deliberately excluded from build_cache_key so this
-# non-semantic fix continues to reuse detector/feature caches produced by v2.
+# non-semantic guard revision does not invalidate inference caches by itself.
 RUNTIME_GUARD_VERSION = "2026-08-13-v1-readonly-official-source"
 
 
@@ -1015,36 +1015,76 @@ def setmatch_image_score(
     matrix: np.ndarray,
     unmatched_score: float,
 ) -> float:
-    """Maximum-weight Hungarian assignment followed by minimum matched score."""
+    """Mean over all query components, including fixed scores for missing people.
+
+    Rectangular Hungarian selects exactly min(K, N) distinct real pairs. Missing
+    scores are a constant for a given K and N, so this assignment also maximizes
+    the final image score. Do not add optional dummy slots when N >= K.
+    """
     num_targets, num_persons = matrix.shape
     if num_targets < 1:
         raise ValueError("SetMatch requires at least one target")
-
-    if num_persons < num_targets:
-        padding = np.full(
-            (num_targets, num_targets - num_persons),
-            unmatched_score,
-            dtype=np.float32,
-        )
-        matrix = np.concatenate([matrix, padding], axis=1)
+    if num_persons == 0:
+        return float(unmatched_score)
 
     rows, cols = linear_sum_assignment(-matrix)
-    if len(rows) != num_targets:
-        raise RuntimeError("Hungarian assignment did not cover every target")
-    assigned = matrix[rows, cols]
-    return float(np.min(assigned))
+    num_matched = min(num_targets, num_persons)
+    if len(rows) != num_matched:
+        raise RuntimeError("Hungarian assignment has the wrong number of real pairs")
+    assigned_sum = matrix[rows, cols].sum(dtype=np.float64)
+    missing_sum = (num_targets - num_matched) * unmatched_score
+    return float((assigned_sum + missing_sum) / num_targets)
+
+
+def validate_setmatch_config(setmatch_cfg: dict[str, Any]) -> float:
+    """Reject legacy min configs instead of silently using different semantics."""
+    if setmatch_cfg.get("enabled", True) is not True:
+        raise ValueError("This adapter requires setmatch.enabled: true")
+    if setmatch_cfg.get("assignment", "hungarian") != "hungarian":
+        raise ValueError("Partial SetMatch requires assignment: hungarian")
+    if setmatch_cfg.get("aggregation", "mean") != "mean":
+        raise ValueError("Partial SetMatch requires aggregation: mean; update config.yaml")
+    unmatched_score = float(setmatch_cfg.get("unmatched_score", 0.0))
+    if not np.isfinite(unmatched_score):
+        raise ValueError("setmatch.unmatched_score must be finite")
+    return unmatched_score
 
 
 def build_person_index(offsets: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    if (
+        offsets.ndim != 1
+        or len(offsets) < 2
+        or offsets.dtype.kind not in "iu"
+        or offsets[0] != 0
+        or np.any(offsets[1:] < offsets[:-1])
+    ):
+        raise ValueError("Gallery offsets must be nondecreasing integers starting at zero")
     counts = np.diff(offsets).astype(np.int64, copy=False)
     max_persons = int(counts.max(initial=0))
-    if max_persons < 1:
-        raise RuntimeError("Every gallery image must have at least one person crop")
     index = np.full((len(counts), max_persons), -1, dtype=np.int64)
     for gi, count in enumerate(counts):
         if count:
             index[gi, :count] = np.arange(offsets[gi], offsets[gi + 1])
     return index, counts
+
+
+def maximum_two_match_sum(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Exact batched two-row assignment to distinct columns (at least two)."""
+    def top2(x: np.ndarray):
+        idx = np.argpartition(-x, kth=1, axis=1)[:, :2]
+        vals = np.take_along_axis(x, idx, axis=1)
+        order = np.argsort(-vals, axis=1)
+        idx = np.take_along_axis(idx, order, axis=1)
+        vals = np.take_along_axis(vals, order, axis=1)
+        return vals[:, 0], idx[:, 0], vals[:, 1]
+
+    a1, ai1, a2 = top2(a)
+    b1, bi1, b2 = top2(b)
+    b_excl_a = np.where(bi1 != ai1, b1, b2)
+    a_excl_b = np.where(ai1 != bi1, a1, a2)
+    # Every optimum includes a row's best column: if neither best is occupied,
+    # that row can improve its score by taking it. Check both possibilities.
+    return np.maximum(a1 + b_excl_a, b1 + a_excl_b)
 
 
 def setmatch_two_targets_all_images(
@@ -1053,21 +1093,23 @@ def setmatch_two_targets_all_images(
     counts: np.ndarray,
     unmatched_score: float,
 ) -> np.ndarray:
-    """Exact two-target specialization of maximum-weight Hungarian SetMatch.
+    """Exact two-component specialization of Partial SetMatch.
 
-    The DUAL/RELATIONAL exports have two textual Subject slots. For two
-    rows, the maximum-weight one-to-one assignment can be solved from each
+    For two rows, the maximum-weight one-to-one assignment can be solved from each
     row's best/second-best columns, yielding exactly the same assignment
     objective as Hungarian while avoiding millions of tiny SciPy calls.
     """
     if target_person_scores.shape[0] != 2:
         raise ValueError("Expected exactly two target rows")
 
+    out = np.full(len(counts), unmatched_score, dtype=np.float32)
+    if target_person_scores.shape[1] == 0:
+        return out
+
     safe_index = np.where(person_index >= 0, person_index, 0)
     values = target_person_scores[:, safe_index]  # [2, G, max_persons]
     values = np.asarray(values, dtype=np.float32)
     values[:, person_index < 0] = -np.inf
-    out = np.empty(len(counts), dtype=np.float32)
 
     one = counts == 1
     if np.any(one):
@@ -1075,42 +1117,15 @@ def setmatch_two_targets_all_images(
         best_real = np.maximum(
             target_person_scores[0, real_idx], target_person_scores[1, real_idx]
         )
-        # With one gallery person and two targets, the other target is forced
-        # onto the padded unmatched slot. This is the same padded-Hungarian
-        # rule used by setmatch_image_score().
-        out[one] = np.minimum(best_real, unmatched_score)
+        # The one real person goes to the better component; the other is missing.
+        out[one] = (best_real + unmatched_score) / 2.0
 
     many = counts >= 2
     if np.any(many):
         a = values[0, many]
         b = values[1, many]
 
-        def top2(x: np.ndarray):
-            idx = np.argpartition(-x, kth=1, axis=1)[:, :2]
-            vals = np.take_along_axis(x, idx, axis=1)
-            order = np.argsort(-vals, axis=1)
-            idx = np.take_along_axis(idx, order, axis=1)
-            vals = np.take_along_axis(vals, order, axis=1)
-            return vals[:, 0], idx[:, 0], vals[:, 1], idx[:, 1]
-
-        a1, ai1, a2, ai2 = top2(a)
-        b1, bi1, b2, bi2 = top2(b)
-
-        b_excl_a = np.where(bi1 != ai1, b1, b2)
-        a_excl_b = np.where(ai1 != bi1, a1, a2)
-
-        sum_a_first = a1 + b_excl_a
-        sum_b_first = b1 + a_excl_b
-        choose_a = sum_a_first >= sum_b_first
-        out[many] = np.where(
-            choose_a,
-            np.minimum(a1, b_excl_a),
-            np.minimum(b1, a_excl_b),
-        )
-
-    zero = counts == 0
-    if np.any(zero):
-        out[zero] = unmatched_score
+        out[many] = maximum_two_match_sum(a, b) / 2.0
     return out
 
 
@@ -1123,6 +1138,19 @@ def aggregate_component_scores(
 ) -> None:
     component_scores = np.load(component_score_path, mmap_mode="r")
     person_index, counts = build_person_index(gallery_offsets)
+    if (
+        query_offsets.ndim != 1
+        or len(query_offsets) < 2
+        or query_offsets.dtype.kind not in "iu"
+        or query_offsets[0] != 0
+        or np.any(query_offsets[1:] <= query_offsets[:-1])
+    ):
+        raise ValueError("Query offsets must increase and start at zero")
+    expected_shape = (int(query_offsets[-1]), int(gallery_offsets[-1]))
+    if component_scores.shape != expected_shape:
+        raise ValueError(f"Component score shape must be {expected_shape}, got {component_scores.shape}")
+    if not np.isfinite(unmatched_score):
+        raise ValueError("unmatched_score must be finite")
     scores = np.lib.format.open_memmap(
         scores_path,
         mode="w+",
@@ -1132,7 +1160,7 @@ def aggregate_component_scores(
 
     for qi in progress_bar(
         range(len(query_offsets) - 1),
-        desc="SetMatch aggregation",
+        desc="Partial SetMatch aggregation",
         total=len(query_offsets) - 1,
         unit="query",
     ):
@@ -1142,26 +1170,35 @@ def aggregate_component_scores(
 
         if num_targets == 1:
             # One-target Hungarian == choose the best predicted person in each
-            # gallery image. Person crops are contiguous per image.
-            scores[qi] = np.maximum.reduceat(target_scores[0], gallery_offsets[:-1])
+            # gallery image. Exclude zero-person images from reduceat indices.
+            scores[qi] = unmatched_score
+            nonempty = counts > 0
+            if np.any(nonempty):
+                scores[qi, nonempty] = np.maximum.reduceat(
+                    target_scores[0], gallery_offsets[:-1][nonempty]
+                )
         elif num_targets == 2:
             scores[qi] = setmatch_two_targets_all_images(
                 target_scores, person_index, counts, unmatched_score
             )
         else:
-            # One Subject can contain multiple predicted members, so >2 rows
-            # occur even when the query has only one or two textual Subjects.
-            # If too few gallery people exist, and the padding score is no
-            # greater than every real score, the exact SetMatch result is the
-            # padding score. Avoid millions of unnecessary Hungarian calls.
-            padding_is_lower_bound = (
-                unmatched_score <= -1.0
-                and bool((target_scores >= unmatched_score).all())
-            )
-            for gi in range(len(gallery_offsets) - 1):
-                if padding_is_lower_bound and counts[gi] < num_targets:
-                    scores[qi, gi] = unmatched_score
-                    continue
+            scores[qi] = unmatched_score
+            one = counts == 1
+            if np.any(one):
+                best_real = target_scores[:, person_index[one, 0]].max(axis=0)
+                scores[qi, one] = (
+                    best_real + (num_targets - 1) * unmatched_score
+                ) / num_targets
+            two = counts == 2
+            if np.any(two):
+                # Transpose K x 2 to 2 x K: each gallery person chooses a
+                # different query component. This is the same exact objective.
+                values = target_scores[:, person_index[two, :2]].transpose(1, 2, 0)
+                best_sum = maximum_two_match_sum(values[:, 0], values[:, 1])
+                scores[qi, two] = (
+                    best_sum + (num_targets - 2) * unmatched_score
+                ) / num_targets
+            for gi in np.flatnonzero(counts >= 3):
                 p_start, p_end = int(gallery_offsets[gi]), int(gallery_offsets[gi + 1])
                 scores[qi, gi] = setmatch_image_score(
                     target_scores[:, p_start:p_end], unmatched_score
@@ -1191,6 +1228,9 @@ def score_all_queries(
         query_batch_size=query_batch_size,
         device=device,
     )
+    # Persist row boundaries for future CPU-only aggregation/calibration of the
+    # raw component scores. This records predictions, not ground-truth members.
+    np.save(component_score_path.with_name("query_component_offsets.npy"), query_offsets)
     aggregate_component_scores(
         component_score_path=component_score_path,
         query_offsets=query_offsets,
@@ -1213,7 +1253,7 @@ def validate_scores(scores_path: Path, nq: int, ng: int) -> None:
 def main() -> None:
     tracker = PhaseTracker(METHOD_ID, total=10)
     tracker.advance("Load config and manifests")
-    print(f"FAFA + SetMatch adapter: {ADAPTER_VERSION}", flush=True)
+    print(f"FAFA + Partial SetMatch adapter: {ADAPTER_VERSION}", flush=True)
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     args = parser.parse_args()
@@ -1223,6 +1263,8 @@ def main() -> None:
     method = str(cfg.get("method", METHOD_ID))
     if method != METHOD_ID:
         raise ValueError(f"Expected method={METHOD_ID!r}, got {method!r}")
+    setmatch_cfg = cfg["setmatch"]
+    unmatched_score = validate_setmatch_config(setmatch_cfg)
 
     output = (ROOT / cfg["output"]["dir"]).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -1371,11 +1413,9 @@ def main() -> None:
         f"query target features ready: {sum(len(x) for x in query_features):,} target components"
     )
 
-    tracker.advance("Compute component-person scores and SetMatch aggregation")
+    tracker.advance("Compute component-person scores and Partial SetMatch aggregation")
     ckpt_cfg = cfg["checkpoint"]
-    setmatch_cfg = cfg["setmatch"]
     fda_k = int(ckpt_cfg.get("fda_k", 6))
-    unmatched_score = float(setmatch_cfg.get("unmatched_score", -1.0))
     scores_path = output / "scores.npy"
     component_score_path = cache_dir / "component_person_scores.npy"
     score_all_queries(
@@ -1408,7 +1448,7 @@ def main() -> None:
     run = {
         "adapter_version": ADAPTER_VERSION,
         "method": method,
-        "display_name": cfg.get("display_name", "FAFA + SetMatch"),
+        "display_name": cfg.get("display_name", "FAFA + Partial SetMatch"),
         "group": cfg.get("group", "Published / SOTA Baselines"),
         "cpr_supervision": cfg.get("cpr_supervision", "No"),
         "paper": cfg.get("paper", {}),
@@ -1451,10 +1491,15 @@ def main() -> None:
             **selector_stats,
         },
         "setmatch": {
-            "assignment": "maximum-weight one-to-one Hungarian",
-            "aggregation": "minimum assigned target score",
+            "assignment": "maximum-weight one-to-one rectangular Hungarian",
+            "real_pair_count": "min(query_components, gallery_persons)",
+            "aggregation": "mean over all query components, including missing scores",
+            "definition": "(sum of matched FAFA scores + (K - min(K, N)) * b) / K",
             "unmatched_score": unmatched_score,
-            "no_partial_credit": True,
+            "unmatched_score_source": setmatch_cfg.get("unmatched_score_source", "fixed_config_value"),
+            "no_partial_credit": False,
+            "allows_optional_unmatching": False,
+            "query_component_offsets": rel(component_score_path.with_name("query_component_offsets.npy")),
         },
         "data_schema": {
             "gallery": "gallery.jsonl image_id + path; person_ids are not used for scoring/localization",
@@ -1509,7 +1554,7 @@ def main() -> None:
             "No GT PIPA target boxes or identity-to-box mapping are used in the main adapter.",
             "Subject anchors are assigned without threshold; extra members are selected by absolute CLIP threshold and distance from the assigned anchor.",
             "The same case-agnostic query membership policy is applied to every Subject; public Subject slots are used but case and GT cardinality are not.",
-            "SetMatch uses maximum-weight Hungarian matching followed by the minimum matched target score.",
+            "Partial SetMatch maximizes the sum of min(K, N) one-to-one real pairs and averages over all K query components; each missing person contributes the fixed configured background score.",
             "RELATIONAL text is not modeled jointly by native single-person FAFA; relation_text is only a per-target fallback when modify_text is empty.",
         ],
     }

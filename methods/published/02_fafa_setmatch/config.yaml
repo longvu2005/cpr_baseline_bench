@@ -1,5 +1,5 @@
 method: fafa_setmatch
-display_name: FAFA + SetMatch
+display_name: FAFA + Partial SetMatch
 group: Published / SOTA Baselines
 cpr_supervision: 'No'
 paper:
@@ -67,7 +67,11 @@ localization:
 setmatch:
   enabled: true
   assignment: hungarian
-  aggregation: min
-  unmatched_score: -1.0
+  aggregation: mean
+  # Fixed reference value, NOT a statistic estimated from these uploaded files.
+  # Before a final test run, this may be set once from a separate calibration
+  # set of non-corresponding FAFA person pairs; freeze it for all test queries.
+  unmatched_score: 0.0
+  unmatched_score_source: fixed_zero_reference_uncalibrated
 output:
   dir: runs/fafa_setmatch
