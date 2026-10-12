@@ -48,6 +48,13 @@ for relational inputs continue to do so, without consulting `case`.
 
 ## Gallery and Relevance
 
+> **Full-gallery protocol:** TRAIN-only (17,000 images) is **not** the Stage-2
+> evaluation gallery. The current canonical gallery combines TRAIN, VAL, and TEST
+> (30,552 images). Every baseline must use the same ordered full gallery.
+> `data/source/images.jsonl` defines membership and order; image files found on
+> disk do not automatically become benchmark candidates. The counts below apply
+> to the current dataset version, not to all future versions.
+
 The benchmark uses all TRAIN, VAL, and TEST images from `images.jsonl` in one
 common gallery, ordered by `image_idx`. PIPA `index.txt` supplies evaluation identity labels.
 Queries are ordered by gallery image position, then `sample_id`. Both the query
@@ -79,6 +86,29 @@ instead of hard-coding gallery or query counts. The supplied export also has
 are counted as `positive_outside_gallery` and excluded from this gallery's
 relevance set. Every annotated target is retained.
 
+### Why the runner might say "Expected 17,000 images"
+
+`benchmark_data.py` derives that number from the number of rows in the *local*
+`data/gallery.jsonl`. It is **not** a hard-coded gallery size. A 17,000-row
+manifest can be stale or can have been generated from TRAIN-only source metadata.
+The existence of 30,552 image files on Kaggle does not repair an incomplete
+manifest by itself.
+
+To inspect the manifests without checking image files:
+
+```bash
+python validate_data.py --skip-image-files
+```
+
+If this reports an image-id/order mismatch, ensure `data/source/images.jsonl`
+contains all three splits and regenerate the manifests with `prepare_data.py`.
+If `images.jsonl` is itself TRAIN-only, restore complete source metadata first.
+If the manifests are correct but gallery images are missing, link all three
+split directories as described in [Flat Symlink Gallery](#flat-symlink-gallery).
+Do not manually append images to `gallery.jsonl` or change evaluation counts.
+Re-run every baseline after changing the manifests: existing score matrices and
+metrics are not interchangeable across manifest versions.
+
 ## GROUP Adapter Limitation
 
 A group remains one textual Subject with multiple identity labels. Its
@@ -103,6 +133,11 @@ python prepare_data.py
 python validate_data.py
 python run_baseline.py clip_image
 ```
+
+`/path/to/images` must be the **parent of `train/`, `val/`, and `test/`**.
+For this dataset version, preparation should report 30,552 gallery rows and,
+with the supplied export, 4,311 query rows. If it reports 17,000 gallery rows,
+check `data/source/images.jsonl` before running any baseline.
 
 To read a JSONL attachment directly, supply its path:
 
@@ -136,13 +171,27 @@ file symlinks, without deleting or copying the source images. Repeated execution
 reuses matching links. Duplicate filenames across splits and existing real image
 files in the destination fail before the directory link is changed.
 
-On Kaggle, from the repository root:
+For example, the source must look like:
 
-```python
-!python link_gallery.py --source /kaggle/input/datasets/phmhunhlongv/cir-data/data/raw/images
-!python prepare_data.py
-!python validate_data.py
+```text
+/path/to/images/
+├── train/
+├── val/
+└── test/
 ```
+
+On Kaggle, from the repository root (adjust the source to your actual mount):
+
+```bash
+python link_gallery.py --source /kaggle/input/datasets/phmhunhlongv/cir-data/data/raw/images
+python prepare_data.py
+python validate_data.py
+```
+
+**Do not** pass a path ending in `/train` to `link_gallery.py` or point
+`CPR_GALLERY_SOURCE` at TRAIN alone. `CPR_GALLERY_SOURCE` is for a directory
+that *directly* contains every manifest image. With images separated into
+`train/`, `val/`, `test/`, `link_gallery.py` is the correct preparation path.
 
 Image files not listed in `images.jsonl` are linked if present in the three source
 folders, but they do not become evaluation candidates automatically. The source

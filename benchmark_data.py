@@ -15,9 +15,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
-
+from typing import Any
 
 GALLERY_ENV = "CPR_GALLERY_SOURCE"
 CANONICAL_GALLERY_PREFIX = ("data", "gallery")

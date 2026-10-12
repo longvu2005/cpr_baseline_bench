@@ -3,7 +3,7 @@
 
 This stage runs after method requirements are installed. It downloads the
 released FAFA checkpoint, pins the official source checkout, prepares the
-OpenAI CLIP selector and torchvision person detector weights, and pre-warms the
+OpenAI CLIP selector and official Grounding DINO detector, and pre-warms the
 exact LAVIS/Transformers runtime assets used to construct the official model.
 Inference then runs with the same repository-local cache in offline mode.
 """
@@ -42,11 +42,6 @@ CLIP_B32_URL = (
     "https://openaipublic.azureedge.net/clip/models/"
     f"{CLIP_B32_SHA256}/ViT-B-32.pt"
 )
-DETECTOR_URL = (
-    "https://download.pytorch.org/models/"
-    "fasterrcnn_resnet50_fpn_v2_coco-dd69338a.pth"
-)
-DETECTOR_HASH_PREFIX = "dd69338a"
 
 
 def resolve_path(value: str) -> Path:
@@ -353,14 +348,14 @@ def prepare(config_path: Path, force: bool) -> None:
         force=force,
     )
 
-    tracker.advance("Prepare person-detector checkpoint")
-    detector = cfg["localization"]["detector"]
-    download_with_hash(
-        url=DETECTOR_URL,
-        path=resolve_path(str(detector["checkpoint"])),
-        expected_hash_prefix=DETECTOR_HASH_PREFIX,
-        force=force,
-    )
+    tracker.advance("Prepare official Grounding DINO source, checkpoint and runtime")
+    # Separate HF caches must be initialized in separate processes: changing
+    # HF_HOME after transformers is imported does not update its cache constants.
+    command = [sys.executable, "-u", str(Path(__file__).with_name("groundingdino_adapter.py")),
+               "--prepare", "--config", str(config_path)]
+    if force:
+        command.append("--force")
+    subprocess.run(command, cwd=ROOT, check=True)
 
     tracker.advance("Pre-warm FAFA/LAVIS runtime assets")
     cache_root = resolve_path(str(ckpt["cache_root"]))

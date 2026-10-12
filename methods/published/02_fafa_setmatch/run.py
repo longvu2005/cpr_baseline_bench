@@ -9,6 +9,7 @@ identity-to-box mapping is consumed by this adapter.
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import json
 import os
@@ -38,12 +39,14 @@ sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
+from groundingdino_adapter import preflight as detector_preflight  # noqa: E402
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "fafa_setmatch"
-ADAPTER_VERSION = "2026-10-12-v4-partial-mean-setmatch"
-# Runtime-only guard revision. Deliberately excluded from build_cache_key so this
+ADAPTER_VERSION = "2026-10-12-v5-groundingdino-stage-cache"
+# Runtime-only guard revision. Deliberately excluded from stage cache keys so this
 # non-semantic guard revision does not invalidate inference caches by itself.
 RUNTIME_GUARD_VERSION = "2026-08-13-v1-readonly-official-source"
 
@@ -107,23 +110,79 @@ def checkpoint_identity(path: Path) -> dict[str, Any]:
     }
 
 
-def build_cache_key(
-    *,
-    config_path: Path,
-    gallery_path: Path,
-    queries_path: Path,
-    checkpoint_paths: Sequence[Path],
-) -> tuple[str, dict[str, Any]]:
-    payload = {
-        "adapter_version": ADAPTER_VERSION,
-        "config_sha256": sha256_file(config_path),
-        "gallery_sha256": sha256_file(gallery_path),
-        "queries_sha256": sha256_file(queries_path),
-        "checkpoints": [checkpoint_identity(path) for path in checkpoint_paths],
+def atomic_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(path.name + ".partial")
+    temp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temp, path)
+
+
+def atomic_save(path: Path, array: np.ndarray) -> None:
+    temp = path.with_name(path.name + ".partial")
+    with temp.open("wb") as handle:
+        np.save(handle, array, allow_pickle=False)
+    os.replace(temp, path)
+
+
+def read_json(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def build_stage_caches(
+    cfg: dict[str, Any], gallery_path: Path, queries_path: Path, output: Path,
+    detector_config: Path, detector_checkout: Path,
+) -> tuple[dict[str, Path], dict[str, Any]]:
+    """Separate each stage's input identity from execution/aggregation settings.
+
+    Batch sizes, workers, devices, output paths and SetMatch background scores
+    do not change embeddings/detections and must not rerun those stages.
+    """
+    gallery_hash, query_hash = sha256_file(gallery_path), sha256_file(queries_path)
+    detector = cfg["localization"]["detector"]
+    ckpt = cfg["checkpoint"]
+    keys, fingerprints, directories = {}, {}, {}
+
+    def stage(name: str, payload: dict[str, Any]):
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        keys[name] = hashlib.sha256(raw).hexdigest()[:16]
+        fingerprints[name] = payload
+        directories[name] = output / "cache" / name / keys[name]
+        directories[name].mkdir(parents=True, exist_ok=True)
+
+    helper = ROOT / "methods/simple/05_reid_set/run.py"
+    stage("detections", {
+        "schema": "groundingdino-batched-v1", "gallery": gallery_hash,
+        "source": detector["source"]["commit"], "config": sha256_file(detector_config),
+        "checkpoint": checkpoint_identity(resolve_config_path(detector["checkpoint"])),
+        "helper_sha256": sha256_file(helper),
+        "worker_sha256": sha256_file(Path(__file__).with_name("groundingdino_adapter.py")),
+        "native_extensions": [checkpoint_identity(p) for p in sorted((detector_checkout / "groundingdino").glob("_C*.so"))],
+        "protocol": {k: detector[k] for k in ("text_prompt", "box_threshold", "text_threshold",
+                    "nms_iou_threshold", "min_box_size_px", "max_persons_per_image")},
+    })
+    selector = cfg["localization"]["query_selector"]
+    stage("localization", {
+        "schema": "clip-anchor-expansion-v1", "detections": keys["detections"], "queries": query_hash,
+        "score_threshold": detector["score_threshold"], "selector": selector,
+        "checkpoint": checkpoint_identity(resolve_config_path(selector["checkpoint"])),
+    })
+    encoder = {
+        "schema": "official-fafa-features-v1", "source": cfg["source"]["commit"],
+        "subdir": cfg["source"].get("subdir", "FAFA_SynCPR"),
+        "checkpoint": checkpoint_identity(resolve_config_path(ckpt["path"])),
+        "model": {k: ckpt[k] for k in ("model_name", "model_type", "fda_k", "fda_alpha",
+                  "fd_margin", "use_soft", "transform", "image_size", "test_resize_hw") if k in ckpt},
     }
-    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    key = hashlib.sha256(raw).hexdigest()[:16]
-    return key, payload
+    stage("gallery_features", {**encoder, "detections": keys["detections"],
+          "score_threshold": detector["score_threshold"],
+          "dtype": cfg.get("runtime", {}).get("gallery_feature_dtype", "float16")})
+    stage("query_features", {**encoder, "localization": keys["localization"]})
+    stage("component_scores", {"schema": "soft-fda-v1", "gallery": keys["gallery_features"],
+          "queries": keys["query_features"], "fda_k": int(ckpt.get("fda_k", 6))})
+    return directories, {"keys": keys, "stages": fingerprints}
 
 
 def rel(path: Path) -> str:
@@ -383,7 +442,8 @@ def load_fafa(
             "Re-run download_checkpoint.py to prepare the official LAVIS/Transformers assets."
         ) from error
 
-    checkpoint = torch.load(ckpt_path, map_location=device)
+    # Avoid a second copy of the complete released checkpoint in GPU memory.
+    checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     if isinstance(checkpoint, dict):
         if "model" in checkpoint:
             state_dict = checkpoint["model"]
@@ -421,66 +481,6 @@ def load_fafa(
         "unexpected_keys": list(incompatible.unexpected_keys),
     }
     return model, txt_processors, preprocess, ckpt_path, load_info
-
-
-def load_detector(detector_cfg: dict[str, Any], device: torch.device):
-    from torchvision.models.detection import fasterrcnn_resnet50_fpn_v2
-
-    checkpoint = resolve_config_path(str(detector_cfg["checkpoint"]))
-    if not checkpoint.is_file():
-        raise FileNotFoundError(
-            f"Missing detector checkpoint: {rel(checkpoint)}. "
-            "Run download_checkpoint.py first."
-        )
-    model = fasterrcnn_resnet50_fpn_v2(weights=None, weights_backbone=None)
-    state = torch.load(checkpoint, map_location="cpu")
-    model.load_state_dict(state, strict=True)
-    model = model.to(device).eval()
-    return model, rel(checkpoint)
-
-
-@torch.no_grad()
-def detect_candidates(
-    detector,
-    weights,
-    path: Path,
-    detector_cfg: dict[str, Any],
-    device: torch.device,
-) -> list[BoxCandidate]:
-    from torchvision.transforms.functional import pil_to_tensor
-
-    with Image.open(path) as source:
-        image = source.convert("RGB")
-        width, height = image.size
-        tensor = pil_to_tensor(image).float().div_(255.0).to(device)
-
-    output = detector([tensor])[0]
-    labels = output["labels"].detach().cpu().numpy()
-    scores = output["scores"].detach().cpu().numpy()
-    boxes = output["boxes"].detach().cpu().numpy()
-
-    person_label = int(detector_cfg.get("person_label", 1))
-    max_persons = int(detector_cfg.get("max_persons_per_image", 10))
-    result: list[BoxCandidate] = []
-
-    order = np.argsort(-scores)
-    for idx in order:
-        if int(labels[idx]) != person_label:
-            continue
-        x1, y1, x2, y2 = (float(x) for x in boxes[idx])
-        x1 = max(0.0, min(x1, width - 1.0))
-        y1 = max(0.0, min(y1, height - 1.0))
-        x2 = max(x1 + 1.0, min(x2, float(width)))
-        y2 = max(y1 + 1.0, min(y2, float(height)))
-        result.append(BoxCandidate((x1, y1, x2, y2), float(scores[idx])))
-        if len(result) >= max_persons:
-            break
-
-    if not result:
-        result = [
-            BoxCandidate((0.0, 0.0, float(width), float(height)), -1.0, fallback=True)
-        ]
-    return result
 
 
 def choose_person_boxes(
@@ -527,7 +527,10 @@ def load_candidate_cache(
 ) -> list[list[BoxCandidate]] | None:
     if not path.is_file():
         return None
-    rows = load_jsonl(path)
+    try:
+        rows = load_jsonl(path)
+    except (OSError, ValueError, TypeError):
+        return None
     if len(rows) != len(gallery):
         return None
 
@@ -537,16 +540,19 @@ def load_candidate_cache(
             return None
         candidates = []
         for item in row.get("boxes", []):
+            if not isinstance(item, dict):
+                return None
             xyxy = item.get("xyxy")
             if not isinstance(xyxy, list) or len(xyxy) != 4:
                 return None
-            candidates.append(
-                BoxCandidate(
-                    tuple(float(x) for x in xyxy),
-                    float(item.get("score", -1.0)),
-                    bool(item.get("fallback", False)),
-                )
-            )
+            try:
+                box = tuple(float(x) for x in xyxy)
+                score = float(item["score"])
+            except (TypeError, ValueError, KeyError):
+                return None
+            if not np.isfinite([*box, score]).all() or box[2] <= box[0] or box[3] <= box[1]:
+                return None
+            candidates.append(BoxCandidate(box, score, bool(item.get("fallback", False))))
         if not candidates:
             return None
         result.append(candidates)
@@ -556,32 +562,26 @@ def load_candidate_cache(
 def get_or_create_detection_cache(
     gallery: Sequence[dict[str, Any]],
     cache_path: Path,
+    config_path: Path,
     detector_cfg: dict[str, Any],
     device: torch.device,
-) -> tuple[list[list[BoxCandidate]], str]:
+) -> tuple[list[list[BoxCandidate]], dict[str, Any]]:
     cached = load_candidate_cache(cache_path, gallery)
-    if cached is not None:
-        print(f"[cache] person candidates: {rel(cache_path)}", flush=True)
-        return cached, "cache"
-
-    detector, weights = load_detector(detector_cfg, device)
-    candidates: list[list[BoxCandidate]] = []
-    for i, row in enumerate(
-        progress_bar(
-            gallery, desc="Detect gallery persons", total=len(gallery), unit="image"
-        )
-    ):
-        candidates.append(
-            detect_candidates(
-                detector,
-                weights,
-                image_path(row, i),
-                detector_cfg,
-                device,
-            )
-        )
-    save_candidate_cache(cache_path, gallery, candidates)
-    return candidates, str(weights)
+    if cached is None:
+        # Process isolation both frees detector GPU memory and prevents its BERT
+        # cache constants from redirecting FAFA's later offline model loading.
+        subprocess.run([
+            sys.executable, "-u", str(Path(__file__).with_name("groundingdino_adapter.py")),
+            "--config", str(config_path), "--cache-path", str(cache_path), "--device", str(device),
+        ], cwd=ROOT, check=True)
+        cached = load_candidate_cache(cache_path, gallery)
+        if cached is None:
+            raise RuntimeError("Grounding DINO worker wrote an invalid candidate cache")
+    else:
+        print(f"[cache] Grounding DINO candidates: {rel(cache_path)}", flush=True)
+    info = read_json(cache_path.with_suffix(".meta.json")) or {}
+    info["checkpoint"] = rel(resolve_config_path(detector_cfg["checkpoint"]))
+    return cached, info
 
 
 def load_clip_selector(selector_cfg: dict[str, Any], device: torch.device):
@@ -660,11 +660,36 @@ def select_query_target_boxes(
     all_candidates: Sequence[Sequence[BoxCandidate]],
     localization_cfg: dict[str, Any],
     device: torch.device,
+    cache_path: Path | None = None,
 ) -> tuple[list[list[list[tuple[float, float, float, float]]]], dict[str, Any]]:
+    cached = read_json(cache_path) if cache_path is not None else None
+    if isinstance(cached, dict):
+        try:
+            cached_boxes = cached["boxes"]
+            if len(cached_boxes) != len(query_targets):
+                raise ValueError("Query count mismatch")
+            for subjects, targets in zip(cached_boxes, query_targets):
+                if len(subjects) != len(targets):
+                    raise ValueError("Subject count mismatch")
+                for members in subjects:
+                    if not members:
+                        raise ValueError("No predicted members")
+                    for box in members:
+                        if (len(box) != 4 or not np.isfinite(box).all()
+                                or box[2] <= box[0] or box[3] <= box[1]):
+                            raise ValueError("Invalid box")
+            stats = cached["stats"]
+            count = sum(len(members) for subjects in cached_boxes for members in subjects)
+            if not isinstance(stats, dict) or stats.get("predicted_total_query_components") != count:
+                raise ValueError("Invalid localization stats")
+            print(f"[cache] query localization: {rel(cache_path)}", flush=True)
+            return cached_boxes, stats
+        except (KeyError, TypeError, ValueError):
+            pass
     selector_cfg = localization_cfg["query_selector"]
     detector_cfg = localization_cfg["detector"]
     clip_module, clip_model, clip_preprocess = load_clip_selector(selector_cfg, device)
-    threshold = float(detector_cfg.get("score_threshold", 0.55))
+    threshold = float(detector_cfg["score_threshold"])
 
     selected_per_query: list[list[list[tuple[float, float, float, float]]]] = []
     localization_scores: list[float] = []
@@ -676,6 +701,10 @@ def select_query_target_boxes(
     membership_threshold = float(selector_cfg["membership_threshold"])
     membership_margin = float(selector_cfg["membership_margin"])
     member_cap = int(selector_cfg["max_members_per_subject"])
+    # Several queries may reuse a reference scene or a Subject description.
+    # Keep these small CLIP embeddings until localization finishes.
+    crop_cache = {}
+    text_cache = {}
 
     for qi, (query, targets) in enumerate(
         progress_bar(
@@ -690,32 +719,36 @@ def select_query_target_boxes(
             raise ValueError(f"Query {qi}: image_id not found in gallery: {image_id!r}")
         gi = gallery_index[image_id]
         boxes = choose_person_boxes(all_candidates[gi], threshold, len(targets))
-        path = image_path(gallery[gi], gi)
-        with Image.open(path) as source:
-            image = source.convert("RGB")
-            if len(boxes) < len(targets):
+        missing = max(0, len(targets) - len(boxes))
+        if missing:
+            low_candidate_queries += 1
+            full_scene_fallback_slots += missing
+        crop_key = (gi, len(targets))
+        if crop_key not in crop_cache:
+            path = image_path(gallery[gi], gi)
+            with Image.open(path) as source:
+                image = source.convert("RGB")
                 # A detector miss must not abort the entire benchmark. Fill only
                 # missing query-target slots with the full reference scene; this
                 # uses no GT box/identity information and is explicitly logged.
-                low_candidate_queries += 1
-                full_box = (0.0, 0.0, float(image.width), float(image.height))
-                missing = len(targets) - len(boxes)
-                boxes = list(boxes) + [
-                    BoxCandidate(full_box, -1.0, fallback=True) for _ in range(missing)
-                ]
-                full_scene_fallback_slots += missing
-            crop_tensors = [clip_preprocess(image.crop(candidate.box)) for candidate in boxes]
-
-        crop_batch = torch.stack(crop_tensors).to(device)
-        text_tokens = clip_module.tokenize([target.select_text for target in targets]).to(device)
-        image_features = clip_model.encode_image(crop_batch).float()
-        text_features = clip_model.encode_text(text_tokens).float()
-        image_features = image_features / image_features.norm(
-            dim=-1, keepdim=True
-        ).clamp_min(1e-12)
-        text_features = text_features / text_features.norm(
-            dim=-1, keepdim=True
-        ).clamp_min(1e-12)
+                if missing:
+                    full_box = (0.0, 0.0, float(image.width), float(image.height))
+                    boxes = list(boxes) + [
+                        BoxCandidate(full_box, -1.0, fallback=True) for _ in range(missing)
+                    ]
+                crop_tensors = [clip_preprocess(image.crop(candidate.box)) for candidate in boxes]
+            crop_batch = torch.stack(crop_tensors).to(device)
+            image_features = clip_model.encode_image(crop_batch).float()
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+            crop_cache[crop_key] = (boxes, image_features)
+        boxes, image_features = crop_cache[crop_key]
+        text_key = tuple(target.select_text for target in targets)
+        if text_key not in text_cache:
+            text_tokens = clip_module.tokenize(list(text_key)).to(device)
+            text_features = clip_model.encode_text(text_tokens).float()
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+            text_cache[text_key] = text_features
+        text_features = text_cache[text_key]
         sim = (text_features @ image_features.T).cpu().numpy()
 
         memberships, anchors = select_subject_members(
@@ -757,10 +790,23 @@ def select_query_target_boxes(
         "full_scene_fallback_slots": full_scene_fallback_slots,
         "shortage_policy": "pad missing query-target slots with the full reference scene",
     }
+    if cache_path is not None:
+        atomic_json(cache_path, {"boxes": selected_per_query, "stats": stats})
     return selected_per_query, stats
 
 
-class GalleryPersonDataset(Dataset):
+class PersonCropDataset(Dataset):
+    """Decode an adjacent scene once per worker, then crop its person instances."""
+    def crop(self, gi: int, box):
+        if getattr(self, "_last_gi", None) != gi:
+            path = image_path(self.gallery[gi], gi)
+            with Image.open(path) as source:
+                self._last_image = source.convert("RGB")
+            self._last_gi = gi
+        return self._last_image.crop(box)
+
+
+class GalleryPersonDataset(PersonCropDataset):
     def __init__(
         self,
         gallery: Sequence[dict[str, Any]],
@@ -781,10 +827,21 @@ class GalleryPersonDataset(Dataset):
 
     def __getitem__(self, index: int) -> torch.Tensor:
         gi, box = self.items[index]
-        path = image_path(self.gallery[gi], gi)
-        with Image.open(path) as source:
-            crop = source.convert("RGB").crop(box)
-            return self.preprocess(crop)
+        return self.preprocess(self.crop(gi, box))
+
+
+def load_gallery_feature_cache(cache_path: Path, expected_offsets: np.ndarray):
+    try:
+        offsets = np.load(cache_path.with_name("gallery_person_offsets.npy"), allow_pickle=False)
+        features = np.load(cache_path, mmap_mode="r", allow_pickle=False)
+        if (features.ndim == 3 and features.shape[0] == expected_offsets[-1]
+                and features.shape[1] > 0 and features.shape[2] > 0
+                and features.dtype in (np.float16, np.float32)
+                and np.array_equal(offsets, expected_offsets)):
+            return offsets, (int(features.shape[1]), int(features.shape[2]))
+    except (OSError, ValueError, EOFError):
+        pass
+    return None
 
 
 @torch.no_grad()
@@ -796,17 +853,10 @@ def encode_gallery_persons(
     device: torch.device,
 ) -> tuple[Path, np.ndarray, tuple[int, int]]:
     offsets_path = cache_path.with_name("gallery_person_offsets.npy")
-    if cache_path.is_file() and offsets_path.is_file():
-        offsets = np.load(offsets_path)
-        features = np.load(cache_path, mmap_mode="r")
-        if (
-            features.ndim == 3
-            and features.shape[0] == len(dataset)
-            and offsets.shape == dataset.offsets.shape
-            and np.array_equal(offsets, dataset.offsets)
-        ):
-            print(f"[cache] gallery person features: {rel(cache_path)}", flush=True)
-            return cache_path, offsets, (int(features.shape[1]), int(features.shape[2]))
+    cached = load_gallery_feature_cache(cache_path, dataset.offsets)
+    if cached is not None:
+        print(f"[cache] gallery person features: {rel(cache_path)}", flush=True)
+        return cache_path, *cached
 
     loader = DataLoader(
         dataset,
@@ -820,7 +870,10 @@ def encode_gallery_persons(
     token_dim: tuple[int, int] | None = None
     cursor = 0
     output_dtype = str(runtime.get("gallery_feature_dtype", "float16"))
+    if output_dtype not in {"float16", "float32"}:
+        raise ValueError("runtime.gallery_feature_dtype must be float16 or float32")
     np_dtype = np.float16 if output_dtype == "float16" else np.float32
+    temp_path = cache_path.with_name(cache_path.name + ".partial")
 
     for images in progress_bar(
         loader, desc="Encode FAFA gallery persons", total=len(loader), unit="batch"
@@ -839,24 +892,28 @@ def encode_gallery_persons(
         if feature_memmap is None:
             token_dim = (int(image_features.shape[1]), int(image_features.shape[2]))
             feature_memmap = np.lib.format.open_memmap(
-                cache_path,
+                temp_path,
                 mode="w+",
                 dtype=np_dtype,
                 shape=(len(dataset), token_dim[0], token_dim[1]),
             )
 
         batch_np = image_features.cpu().numpy().astype(np_dtype, copy=False)
+        if not np.isfinite(batch_np).all():
+            raise FloatingPointError("FAFA gallery features contain NaN/Inf")
         feature_memmap[cursor : cursor + len(batch_np)] = batch_np
         cursor += len(batch_np)
 
     if feature_memmap is None or token_dim is None:
         raise RuntimeError("Gallery person dataset is empty")
     feature_memmap.flush()
-    np.save(offsets_path, dataset.offsets)
+    del feature_memmap
+    atomic_save(offsets_path, dataset.offsets)
+    os.replace(temp_path, cache_path)
     return cache_path, dataset.offsets, token_dim
 
 
-class QueryTargetDataset(Dataset):
+class QueryTargetDataset(PersonCropDataset):
     def __init__(
         self,
         queries: Sequence[dict[str, Any]],
@@ -888,10 +945,29 @@ class QueryTargetDataset(Dataset):
 
     def __getitem__(self, index: int):
         gi, box, caption, owner = self.items[index]
-        path = image_path(self.gallery[gi], gi)
-        with Image.open(path) as source:
-            crop = source.convert("RGB").crop(box)
-            return self.preprocess(crop), caption, owner
+        return self.preprocess(self.crop(gi, box)), caption, owner
+
+
+def load_query_feature_cache(path: Path, expected_counts: Sequence[int]):
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            features, offsets = data["features"], data["offsets"]
+        expected_offsets = np.concatenate([[0], np.cumsum(expected_counts)]).astype(np.int64)
+        if (features.ndim != 2 or features.dtype != np.float32 or features.shape[1] < 1
+                or features.shape[0] != expected_offsets[-1]
+                or not np.array_equal(offsets, expected_offsets) or not np.isfinite(features).all()):
+            return None
+        return [features[int(a):int(b)] for a, b in zip(offsets[:-1], offsets[1:])]
+    except (OSError, ValueError, EOFError, KeyError):
+        return None
+
+
+def save_query_feature_cache(path: Path, features: Sequence[np.ndarray]) -> None:
+    components, offsets = flatten_query_features(features)
+    temp = path.with_name(path.name + ".partial")
+    with temp.open("wb") as handle:
+        np.savez(handle, features=components, offsets=offsets)
+    os.replace(temp, path)
 
 
 @torch.no_grad()
@@ -929,6 +1005,8 @@ def encode_query_targets(
                 f"Unexpected FAFA query feature shape: {tuple(features.shape)}"
             )
         features_np = features.cpu().numpy().astype(np.float32, copy=False)
+        if not np.isfinite(features_np).all():
+            raise FloatingPointError("FAFA query features contain NaN/Inf")
         for feature, owner in zip(features_np, owners.numpy().tolist()):
             grouped[int(owner)].append(feature)
 
@@ -969,16 +1047,26 @@ def compute_component_person_scores(
     component blocks are then scored against that batch. This is much faster
     than re-streaming the whole gallery once per benchmark query.
     """
+    if person_batch_size <= 0 or query_batch_size <= 0 or fda_k <= 0:
+        raise ValueError("Scoring batch sizes and fda_k must be positive")
     gallery_features = np.load(gallery_feature_path, mmap_mode="r")
+    if (component_features.ndim != 2 or gallery_features.ndim != 3
+            or component_features.shape[1] != gallery_features.shape[2]
+            or gallery_features.shape[1] < 1):
+        raise ValueError("Query/gallery feature dimensions do not match")
     expected_shape = (len(component_features), int(gallery_features.shape[0]))
     if cache_path.is_file():
-        cached = np.load(cache_path, mmap_mode="r")
-        if cached.shape == expected_shape and cached.dtype == np.float32:
-            print(f"[cache] component-person scores: {rel(cache_path)}", flush=True)
-            return cache_path
+        try:
+            cached = np.load(cache_path, mmap_mode="r", allow_pickle=False)
+            if cached.shape == expected_shape and cached.dtype == np.float32:
+                print(f"[cache] component-person scores: {rel(cache_path)}", flush=True)
+                return cache_path
+        except (OSError, ValueError, EOFError):
+            pass
 
+    temp_path = cache_path.with_name(cache_path.name + ".partial")
     scores = np.lib.format.open_memmap(
-        cache_path,
+        temp_path,
         mode="w+",
         dtype=np.float32,
         shape=expected_shape,
@@ -994,9 +1082,10 @@ def compute_component_person_scores(
         unit="person-batch",
     ):
         p_end = min(p_start + person_batch_size, gallery_features.shape[0])
-        g = torch.from_numpy(np.asarray(gallery_features[p_start:p_end])).to(
+        g = torch.from_numpy(np.array(gallery_features[p_start:p_end], copy=True)).to(
             device=device, dtype=torch.float32
         )
+        block = torch.empty((len(component_features), p_end - p_start), device=device, dtype=torch.float32)
         for q_start in range(0, len(component_features), query_batch_size):
             q_end = min(q_start + query_batch_size, len(component_features))
             q = q_all[q_start:q_end]
@@ -1004,10 +1093,16 @@ def compute_component_person_scores(
             token_similarity = torch.einsum("qd,pkd->qpk", q, g)
             k = min(fda_k, int(token_similarity.shape[-1]))
             topk = torch.topk(token_similarity, k=k, dim=-1).values
-            scores[q_start:q_end, p_start:p_end] = (
-                topk.mean(dim=-1).cpu().numpy().astype(np.float32, copy=False)
-            )
+            block[q_start:q_end] = topk.mean(dim=-1)
+        # One synchronization/CPU transfer per person block, rather than one
+        # per tiny query block. Keep the original top-k mean score unchanged.
+        block_np = block.cpu().numpy()
+        if not np.isfinite(block_np).all():
+            raise FloatingPointError("FAFA component scores contain NaN/Inf")
+        scores[:, p_start:p_end] = block_np
     scores.flush()
+    del scores
+    os.replace(temp_path, cache_path)
     return cache_path
 
 
@@ -1152,7 +1247,7 @@ def aggregate_component_scores(
     if not np.isfinite(unmatched_score):
         raise ValueError("unmatched_score must be finite")
     scores = np.lib.format.open_memmap(
-        scores_path,
+        scores_path.with_name(scores_path.name + ".partial"),
         mode="w+",
         dtype=np.float32,
         shape=(len(query_offsets) - 1, len(gallery_offsets) - 1),
@@ -1204,6 +1299,8 @@ def aggregate_component_scores(
                     target_scores[:, p_start:p_end], unmatched_score
                 )
     scores.flush()
+    del scores
+    os.replace(scores_path.with_name(scores_path.name + ".partial"), scores_path)
 
 
 def score_all_queries(
@@ -1230,7 +1327,7 @@ def score_all_queries(
     )
     # Persist row boundaries for future CPU-only aggregation/calibration of the
     # raw component scores. This records predictions, not ground-truth members.
-    np.save(component_score_path.with_name("query_component_offsets.npy"), query_offsets)
+    atomic_save(component_score_path.with_name("query_component_offsets.npy"), query_offsets)
     aggregate_component_scores(
         component_score_path=component_score_path,
         query_offsets=query_offsets,
@@ -1289,26 +1386,17 @@ def main() -> None:
     )
 
     ckpt_cfg = cfg["checkpoint"]
-    ckpt_path_for_cache = resolve_config_path(str(ckpt_cfg["path"]))
-    selector_for_cache = resolve_config_path(
-        str(cfg["localization"]["query_selector"]["checkpoint"])
+    if ckpt_cfg.get("use_soft", True) is not True:
+        raise ValueError("This FAFA adapter supports only checkpoint.use_soft: true")
+    ckpt_path = resolve_config_path(str(ckpt_cfg["path"]))
+    localization_cfg = cfg["localization"]
+    detector_cfg = localization_cfg["detector"]
+    detector_checkout, detector_config, _ = detector_preflight(detector_cfg)
+    stage_dirs, cache_fingerprint = build_stage_caches(
+        cfg, gallery_path, queries_path, output, detector_config, detector_checkout,
     )
-    detector_for_cache = resolve_config_path(
-        str(cfg["localization"]["detector"]["checkpoint"])
-    )
-    cache_key, cache_fingerprint = build_cache_key(
-        config_path=config_path,
-        gallery_path=gallery_path,
-        queries_path=queries_path,
-        checkpoint_paths=[
-            ckpt_path_for_cache,
-            runtime_marker_for_cache,
-            selector_for_cache,
-            detector_for_cache,
-        ],
-    )
-    cache_dir = output / "cache" / cache_key
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_key = cache_fingerprint["keys"]["component_scores"]
+    cache_dir = stage_dirs["component_scores"]
 
     gallery_index = build_gallery_index(gallery)
     query_targets = [parse_query_targets(q, qi) for qi, q in enumerate(queries)]
@@ -1324,26 +1412,25 @@ def main() -> None:
     )
 
     tracker.advance("Detect gallery person candidates")
-    localization_cfg = cfg["localization"]
-    detector_cfg = localization_cfg["detector"]
-    candidate_cache_path = cache_dir / "person_candidates.jsonl"
-    all_candidates, detector_weights = get_or_create_detection_cache(
+    candidate_cache_path = stage_dirs["detections"] / "person_candidates.jsonl"
+    all_candidates, detector_info = get_or_create_detection_cache(
         gallery,
         candidate_cache_path,
+        config_path,
         detector_cfg,
         detector_device,
     )
     if detector_device.type == "cuda":
         torch.cuda.empty_cache()
 
-    threshold = float(detector_cfg.get("score_threshold", 0.55))
+    threshold = float(detector_cfg["score_threshold"])
     gallery_boxes = [
         choose_person_boxes(candidates, threshold, min_required=1)
         for candidates in all_candidates
     ]
     tracker.log(
         f"person candidates ready: {sum(len(x) for x in gallery_boxes):,} crops "
-        f"across {len(gallery_boxes):,} gallery images (source={detector_weights})"
+        f"across {len(gallery_boxes):,} gallery images (attention={detector_info.get('attention_backend')})"
     )
 
     tracker.advance("Select query members: Hungarian anchors + CLIP thresholds")
@@ -1355,6 +1442,7 @@ def main() -> None:
         all_candidates=all_candidates,
         localization_cfg=localization_cfg,
         device=device,
+        cache_path=stage_dirs["localization"] / "query_localization.json",
     )
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -1365,53 +1453,54 @@ def main() -> None:
         f"fallback_slots={selector_stats.get('full_scene_fallback_slots')}"
     )
 
-    tracker.advance("Load pinned FAFA model and released checkpoint")
-    # Source/runtime integrity was checked before expensive localization. Load the
-    # large FAFA model only now so detector/CLIP do not coexist with it on the GPU.
-    # load_fafa() re-validates the runtime cache as a cheap defense-in-depth check.
-    model, txt_processors, preprocess, ckpt_path, load_info = load_fafa(
-        cfg, fafa_dir, device
-    )
-    tracker.log(
-        f"FAFA model loaded from {rel(ckpt_path)}; missing_keys={len(load_info['missing_keys'])} "
-        f"unexpected_keys={len(load_info['unexpected_keys'])}"
-    )
+    tracker.advance("Load FAFA only if feature extraction is needed")
+    gallery_dataset = GalleryPersonDataset(gallery, gallery_boxes, preprocess=None)
+    gallery_feature_path = stage_dirs["gallery_features"] / "gallery_person_features.npy"
+    query_feature_path = stage_dirs["query_features"] / "query_features.npz"
+    cached_gallery = load_gallery_feature_cache(gallery_feature_path, gallery_dataset.offsets)
+    query_counts = [sum(len(members) for members in subjects) for subjects in selected_query_boxes]
+    query_features = load_query_feature_cache(query_feature_path, query_counts)
+    model_info_path = stage_dirs["gallery_features"] / "model_load_info.json"
+    model = txt_processors = preprocess = None
+    model_loaded = cached_gallery is None or query_features is None
+    if model_loaded:
+        model, txt_processors, preprocess, ckpt_path, load_info = load_fafa(cfg, fafa_dir, device)
+        atomic_json(model_info_path, load_info)
+        tracker.log(f"FAFA loaded: missing_keys={len(load_info['missing_keys'])} "
+                    f"unexpected_keys={len(load_info['unexpected_keys'])}")
+    else:
+        load_info = read_json(model_info_path) or {"missing_keys": None, "unexpected_keys": None}
+        tracker.log("[cache] complete gallery/query features; skipping FAFA model construction")
 
     tracker.advance("Encode predicted gallery persons")
-    gallery_dataset = GalleryPersonDataset(gallery, gallery_boxes, preprocess)
-    gallery_feature_path = cache_dir / "gallery_person_features.npy"
+    gallery_dataset.preprocess = preprocess
     gallery_feature_path, offsets, token_dim = encode_gallery_persons(
-        model=model,
-        dataset=gallery_dataset,
-        cache_path=gallery_feature_path,
-        runtime=runtime,
-        device=device,
+        model=model, dataset=gallery_dataset, cache_path=gallery_feature_path,
+        runtime=runtime, device=device,
     )
-    tracker.log(
-        f"gallery person features ready: persons={int(offsets[-1]):,} "
-        f"tokens={token_dim[0]} dim={token_dim[1]} path={rel(gallery_feature_path)}"
-    )
+    tracker.log(f"gallery person features ready: persons={int(offsets[-1]):,} "
+                f"tokens={token_dim[0]} dim={token_dim[1]} path={rel(gallery_feature_path)}")
 
     tracker.advance("Encode composed query targets")
-    query_dataset = QueryTargetDataset(
-        queries=queries,
-        targets=query_targets,
-        boxes=selected_query_boxes,
-        gallery=gallery,
-        gallery_index=gallery_index,
-        preprocess=preprocess,
-    )
-    query_features = encode_query_targets(
-        model=model,
-        txt_processors=txt_processors,
-        dataset=query_dataset,
-        num_queries=len(queries),
-        runtime=runtime,
-        device=device,
-    )
-    tracker.log(
-        f"query target features ready: {sum(len(x) for x in query_features):,} target components"
-    )
+    if query_features is None:
+        query_dataset = QueryTargetDataset(
+            queries=queries, targets=query_targets, boxes=selected_query_boxes,
+            gallery=gallery, gallery_index=gallery_index, preprocess=preprocess,
+        )
+        query_features = encode_query_targets(
+            model=model, txt_processors=txt_processors, dataset=query_dataset,
+            num_queries=len(queries), runtime=runtime, device=device,
+        )
+        save_query_feature_cache(query_feature_path, query_features)
+    else:
+        tracker.log(f"[cache] composed query features: {rel(query_feature_path)}")
+    tracker.log(f"query target features ready: {sum(len(x) for x in query_features):,} components")
+    # The scoring path consumes cached embeddings only; do not keep the large
+    # FAFA encoder on the GPU during component scoring and CPU Hungarian.
+    del model, txt_processors, preprocess
+    gc.collect()
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
 
     tracker.advance("Compute component-person scores and Partial SetMatch aggregation")
     ckpt_cfg = cfg["checkpoint"]
@@ -1468,8 +1557,9 @@ def main() -> None:
             "model_name": cfg["checkpoint"].get("model_name", "blip2_fafa_cpr"),
             "model_type": cfg["checkpoint"].get("model_type", "pretrain"),
             "load_strict": False,
-            "missing_key_count": len(load_info["missing_keys"]),
-            "unexpected_key_count": len(load_info["unexpected_keys"]),
+            "missing_key_count": len(load_info["missing_keys"]) if load_info["missing_keys"] is not None else None,
+            "unexpected_key_count": len(load_info["unexpected_keys"]) if load_info["unexpected_keys"] is not None else None,
+            "model_loaded_this_run": model_loaded,
         },
         "fafa_scoring": {
             "use_soft": bool(ckpt_cfg.get("use_soft", True)),
@@ -1485,7 +1575,10 @@ def main() -> None:
             "uses_target_ids_for_box_selection": False,
             "uses_positive_labels_for_scoring": False,
             "person_detector": detector_cfg.get("backend"),
-            "detector_weights": detector_weights,
+            "detector_weights": detector_info["checkpoint"],
+            "detector_source_commit": detector_cfg["source"]["commit"],
+            "attention_backend": detector_info.get("attention_backend"),
+            "detector_protocol": {k: detector_cfg[k] for k in ("text_prompt", "box_threshold", "text_threshold", "nms_iou_threshold", "min_box_size_px", "max_persons_per_image")},
             "score_threshold": threshold,
             "candidate_cache": rel(candidate_cache_path),
             **selector_stats,
@@ -1520,6 +1613,8 @@ def main() -> None:
         "runtime": {
             "device": str(device),
             "detector_device": str(detector_device),
+            "detector_batch_size": int(runtime.get("detector_batch_size", 2)),
+            "detector_num_workers": int(runtime.get("detector_num_workers", 4)),
             "image_batch_size": int(runtime.get("image_batch_size", 64)),
             "query_batch_size": int(runtime.get("query_batch_size", 64)),
             "score_person_batch_size": int(runtime.get("score_person_batch_size", 2048)),
@@ -1531,6 +1626,8 @@ def main() -> None:
             "key": cache_key,
             "dir": rel(cache_dir),
             "fingerprint": cache_fingerprint,
+            "stage_dirs": {name: rel(path) for name, path in stage_dirs.items()},
+            "query_features": rel(query_feature_path),
         },
         "num_queries": len(queries),
         "num_gallery": len(gallery),

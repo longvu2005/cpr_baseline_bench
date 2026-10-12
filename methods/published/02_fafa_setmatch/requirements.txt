@@ -1,4 +1,4 @@
-numpy
+numpy>=1.24,<2
 pillow
 pyyaml
 torch
@@ -12,9 +12,9 @@ git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33
 pandas
 omegaconf
 iopath
-timm
+timm==0.9.16
 decord
-opencv-python
+opencv-python==4.10.0.84
 # Keep the official FAFA pin. Shared notebook environments may warn that an
 # unrelated preinstalled package wants a newer Transformers; do not relax this
 # baseline-specific version merely to silence that external warning.
@@ -26,3 +26,11 @@ spacy
 prettytable
 webdataset
 pycocoevalcap
+
+# Official Grounding DINO is imported from the pinned S5 source checkout.
+# No Transformers upgrade or Grounding DINO pip wheel is required.
+supervision==0.22.0
+addict
+yapf==0.40.1
+pycocotools
+ninja

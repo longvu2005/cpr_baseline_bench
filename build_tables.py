@@ -6,6 +6,7 @@ from pathlib import Path
 
 from benchmark_data import manifest_fingerprint
 from prepare_data import CASE_TYPES
+from cpr_benchmark.protocol import compatible, PERSON_METHODS, TEXT_PERSON_METHODS
 
 ROOT = Path(__file__).resolve().parent
 OUTPUTS_DIR = ROOT / "outputs"
@@ -14,6 +15,7 @@ TABLES_DIR = ROOT / "tables"
 
 MAIN_COLUMNS = [
     "Method",
+    "Protocol",
     "CPR Supervision",
     "ID-mAP",
     "ID-R@1",
@@ -25,7 +27,7 @@ MAIN_COLUMNS = [
     "Full-R@10",
 ]
 
-CASE_COLUMNS = ["Method"] + [
+CASE_COLUMNS = ["Method", "Protocol"] + [
     f"{case} {metric}" for case in CASE_TYPES for metric in ("mAP", "R@1")
 ]
 
@@ -44,6 +46,9 @@ def format_metric(value):
 
 def collect_results():
     results = []
+    person_detection_signature = None
+    person_localization_signature = None
+    image_signature = None
 
     if not OUTPUTS_DIR.is_dir():
         return results
@@ -71,6 +76,9 @@ def collect_results():
                 f"expected {run_path.relative_to(ROOT)}"
             )
         run = load_json(run_path)
+        if not compatible(run) or metrics.get("benchmark_protocol") != run.get("benchmark_protocol"):
+            print(f"Skipping legacy/different-protocol result: {method_dir.name}; rerun this baseline.")
+            continue
 
         metric_method = metrics.get("method")
         run_method = run.get("method")
@@ -87,6 +95,23 @@ def collect_results():
             )
 
         method_id = run_method
+        images = run["benchmark_protocol"].get("image_fingerprint")
+        if images:
+            if image_signature is not None and images != image_signature:
+                raise RuntimeError("Runs use different gallery image bytes; rerun them on the same image files before comparing.")
+            image_signature = images
+        if method_id in PERSON_METHODS:
+            provenance = run["benchmark_protocol"]
+            signature = (provenance["detections"], provenance["detection_array_sha256"])
+            if person_detection_signature is not None and signature != person_detection_signature:
+                raise RuntimeError("Person runs use different actual detector boxes. Rerun them with the same shared cache before comparing.")
+            person_detection_signature = signature
+            if method_id in TEXT_PERSON_METHODS:
+                selection = (provenance.get("localization"), provenance.get("localization_components_sha256"))
+                if not all(selection): raise RuntimeError(f"Missing shared membership provenance: {method_id}")
+                if person_localization_signature is not None and selection != person_localization_signature:
+                    raise RuntimeError("Text-person runs use different selected people. Rerun them with the same shared localization cache.")
+                person_localization_signature = selection
 
         method = (
             run.get("display_name")
@@ -112,6 +137,7 @@ def collect_results():
                 "method": method,
                 "group": group,
                 "supervision": supervision,
+                "protocol": "Shared person v1" if method_id in PERSON_METHODS else "Native scene v1",
                 "metrics": metrics,
             }
         )
@@ -128,6 +154,7 @@ def build_main_table(results):
         rows.append(
             {
                 "Method": result["method"],
+                "Protocol": result["protocol"],
                 "CPR Supervision": result["supervision"],
                 "ID-mAP": format_metric(
                     overall.get("ID-mAP")
@@ -166,7 +193,7 @@ def build_case_table(results):
     for result in results:
         cases = result["metrics"].get("cases", {})
 
-        row = {"Method": result["method"], "_group": result["group"]}
+        row = {"Method": result["method"], "Protocol": result["protocol"], "_group": result["group"]}
         for case in CASE_TYPES:
             for metric in ("mAP", "R@1"):
                 row[f"{case} {metric}"] = format_metric(cases.get(case, {}).get(f"Full-{metric}"))

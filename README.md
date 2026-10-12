@@ -24,6 +24,73 @@ validate_data.py
 
 ---
 
+## Benchmark Gallery Protocol
+
+**The current Stage-2 benchmark uses one shared gallery of 30,552 images, not the 17,000-image TRAIN split alone.** Every baseline must score against the same complete gallery, including images from all three source splits:
+
+| Source split | Images |
+| --- | ---: |
+| TRAIN | 17,000 |
+| VAL | 5,684 |
+| TEST | 7,868 |
+| **Total** | **30,552** |
+
+These counts describe the **current source metadata**, not hard-coded limits or independently specified counts for future dataset versions. `data/source/images.jsonl` is the source of truth for gallery membership and ordering. `prepare_data.py` regenerates `data/gallery.jsonl` and `data/queries.jsonl` from the source metadata and the Stage-2 annotation export. The image files alone do not determine which images enter the benchmark.
+
+Do not evaluate the full Stage-2 benchmark using only TRAIN images. Do not edit a manifest by hand, duplicate images to meet an expected count, or weaken the image-file checks to allow missing gallery members. Inference and evaluation must both use the same ordered manifests; the runner records their SHA-256 fingerprints to prevent mixing incompatible results.
+
+### Prepare the full gallery
+
+The source directory supplied to `link_gallery.py` **must contain three sibling directories**, not just `train/`:
+
+```text
+/path/to/images/
+  train/
+  val/
+  test/
+```
+
+From the repository root, with `data/source/images.jsonl`, `data/source/index.txt`, and `data/source/export_stage2.jsonl` available:
+
+```bash
+python link_gallery.py --source /path/to/images
+python prepare_data.py
+python validate_data.py
+```
+
+For Kaggle, use the actual mounted parent directory containing `train/`, `val/`, and `test/`. For example, if those folders live under `/kaggle/input/cir-data/data/raw/images`, pass that **parent** directory to `--source`, not `/kaggle/input/cir-data/data/raw/images/train`.
+
+For the current dataset, a successful preparation reports **30,552 gallery images**. The query count depends on the supplied annotation export (4,311 queries for the documented export). All baseline methods then use the same manifest.
+
+### Diagnose an unexpected 17,000-image gallery
+
+If the runner prints `Expected 17,000 images`, the number comes from the **current `data/gallery.jsonl`**, not from a hard-coded benchmark size. It typically means that the local manifest was generated from TRAIN-only metadata or is stale. Check both files:
+
+```bash
+python - <<'PY'
+import json
+from collections import Counter
+from pathlib import Path
+
+root = Path('data')
+for name in ('gallery', 'queries'):
+    path = root / f'{name}.jsonl'
+    rows = [json.loads(line) for line in path.open(encoding='utf-8') if line.strip()]
+    print(f'{name}: {len(rows):,} rows')
+
+source = root / 'source/images.jsonl'
+rows = [json.loads(line) for line in source.open(encoding='utf-8') if line.strip()]
+counts = Counter(row.get('source_split') for row in rows)
+print('Source image splits:', dict(sorted(counts.items())))
+PY
+```
+
+If source metadata contains all three splits but `gallery.jsonl` does not, rerun `prepare_data.py` and `validate_data.py` after linking the complete image source. If `images.jsonl` is itself TRAIN-only, restore the **correct full metadata** first; regeneration cannot recreate missing metadata. If the manifests are complete but image validation fails, confirm that all three image folders are mounted and relink the gallery. `python validate_data.py --skip-image-files` can diagnose manifest inconsistencies without requiring the images on the machine.
+
+> **Kaggle note:** `CPR_GALLERY_SOURCE` points to a directory directly containing every manifest image. It cannot point to `train/` when the gallery contains TRAIN + VAL + TEST. With the split-directory source layout, prefer `link_gallery.py` to create the flat gallery of symlinks at `data/gallery/`.
+
+---
+
 ## Prepare Stage-2 Data
 
 Place the flattened JSONL export in `data/source/export_stage2.jsonl`, then run:
@@ -57,20 +124,21 @@ python run_baseline.py clip_image
 The default runner performs the complete method pipeline in this order:
 
 ```text
-1. install methods/<group>/<method>/requirements.txt
-2. prepare/validate the method checkpoint when download_checkpoint.py exists
-3. run inference
-4. run the official evaluator
-5. rebuild benchmark tables
+1. validate/repair the canonical gallery image layout, then validate manifest semantics
+2. install methods/<group>/<method>/requirements.txt
+3. prepare/validate the method checkpoint when download_checkpoint.py exists
+4. run inference
+5. run the official evaluator
+6. rebuild benchmark tables
 ```
 
-The dependency step is always first and uses the same Python interpreter as the runner:
+**Gallery validation runs before dependency installation.** The dependency step uses the same Python interpreter as the runner:
 
 ```text
 python -m pip install -r methods/<group>/<method>/requirements.txt
 ```
 
-This prevents checkpoint or inference scripts from silently depending on packages that have not been installed yet.
+This prevents checkpoint or inference scripts from silently depending on packages that have not been installed yet. Gallery validation can fail early if the manifest or image mount is incomplete. See [Benchmark Gallery Protocol](#benchmark-gallery-protocol) before attempting GPU runs.
 
 All Python subprocesses launched by the root runner are unbuffered, so phase messages and progress bars appear immediately instead of being held until a process exits. Each `run.py` should use the shared `benchmark_progress.py` helpers for phase-level status and batch-level progress:
 
@@ -485,7 +553,8 @@ python run_baseline.py example_method
 Internally the runner performs:
 
 ```text
-python -m pip install -r methods/published/03_example_method/requirements.txt
+validate/repair gallery and validate manifests
+→ python -m pip install -r methods/published/03_example_method/requirements.txt
 → methods/published/03_example_method/download_checkpoint.py
 → methods/published/03_example_method/run.py
 → evaluate.py --method example_method

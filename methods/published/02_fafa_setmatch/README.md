@@ -2,8 +2,9 @@
 
 Drop-in replacement for `methods/published/02_fafa_setmatch/`. The method ID stays
 `fafa_setmatch`, so the existing runner and evaluator commands remain valid.
-This update changes only the image-level matching/aggregation rule; FAFA,
-checkpoint, detector, CLIP membership thresholds and evaluation are unchanged.
+This revision uses official Grounding DINO person proposals and independent stage
+caches. The released FAFA checkpoint, native soft-FDA score, CLIP membership
+thresholds, Partial SetMatch rule and common evaluator are preserved.
 
 Published baseline adapter for **FAFA (Fine-grained Adaptive Feature Alignment)**
 from *Automatic Synthetic Data and Fine-grained Adaptive Feature Alignment for
@@ -47,8 +48,8 @@ The pilot benchmark uses full scene images and intentionally does not expose a
 GT target box in `queries.jsonl`. SetMatch, however, needs person instances.
 This adapter therefore uses **predicted** person localization only:
 
-1. torchvision Faster R-CNN ResNet-50-FPN-v2 proposes person boxes in every
-   gallery/query image;
+1. official Grounding DINO Swin-T OGC proposes person boxes with the fixed
+   prompt `person.` in every gallery/query image;
 2. for a query with multiple `subjects`, OpenAI CLIP (`ViT-B/32`) scores each
    `subjects[].select_text` against the predicted query-person crops;
 3. a one-to-one Hungarian assignment first chooses one **anchor crop** per
@@ -179,13 +180,94 @@ The adapter:
 - writes reproducibility metadata to `runs/fafa_setmatch/run.json`;
 - does not calculate the official benchmark metrics itself.
 
-The adapter may also cache predicted person boxes and FAFA gallery-person
-features plus component-person FAFA scores under `runs/fafa_setmatch/cache/` to
-avoid recomputing them. It also saves `query_component_offsets.npy` alongside
-`gallery_person_offsets.npy` so the raw score matrix has explicit row/column
-boundaries. The cache directory is fingerprinted by adapter/config/data
-and checkpoint identities so changing a model/config does not silently reuse stale
-features.
+The adapter caches each stage independently under `runs/fafa_setmatch/cache/`:
+
+| Stage | Cache input identity | Effect of a query-manifest edit |
+| --- | --- | --- |
+| `detections` | Gallery, pinned detector source/config/weights, NMS/threshold/cap, helper and extension identity | Reused |
+| `localization` | Detections, query manifest, CLIP weights and membership settings | Recomputed |
+| `gallery_features` | Detections, gallery crop threshold, FAFA source/weights/transform, storage dtype | Reused |
+| `query_features` | Localization and FAFA source/weights/transform | Recomputed |
+| `component_scores` | Gallery/query features and FDA settings | Recomputed |
+
+Changing batch sizes, workers, execution device or `setmatch.unmatched_score`
+does not invalidate these stages. The background score is applied only during
+final aggregation. Checkpoint identities retain the repository's path/size/mtime
+policy; pinned source/config/helper content is hashed. Do not edit weights in
+place while preserving both their size and timestamp.
+
+A warm run reuses CLIP localization and both FAFA feature caches. If both feature
+caches are complete, it skips constructing the large FAFA model entirely.
+`query_component_offsets.npy` and `gallery_person_offsets.npy` preserve the
+component/person boundaries in the raw matrix. `run.json` records every stage key,
+path, detector protocol and attention backend.
+
+## Grounding DINO assets and runtime
+
+FAFA reuses the detector source/checkpoint locations already used by S5/S10:
+
+```text
+source: IDEA-Research/GroundingDINO
+commit: 856dde20aee659246248e20734ef9ba5214f5e44
+config: groundingdino/config/GroundingDINO_SwinT_OGC.py
+checkpoint: checkpoints/groundingdino/groundingdino_swint_ogc.pth
+prompt: person.
+box threshold: 0.35
+text threshold: 0.25
+NMS IoU: 0.50
+minimum box size: 4 px
+FAFA person cap: 10 per image
+```
+
+S5 has no person cap by default; FAFA retains its existing cap of 10. Set
+`max_persons_per_image: null` if that cap should also match S5. The upstream
+`text_threshold` controls phrase decoding, not which boxes are retained;
+FAFA needs only boxes/confidences, so it skips decoding unused phrases.
+
+`groundingdino_adapter.py` calls only S5's detector preparation helpers. It does
+not prepare CLIP-ReID assets. It tries the official optional CUDA extension and
+uses the existing official PyTorch fallback when that extension is unavailable.
+Failed extension preparation is remembered for the same runtime; `--force` retries
+it. The fallback backend is logged because it can be slower on CUDA.
+
+Preparation and detection run in a separate process. This is necessary because
+FAFA and Grounding DINO have different BERT/Hugging Face caches, whose library
+constants are initialized at import. Process exit also releases detector memory
+before FAFA loads. `transformers==4.39.3` remains pinned; no Hugging Face Grounding
+DINO implementation or Transformers upgrade is introduced.
+
+Detection uses the pinned `load_image` transform (800 px short side, maximum
+1333 px), the native model's padded/masked NestedTensor batch, and S5's box
+conversion/NMS. `runtime.detector_batch_size` defaults to 2; set it to 1 if GPU
+memory is limited. Batches are split when padding would add more than 30% extra
+pixels, preserving manifest order and avoiding costly portrait/landscape padding.
+Preprocessing uses `runtime.detector_num_workers` workers.
+
+## Performance audit and interruption handling
+
+| Previous behavior | Resulting overhead or failure | Fix |
+| --- | --- | --- |
+| One key hashed the entire YAML, queries and adapter version | Changing a batch size/background score reran detection and gallery encoding | Separate stage identities |
+| CLIP localization and FAFA query embeddings were not cached | Every retry reran both steps and loaded FAFA | Persist localization and ragged query features; skip FAFA when features are cached |
+| Every person crop reopened and decoded its scene | Multi-person images repeated CPU work | Reuse the last decoded scene per DataLoader worker; reuse repeated CLIP scene/text embeddings |
+| Released checkpoint loaded directly onto CUDA | Temporary duplicate checkpoint tensors increased peak GPU memory | Load the checkpoint on CPU before copying its state |
+| FAFA stayed on GPU during similarity scoring | Less free memory for scoring blocks | Release it after feature extraction |
+| Every query block transferred scores to CPU separately | Repeated GPU synchronization | Transfer once per person block |
+| Score/feature memmaps were written directly to their final paths | A canceled write could later look like a shape-valid cache | Publish only complete files via atomic rename |
+| Detection was saved only after the last gallery image | Cancellation lost all completed detection work | Flush an ordered JSONL journal per batch and resume its valid prefix |
+
+Gallery encoding and component scoring restart their incomplete stage after a
+cancellation; detection resumes from completed journal rows. Final `scores.npy`
+is also replaced atomically. These files assume one writer per output directory;
+do not run two FAFA jobs into the same output directory simultaneously.
+
+The regression suite checks numerical score equivalence, missing-person matching,
+cache dependency isolation, canceled writes, detection resume, crop reuse, and
+cold/warm/query-only rebuild orchestration with toy models. It does not measure
+full-benchmark CUDA throughput or validate retrieval metrics with released FAFA
+weights. The detector change can change predictions and retrieval scores; run the
+benchmark again. The first Grounding DINO run rebuilds detections/features and
+cannot reuse the previous Faster R-CNN crop cache.
 
 ## Pinned-source integrity and retry behavior
 
@@ -205,21 +287,25 @@ first. Missing/stale artifacts or real source edits therefore fail before the
 expensive person detector runs. The large FAFA model itself is still loaded only
 after detector/CLIP localization to avoid unnecessary GPU-memory overlap.
 
-The Partial SetMatch scoring change **does** alter the semantics;
-`ADAPTER_VERSION` is therefore bumped to v4. The full cache key changes, so the
-prior v3 cache is not automatically reused (including its detection cache).
-This is intentional for reproducibility. No official FAFA source or weights change.
+`ADAPTER_VERSION` is v5. Each expensive stage now owns its own schema/input key;
+future aggregation-only changes do not need to invalidate person detections or
+features. Old monolithic caches are not migrated into this detector protocol.
 
 Legacy configs with `aggregation: min`, non-Hungarian assignment, disabled
 SetMatch or a non-finite background score are rejected before localization.
 
 ## Run
 
-Extract the ZIP **from the repository root**, replacing the three method files.
+Extract the ZIP **from the repository root**, preserving its relative paths.
+It replaces the five existing FAFA method files and `.gitignore`, adds
+`groundingdino_adapter.py`, and adds `tests/test_fafa_groundingdino.py`.
+The existing S5 helper files are
+required and already present in this repository. This patch targets main commit
+`5de87cabb97c326cd4f7359e91ddb27b24040cf1`.
 The included regression tests are independent of FAFA weights and CUDA:
 
 ```bash
-python tests/test_fafa_partial_setmatch.py
+python tests/test_fafa_groundingdino.py
 ```
 
 Normal end-to-end command:
@@ -228,7 +314,7 @@ Normal end-to-end command:
 python run_baseline.py fafa_setmatch
 ```
 
-The root runner installs this method's `requirements.txt` first, pins the official source, downloads the released FAFA checkpoint plus CLIP/detector auxiliary weights, pre-warms FAFA's LAVIS/Transformers runtime assets into a repository-local cache, then runs inference, evaluation, and table rebuilding. Inference preflights the pinned source and runtime inventory before expensive localization and then uses the cache in offline mode, so a missing runtime artifact fails instead of downloading silently mid-benchmark.
+The root runner installs this method's `requirements.txt` first, pins the official source, downloads the released FAFA checkpoint plus CLIP/Grounding DINO weights, pre-warms FAFA's LAVIS/Transformers runtime assets into a repository-local cache, then runs inference, evaluation, and table rebuilding. Inference preflights the pinned source and runtime inventory before expensive localization and then uses the cache in offline mode, so a missing runtime artifact fails instead of downloading silently mid-benchmark.
 
 Expected benchmark outputs:
 
