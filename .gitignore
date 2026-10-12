@@ -1,4 +1,5 @@
 # Raw experiment outputs
+cache/shared/
 runs/*
 !runs/.gitkeep
 
@@ -42,3 +43,4 @@ checkpoints/fafa/runtime_cache/
 checkpoints/fafa/runtime_assets_ready.json
 checkpoints/groundingdino/runtime_cache/
 checkpoints/groundingdino/runtime_assets_ready.json
+checkpoints/clip/selector_tokenizer/

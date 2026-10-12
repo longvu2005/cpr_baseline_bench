@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import os
 import shutil
 import subprocess
@@ -25,7 +24,6 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-import torch
 import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -34,6 +32,7 @@ if str(ROOT) not in sys.path:
 
 from benchmark_progress import PhaseTracker, byte_progress  # noqa: E402
 
+from cpr_person.adapter import prepare_shared
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 OPENAI_CLIP_B16_SHA256 = "5806e77cd80f8b59890b7e101eabd078d9fb84e6937f9e85e4ecb61988df416f"
 OPENAI_CLIP_B16_URL = (
@@ -132,101 +131,6 @@ def prepare_source(source: dict[str, Any], label: str) -> Path:
     return checkout
 
 
-def groundingdino_extension_usable(source_root: Path) -> bool:
-    """Return whether the pinned checkout exposes a loadable custom `_C` op."""
-
-    env = os.environ.copy()
-    existing = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = (
-        str(source_root)
-        if not existing
-        else os.pathsep.join([str(source_root), existing])
-    )
-    probe = (
-        "from groundingdino import _C; "
-        "assert hasattr(_C, 'ms_deform_attn_forward')"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", probe],
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    return result.returncode == 0
-
-
-def prepare_groundingdino_extension(source_root: Path) -> str:
-    """Best-effort in-place build of Grounding DINO's optional CUDA extension.
-
-    A failed build is intentionally non-fatal because run.py can use the
-    official pure-PyTorch deformable-attention implementation.  Building
-    in-place avoids pip's wheel-building path while preserving the fast custom
-    CUDA op when the hosted runtime has a compatible compiler/toolkit.
-    """
-
-    if groundingdino_extension_usable(source_root):
-        print("[skip] Grounding DINO custom CUDA/C++ op already usable", flush=True)
-        return "already_available"
-
-    try:
-        from torch.utils.cpp_extension import CUDA_HOME
-    except Exception as error:
-        print(
-            f"[warn] cannot inspect CUDA build toolchain ({type(error).__name__}: {error}); "
-            "run.py will use the PyTorch fallback",
-            flush=True,
-        )
-        return "fallback"
-
-    if CUDA_HOME is None or not torch.cuda.is_available():
-        print(
-            "[warn] CUDA build toolchain/runtime unavailable; "
-            "run.py will use the Grounding DINO PyTorch fallback",
-            flush=True,
-        )
-        return "fallback"
-
-    nvcc = Path(CUDA_HOME) / "bin" / "nvcc"
-    if not nvcc.is_file():
-        print(
-            f"[warn] nvcc not found at {nvcc}; "
-            "run.py will use the Grounding DINO PyTorch fallback",
-            flush=True,
-        )
-        return "fallback"
-
-    env = os.environ.copy()
-    env.setdefault("MAX_JOBS", "2")
-    try:
-        major, minor = torch.cuda.get_device_capability()
-        env.setdefault("TORCH_CUDA_ARCH_LIST", f"{major}.{minor}")
-    except Exception:
-        pass
-
-    print(
-        "[build] Grounding DINO custom CUDA/C++ op in-place "
-        "(best effort; failure falls back to pure PyTorch)",
-        flush=True,
-    )
-    result = subprocess.run(
-        [sys.executable, "setup.py", "build_ext", "--inplace"],
-        cwd=source_root,
-        env=env,
-        check=False,
-    )
-    if result.returncode == 0 and groundingdino_extension_usable(source_root):
-        print("[ok] Grounding DINO custom CUDA/C++ op built in-place", flush=True)
-        return "built"
-
-    print(
-        f"[warn] Grounding DINO extension build returned {result.returncode}; "
-        "continuing with the official PyTorch fallback",
-        flush=True,
-    )
-    return "fallback"
-
-
 def download_stream(
     *,
     url: str,
@@ -290,25 +194,6 @@ def torch_load_cpu(path: Path) -> Any:
         return torch.load(path, map_location="cpu", weights_only=True)
     except TypeError:
         return torch.load(path, map_location="cpu")
-
-
-def validate_groundingdino_checkpoint(path: Path) -> None:
-    if not path.is_file() or path.stat().st_size <= 0:
-        raise FileNotFoundError(path)
-    checkpoint = torch_load_cpu(path)
-    if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("model"), dict):
-        raise RuntimeError(
-            f"Invalid Grounding DINO checkpoint structure: {rel(path)}; expected dict['model']"
-        )
-    model_state = checkpoint["model"]
-    if len(model_state) < 100:
-        raise RuntimeError(
-            f"Grounding DINO checkpoint looks incomplete: only {len(model_state)} model tensors"
-        )
-    print(
-        f"[ok] detector checkpoint structure valid ({len(model_state):,} tensors)",
-        flush=True,
-    )
 
 
 def download_clipreid_checkpoint(path: Path, drive_id: str, force: bool) -> None:
@@ -375,139 +260,18 @@ def validate_clipreid_checkpoint(path: Path) -> None:
     print("[ok] CLIP-ReID MSMT17 checkpoint structure valid", flush=True)
 
 
-def configure_hf_cache(cache_root: Path, *, offline: bool) -> Path:
-    hf_home = cache_root / "huggingface"
-    hf_home.mkdir(parents=True, exist_ok=True)
-    os.environ["HF_HOME"] = str(hf_home)
-    os.environ["XDG_CACHE_HOME"] = str(cache_root / "xdg")
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    if offline:
-        os.environ["HF_HUB_OFFLINE"] = "1"
-        os.environ["TRANSFORMERS_OFFLINE"] = "1"
-    else:
-        os.environ.pop("HF_HUB_OFFLINE", None)
-        os.environ.pop("TRANSFORMERS_OFFLINE", None)
-    return hf_home
-
-
-def runtime_cache_inventory(root: Path) -> list[dict[str, Any]]:
-    files: list[dict[str, Any]] = []
-    if not root.is_dir():
-        return files
-    for path in sorted(p for p in root.rglob("*") if p.is_file()):
-        size = int(path.stat().st_size)
-        # Hugging Face lock files may legitimately be zero bytes and are not
-        # runtime assets. Excluding them keeps the inventory stable/reusable.
-        if size <= 0 or ".locks" in path.parts:
-            continue
-        files.append(
-            {
-                "path": str(path.relative_to(root)),
-                "size": size,
-            }
-        )
-    return files
-
-
-def inventory_is_valid(root: Path, files: Any) -> bool:
-    if not isinstance(files, list) or not files:
-        return False
-    for item in files:
-        if not isinstance(item, dict):
-            return False
-        name = item.get("path")
-        size = item.get("size")
-        if not isinstance(name, str) or not isinstance(size, int) or size <= 0:
-            return False
-        path = root / name
-        if not path.is_file() or path.stat().st_size != size:
-            return False
-    return True
-
-
-def prewarm_groundingdino_runtime(
-    *,
-    cache_root: Path,
-    marker: Path,
-    source_commit: str,
-    force: bool,
-) -> None:
-    expected_core = {
-        "preparer_version": PREPARER_VERSION,
-        "source_commit": source_commit,
-        "text_encoder": BERT_MODEL_ID,
-        "hf_home": rel(cache_root / "huggingface"),
-    }
-
-    if marker.is_file() and not force:
-        try:
-            current = json.loads(marker.read_text(encoding="utf-8"))
-        except Exception:
-            current = None
-        if isinstance(current, dict) and all(
-            current.get(key) == value for key, value in expected_core.items()
-        ) and inventory_is_valid(cache_root, current.get("files")):
-            print(f"[skip] {rel(marker)} and runtime cache inventory are valid", flush=True)
-            return
-
-    configure_hf_cache(cache_root, offline=False)
-    try:
-        from transformers import AutoTokenizer, BertModel
-    except ImportError as error:
-        raise RuntimeError(
-            "Missing transformers. Requirements must be installed before checkpoint preparation."
-        ) from error
-
-    print(f"[prepare] Hugging Face assets for {BERT_MODEL_ID}", flush=True)
-    tokenizer = AutoTokenizer.from_pretrained(BERT_MODEL_ID)
-    model = BertModel.from_pretrained(BERT_MODEL_ID)
-    del tokenizer, model
-
-    files = runtime_cache_inventory(cache_root)
-    if not files:
-        raise RuntimeError("Grounding DINO runtime cache is empty after BERT pre-warm")
-
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    payload = {**expected_core, "files": files}
-    marker.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    print(f"[ok] {rel(marker)}", flush=True)
-
-
 def prepare(config_path: Path, force: bool) -> None:
-    tracker = PhaseTracker("groundingdino_clipreid_prepare", total=7)
+    tracker = PhaseTracker("groundingdino_clipreid_prepare", total=4)
     cfg = load_yaml(config_path)
 
-    tracker.advance("Pin official Grounding DINO source")
-    gdino_source = prepare_source(cfg["source"]["groundingdino"], "Grounding DINO")
-    detector_config = gdino_source / str(cfg["detector"]["config"])
-    if not detector_config.is_file():
-        raise FileNotFoundError(detector_config)
-
-    tracker.advance("Prepare Grounding DINO CUDA extension (best effort)")
-    prepare_groundingdino_extension(gdino_source)
+    tracker.advance("Prepare shared detector and selector assets")
+    prepare_shared(force)
 
     tracker.advance("Pin official CLIP-ReID source")
     clipreid_source = prepare_source(cfg["source"]["clip_reid"], "CLIP-ReID")
     clipreid_config = clipreid_source / str(cfg["reid"]["official_config"])
     if not clipreid_config.is_file():
         raise FileNotFoundError(clipreid_config)
-
-    tracker.advance("Prepare Grounding DINO Swin-T checkpoint")
-    detector_checkpoint = resolve_path(str(cfg["detector"]["checkpoint"]))
-    download_stream(
-        url=str(cfg["detector"]["checkpoint_url"]),
-        path=detector_checkpoint,
-        force=force,
-    )
-    try:
-        validate_groundingdino_checkpoint(detector_checkpoint)
-    except Exception:
-        # Do not leave a structurally invalid file that would be mistaken for
-        # an already-prepared checkpoint on the next run.
-        detector_checkpoint.unlink(missing_ok=True)
-        raise
 
     tracker.advance("Prepare CLIP-ReID MSMT17 checkpoint")
     reid_checkpoint = resolve_path(str(cfg["reid"]["checkpoint"]))
@@ -524,16 +288,6 @@ def prepare(config_path: Path, force: bool) -> None:
         path=clip_backbone,
         force=force,
         expected_sha256=OPENAI_CLIP_B16_SHA256,
-    )
-
-    tracker.advance("Pre-warm Grounding DINO BERT runtime assets")
-    cache_root = resolve_path(str(cfg["detector"]["runtime_cache"]))
-    marker = resolve_path(str(cfg["detector"]["runtime_assets_marker"]))
-    prewarm_groundingdino_runtime(
-        cache_root=cache_root,
-        marker=marker,
-        source_commit=str(cfg["source"]["groundingdino"]["commit"]),
-        force=force,
     )
 
     print("[status] Grounding DINO + CLIP-ReID inference artifacts are ready", flush=True)

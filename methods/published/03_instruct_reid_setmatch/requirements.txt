@@ -1,3 +1,4 @@
+-r ../../../cpr_person/requirements.txt
 # Benchmark/runtime
 # Kaggle currently runs CPython 3.12. These two compiled dependencies have
 # official CPython 3.12 Linux wheels, so never fall back to slow/fragile source

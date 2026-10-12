@@ -100,6 +100,8 @@ def s6_sources(cfg,main_g,main_q,val_g,val_q):
     f=cfg['first_stage']; main_scores=resolve(f['scores']); run=read_json(resolve(f['run'])); alpha=read_json(resolve(f['alpha_selection']))
     if not main_scores.is_file() or run is None or run.get('method')!=f['method']:
         raise FileNotFoundError('S11 requires a completed S6 run. Run `python run_baseline.py groundingdino_clipreid_set_text` first.')
+    from cpr_person.adapter import require_person_branch
+    require_person_branch(run, main_g, main_q)
     if alpha is None or not isinstance(alpha.get('selected_alpha'),(int,float)): raise RuntimeError('Missing/stale S6 alpha_selection.json')
     afp=alpha.get('fingerprint')
     if not isinstance(afp,dict) or afp.get('validation_gallery_sha256')!=sha(val_g) or afp.get('validation_queries_sha256')!=sha(val_q):

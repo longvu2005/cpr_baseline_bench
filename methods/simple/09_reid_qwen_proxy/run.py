@@ -37,6 +37,9 @@ if str(ROOT) not in sys.path:
 
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
+from cpr_person.adapter import matching_metadata, manifest_identity
+from cpr_person.adapter import require_person_branch
+from cpr_person.adapter import require_manifest_branch
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "reid_set_qwen_edit_proxy"
 ADAPTER_VERSION = "2026-08-13-v1-hybrid-val-fullmap"
@@ -208,6 +211,8 @@ def build_gallery_index(gallery: Sequence[dict[str, Any]]) -> dict[Any, int]:
 
 
 def ensure_validation_split(main_gallery_manifest: Path, main_query_manifest: Path, val_gallery_manifest: Path, val_query_manifest: Path) -> None:
+    from cpr_person.validation import ensure_separate_queries
+    ensure_separate_queries(main_query_manifest, val_query_manifest)
     for path in (val_gallery_manifest, val_query_manifest):
         if not path.is_file():
             raise FileNotFoundError(
@@ -302,50 +307,26 @@ def select_alpha(*, cfg: dict[str, Any], config_path: Path, main_gallery_manifes
     return float(best_alpha), payload
 
 
-def build_validation_reid_scores(*, cfg: dict[str, Any], config_path: Path, val_gallery_manifest: Path, val_query_manifest: Path, val_gallery: Sequence[dict[str, Any]], val_queries: Sequence[dict[str, Any]], s5, tracker: PhaseTracker) -> np.ndarray:
+def build_validation_reid_scores(*, cfg, config_path, val_gallery_manifest, val_query_manifest,
+                                 val_gallery, val_queries, s5, tracker):
     cache_cfg = cfg["cache"]["validation"]
-    output_path = resolve_path(str(cache_cfg["reid_scores"]))
-    expected_shape = (len(val_queries), len(val_gallery))
-    base_cfg_path = resolve_path(str(cfg["base_set"]["config"]))
+    base_cfg_path = resolve_path(cfg["base_set"]["config"])
     base_cfg = load_yaml(base_cfg_path)
-    extras = {
-        "base_config_sha256": sha256_file(base_cfg_path),
-        "source_commit_groundingdino": str(base_cfg["source"]["groundingdino"]["commit"]),
-        "source_commit_clip_reid": str(base_cfg["source"]["clip_reid"]["commit"]),
-    }
-    expected_meta = branch_score_fingerprint(kind="validation_reid_set", config_path=config_path, gallery_manifest=val_gallery_manifest, query_manifest=val_query_manifest, extras=extras)
-    cached = load_cached_scores(output_path, expected_meta, expected_shape, "validation ReID-Set scores")
+    person, features, query_sets, stats = s5.prepare_person_branch(cfg=base_cfg, config_path=base_cfg_path,
+        gallery_manifest=val_gallery_manifest, query_manifest=val_query_manifest,
+        device=s5.device_from(cfg["runtime"]["device"]), feature_cache=resolve_path(cache_cfg["reid_features"]))
+    output_path = resolve_path(cache_cfg["reid_scores"])
+    fp = {"schema": "shared-reid-branch-v1", "localization": person.localization.fingerprint,
+          "feature_meta": read_json(s5.meta_path(resolve_path(cache_cfg["reid_features"]))),
+          "setmatch": base_cfg["setmatch"]}
+    cached = load_cached_scores(output_path, fp, (len(val_queries),len(val_gallery)), "shared validation ReID")
     if cached is not None:
         return cached
-
-    with tracker.phase("Build validation ReID-Set branch"):
-        device = s5.device_from(str(cfg["runtime"]["device"]))
-        gd_checkout = s5.ensure_clean_pinned_source(base_cfg["source"]["groundingdino"], "Grounding DINO")
-        reid_checkout = s5.ensure_clean_pinned_source(base_cfg["source"]["clip_reid"], "CLIP-ReID")
-        detector_config = gd_checkout / str(base_cfg["detector"]["config"])
-        detector_checkpoint = s5.require_file(resolve_path(str(base_cfg["detector"]["checkpoint"])), "Grounding DINO checkpoint")
-        reid_checkpoint = s5.require_file(resolve_path(str(base_cfg["reid"]["checkpoint"])), "CLIP-ReID checkpoint")
-        clip_backbone = s5.require_file(resolve_path(str(base_cfg["reid"]["openai_clip_checkpoint"])), "OpenAI CLIP ViT-B/16 checkpoint")
-        s5.configure_groundingdino_offline(base_cfg)
-        detection_cache = resolve_path(str(cache_cfg["reid_detections"]))
-        detection_meta = s5.detection_fingerprint(cfg=base_cfg, config_path=base_cfg_path, gallery_manifest=val_gallery_manifest, detector_config=detector_config, detector_checkpoint=detector_checkpoint)
-        loaded = s5.load_detection_cache(detection_cache, detection_meta, len(val_gallery))
-        if loaded is None:
-            offsets, boxes, confidences = s5.compute_detections(cfg=base_cfg, gallery=val_gallery, detector_config=detector_config, detector_checkpoint=detector_checkpoint, device=device)
-            s5.save_detection_cache(detection_cache, detection_meta, offsets, boxes, confidences)
-        else:
-            offsets, boxes, _confidences = loaded
-        feature_cache = resolve_path(str(cache_cfg["reid_features"]))
-        total_persons = int(offsets[-1])
-        feature_shape = (total_persons, int(base_cfg["reid"]["feature_dim"]))
-        feature_meta = s5.feature_fingerprint(cfg=base_cfg, config_path=base_cfg_path, detection_cache=detection_cache, reid_checkpoint=reid_checkpoint, clip_backbone=clip_backbone)
-        features = s5.load_feature_cache(feature_cache, feature_meta, feature_shape)
-        if features is None:
-            features = s5.compute_reid_features(cfg=base_cfg, gallery=val_gallery, offsets=offsets, boxes=boxes, source_root=reid_checkout, checkpoint=reid_checkpoint, clip_backbone=clip_backbone, cache_path=feature_cache, cache_meta=feature_meta, device=device)
-        query_indices = s5.query_gallery_indices(val_queries, s5.build_gallery_index(val_gallery))
-        scores = s5.compute_scores(cfg=base_cfg, queries=val_queries, query_indices=query_indices, features=features, offsets=offsets, output_path=output_path)
-        s5.validate_scores(scores, len(val_queries), len(val_gallery))
-        return save_scores(output_path, np.asarray(scores, dtype=np.float32), expected_meta)
+    scores = s5.compute_scores(cfg=base_cfg, queries=val_queries,
+        query_indices=s5.query_gallery_indices(val_queries, s5.build_gallery_index(val_gallery)),
+        features=features, offsets=person.detections.offsets, output_path=output_path,
+        query_features_list=query_sets)
+    return save_scores(output_path, scores, fp)
 
 
 def build_validation_proxy_scores(*, cfg: dict[str, Any], config_path: Path, val_gallery_manifest: Path, val_query_manifest: Path, val_gallery: Sequence[dict[str, Any]], val_queries: Sequence[dict[str, Any]], s8, tracker: PhaseTracker) -> np.ndarray:
@@ -439,6 +420,10 @@ def main() -> None:
         main_reid_scores = load_source_scores(scores_path=resolve_path(str(cfg["base_set"]["main_scores"])), run_path=resolve_path(str(cfg["base_set"]["main_run"])), expected_method=str(cfg["base_set"]["method"]), shape=expected_shape, label="main ReID-Set")
         main_proxy_scores = load_source_scores(scores_path=resolve_path(str(cfg["proxy"]["main_scores"])), run_path=resolve_path(str(cfg["proxy"]["main_run"])), expected_method=str(cfg["proxy"]["method"]), shape=expected_shape, label="main generated-proxy")
 
+    main_person_protocol = require_person_branch(
+        read_json(resolve_path(cfg["base_set"]["main_run"])), main_gallery_manifest, main_query_manifest)
+    require_manifest_branch(read_json(resolve_path(cfg["proxy"]["main_run"])),
+                            main_gallery_manifest, main_query_manifest)
     val_reid_scores = build_validation_reid_scores(cfg=cfg, config_path=config_path, val_gallery_manifest=val_gallery_manifest, val_query_manifest=val_query_manifest, val_gallery=val_gallery, val_queries=val_queries, s5=s5, tracker=tracker)
     val_proxy_scores = build_validation_proxy_scores(cfg=cfg, config_path=config_path, val_gallery_manifest=val_gallery_manifest, val_query_manifest=val_query_manifest, val_gallery=val_gallery, val_queries=val_queries, s8=s8, tracker=tracker)
 
@@ -462,6 +447,8 @@ def main() -> None:
         output_dir = resolve_path(str(cfg["output"]["dir"]))
         run_path = output_dir / "run.json"
         payload = {
+            "shared_person_protocol": main_person_protocol,
+            "setmatch": matching_metadata(load_yaml(resolve_path(cfg["base_set"]["config"])), score_space="cosine"),
             "method": cfg["method"],
             "display_name": cfg["display_name"],
             "group": cfg["group"],
@@ -487,6 +474,7 @@ def main() -> None:
             "scores": rel(resolve_path(str(cfg["output"]["dir"])) / "scores.npy"),
             "higher_is_better": True,
         }
+        payload["data_fingerprint"] = manifest_identity(payload["shared_person_protocol"])
         write_json(run_path, payload)
         tracker.log(f"scores={rel(resolve_path(str(cfg['output']['dir'])) / 'scores.npy')} run={rel(run_path)}")
 

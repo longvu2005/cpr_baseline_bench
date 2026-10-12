@@ -199,22 +199,13 @@ def main() -> None:
 
     config_path = resolve_path(args.config)
     cfg = load_yaml(config_path)
-    tracker = PhaseTracker("p9_adafocal_prepare", total=4)
+    tracker = PhaseTracker("p9_adafocal_prepare", total=3)
 
     tracker.advance("Prepare shared Grounding DINO assets")
-    cmd = [sys.executable, "-u", "methods/simple/05_reid_set/download_checkpoint.py"]
+    cmd = [sys.executable, "-m", "cpr_person.prepare"]
     if args.force:
         cmd.append("--force")
     run_step(cmd)
-
-    tracker.advance("Prepare OpenAI CLIP ViT-B/32 selector")
-    selector = cfg["selector"]
-    download_url(
-        str(selector["checkpoint_url"]),
-        resolve_path(str(selector["checkpoint"])),
-        str(selector["checkpoint_sha256"]),
-        args.force,
-    )
 
     tracker.advance("Prepare pinned official OACIR source")
     prepare_official_source(cfg)

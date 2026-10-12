@@ -5,7 +5,7 @@ Final score:
     alpha * ReID-Set + (1 - alpha) * CLIP-text
 
 The ReID-Set branch is exactly the S5 adapter (same Grounding DINO detections,
-CLIP-ReID MSMT17 embeddings, Hungarian assignment and strict-min aggregation).
+CLIP-ReID MSMT17 embeddings, shared Subject localization and Partial SetMatch).
 The semantic branch is global OpenAI CLIP ViT-L/14 text-to-gallery similarity.
 By default alpha is fixed, so the baseline is label-free and runnable from a
 clean benchmark checkout. An optional validation mode can select alpha by
@@ -20,7 +20,6 @@ import hashlib
 import importlib.util
 import json
 import math
-import os
 import sys
 from pathlib import Path
 from typing import Any, Sequence
@@ -38,6 +37,7 @@ if str(ROOT) not in sys.path:
 
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
+from cpr_person.adapter import matching_metadata, manifest_identity
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "groundingdino_clipreid_set_text"
 ADAPTER_VERSION = "2026-08-14-v2-fixed-or-val-fusion"
@@ -337,164 +337,29 @@ def s5_score_fingerprint(
     }
 
 
-def prepare_s5_scores(
-    *,
-    s5,
-    s5_cfg: dict[str, Any],
-    s5_cfg_path: Path,
-    gallery_manifest: Path,
-    query_manifest: Path,
-    detection_cache: Path,
-    feature_cache: Path,
-    score_cache: Path,
-    device: torch.device,
-) -> tuple[np.ndarray, dict[str, Any]]:
-    gallery = s5.load_jsonl(gallery_manifest)
-    queries = s5.load_jsonl(query_manifest)
-    gallery_index = s5.build_gallery_index(gallery)
-    query_indices = s5.query_gallery_indices(queries, gallery_index)
-
-    gdino_source = s5.ensure_clean_pinned_source(
-        s5_cfg["source"]["groundingdino"], "Grounding DINO"
-    )
-    clipreid_source = s5.ensure_clean_pinned_source(
-        s5_cfg["source"]["clip_reid"], "CLIP-ReID"
-    )
-    detector_config = s5.require_file(
-        gdino_source / str(s5_cfg["detector"]["config"]), "Grounding DINO config"
-    )
-    detector_checkpoint = s5.require_file(
-        s5.resolve_path(str(s5_cfg["detector"]["checkpoint"])),
-        "Grounding DINO checkpoint",
-    )
-    reid_checkpoint = s5.require_file(
-        s5.resolve_path(str(s5_cfg["reid"]["checkpoint"])), "CLIP-ReID checkpoint"
-    )
-    clip_backbone = s5.require_file(
-        s5.resolve_path(str(s5_cfg["reid"]["openai_clip_checkpoint"])),
-        "OpenAI CLIP ViT-B/16 checkpoint",
-    )
-    s5.configure_groundingdino_offline(s5_cfg)
-    gdino_attention_backend = s5.configure_groundingdino_source(gdino_source)
-
-    # S6 calls S5 helpers directly instead of S5.main(). Preserve S5's
-    # fail-fast CLIP-ReID check, but run it lazily only if a cache miss would
-    # otherwise launch expensive detector/ReID inference.
-    preflight_shape: tuple[int, ...] | None = None
-
-    def ensure_clipreid_preflight() -> tuple[int, ...]:
-        nonlocal preflight_shape
-        if preflight_shape is not None:
-            return preflight_shape
-
-        preflight_model = s5.load_clipreid_model(
-            cfg=s5_cfg,
-            source_root=clipreid_source,
-            checkpoint=reid_checkpoint,
-            clip_backbone=clip_backbone,
-            device=device,
-        )
-        try:
-            preflight_shape = s5.validate_clipreid_forward(
-                model=preflight_model,
-                cfg=s5_cfg,
-                device=device,
-            )
-        finally:
-            del preflight_model
-            if device.type == "cuda":
-                torch.cuda.empty_cache()
-        assert preflight_shape is not None
-        return preflight_shape
-
-    detect_meta = s5.detection_fingerprint(
-        cfg=s5_cfg,
-        config_path=s5_cfg_path,
-        gallery_manifest=gallery_manifest,
-        detector_config=detector_config,
-        detector_checkpoint=detector_checkpoint,
-        attention_backend=gdino_attention_backend,
-    )
-    cached_det = s5.load_detection_cache(detection_cache, detect_meta, len(gallery))
-    detection_hit = cached_det is not None
-    if cached_det is None:
-        ensure_clipreid_preflight()
-        offsets, boxes, confidences = s5.compute_detections(
-            cfg=s5_cfg,
-            gallery=gallery,
-            detector_config=detector_config,
-            detector_checkpoint=detector_checkpoint,
-            device=device,
-        )
-        s5.save_detection_cache(detection_cache, detect_meta, offsets, boxes, confidences)
-    else:
-        offsets, boxes, confidences = cached_det
-
-    feat_meta = s5.feature_fingerprint(
-        cfg=s5_cfg,
-        config_path=s5_cfg_path,
-        detection_cache=detection_cache,
-        reid_checkpoint=reid_checkpoint,
-        clip_backbone=clip_backbone,
-    )
-    expected_feature_shape = (int(offsets[-1]), int(s5_cfg["reid"]["feature_dim"]))
-    features = s5.load_feature_cache(feature_cache, feat_meta, expected_feature_shape)
-    feature_hit = features is not None
-    if features is None:
-        ensure_clipreid_preflight()
-        features = s5.compute_reid_features(
-            cfg=s5_cfg,
-            gallery=gallery,
-            offsets=offsets,
-            boxes=boxes,
-            source_root=clipreid_source,
-            checkpoint=reid_checkpoint,
-            clip_backbone=clip_backbone,
-            cache_path=feature_cache,
-            cache_meta=feat_meta,
-            device=device,
-        )
-
-    fingerprint = s5_score_fingerprint(
-        s5=s5,
-        s5_cfg_path=s5_cfg_path,
-        gallery_manifest=gallery_manifest,
-        query_manifest=query_manifest,
-        detection_cache=detection_cache,
-        feature_cache=feature_cache,
-    )
-    expected_shape = (len(queries), len(gallery))
+def prepare_s5_scores(*, s5, s5_cfg, s5_cfg_path, gallery_manifest, query_manifest,
+                      detection_cache, feature_cache, score_cache, device):
+    person, features, query_sets, stats = s5.prepare_person_branch(cfg=s5_cfg, config_path=s5_cfg_path,
+        gallery_manifest=gallery_manifest, query_manifest=query_manifest, device=device, feature_cache=feature_cache)
+    fingerprint = {"schema": "shared-reid-branch-v1", "native_adapter": s5.ADAPTER_VERSION,
+                   "shared": person.metadata()["localization_fingerprint"],
+                   "features_meta": read_json(s5.meta_path(feature_cache)), "setmatch": s5_cfg["setmatch"]}
+    shape = (len(person.queries), len(person.gallery))
     score_hit = False
     if score_cache.is_file() and read_json(meta_path(score_cache)) == fingerprint:
-        scores = np.load(score_cache, mmap_mode="r", allow_pickle=False)
         try:
-            validate_score_matrix(scores, expected_shape, "cached S5 scores")
+            scores = np.load(score_cache, mmap_mode="r", allow_pickle=False)
+            validate_score_matrix(scores, shape, "shared ReID branch")
             score_hit = True
-        except (TypeError, ValueError):
-            score_hit = False
+        except (OSError, ValueError, TypeError):
+            pass
     if not score_hit:
-        scores = s5.compute_scores(
-            cfg=s5_cfg,
-            queries=queries,
-            query_indices=query_indices,
-            features=features,
-            offsets=offsets,
-            output_path=score_cache,
-        )
+        scores = s5.compute_scores(cfg=s5_cfg, queries=person.queries,
+            query_indices=s5.query_gallery_indices(person.queries, s5.build_gallery_index(person.gallery)),
+            features=features, offsets=person.detections.offsets, output_path=score_cache,
+            query_features_list=query_sets)
         write_json(meta_path(score_cache), fingerprint)
-    else:
-        print(f"Using S5 ReID-Set score cache: {rel(score_cache)}", flush=True)
-
-    return scores, {
-        "detections_hit": detection_hit,
-        "features_hit": feature_hit,
-        "scores_hit": score_hit,
-        "num_detected_persons": int(offsets[-1]),
-        "attention_backend": gdino_attention_backend,
-        "clipreid_preflight_shape": (
-            list(preflight_shape) if preflight_shape is not None else None
-        ),
-    }
+    return scores, {**stats, "scores_hit": score_hit}
 
 
 def full_map(scores: np.ndarray, gallery: Sequence[dict[str, Any]], queries: Sequence[dict[str, Any]]) -> float:
@@ -711,6 +576,8 @@ def main() -> None:
                     f"Expected: {rel(val_gallery_manifest)} and {rel(val_query_manifest)}\n"
                     "Do not point these paths at the canonical evaluation manifests."
                 )
+            from cpr_person.validation import ensure_separate_queries
+            ensure_separate_queries(query_manifest, val_query_manifest)
             if sha256_file(val_query_manifest) == sha256_file(query_manifest):
                 raise RuntimeError(
                     "Validation query manifest is identical to the canonical evaluation "
@@ -906,6 +773,8 @@ def main() -> None:
 
     with tracker.phase("Write reproducibility metadata"):
         run = {
+            "shared_person_protocol": main_s5_stats["shared_person_protocol"],
+            "setmatch": matching_metadata(s5_cfg, score_space="cosine"),
             "method": METHOD_ID,
             "display_name": str(cfg.get("display_name")),
             "group": str(cfg.get("group")),
@@ -919,7 +788,7 @@ def main() -> None:
                     "detector": "Grounding DINO Swin-T",
                     "reid": "CLIP-ReID ViT-B/16 (MSMT17)",
                     "assignment": "maximum-weight Hungarian",
-                    "aggregation": "strict minimum",
+                    "aggregation": "mean over all predicted query components",
                 },
                 "clip_text": {
                     "model": str(cfg["clip_text"]["name"]),
@@ -987,6 +856,7 @@ def main() -> None:
             "higher_is_better": True,
         }
         run_path = output_dir / "run.json"
+        run["data_fingerprint"] = manifest_identity(run["shared_person_protocol"])
         write_json(run_path, run)
         tracker.log(f"scores={rel(scores_path)} run={rel(run_path)} alpha={alpha:.2f}")
 

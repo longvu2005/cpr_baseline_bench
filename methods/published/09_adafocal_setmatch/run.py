@@ -6,7 +6,7 @@ Main-table adaptation:
   * CLIP ViT-B/32 + Hungarian for subject -> predicted query-person anchor
   * official AdaFocal scalar query branch on full reference image + predicted bbox
   * official AdaFocal target branch on detected gallery-person crops
-  * SetMatch: Hungarian max-sum followed by strict-min aggregation
+  * SetMatch: shared Partial SetMatch with mean aggregation
 """
 
 from __future__ import annotations
@@ -25,12 +25,10 @@ import types
 from pathlib import Path
 from typing import Any, Sequence
 
-import clip
 import numpy as np
 import torch
 import yaml
 from PIL import Image
-from scipy.optimize import linear_sum_assignment
 
 ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
@@ -38,9 +36,13 @@ if str(ROOT) not in sys.path:
 
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
+from cpr_person.adapter import load_person_context, matching_metadata, manifest_identity
+from cpr_person.cache import feature_config_hash
+from cpr_person.detection import protocol_config
+from cpr_person.matching import aggregate_people
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "adafocal_setmatch"
-ADAPTER_VERSION = "2026-10-09-v4-stage2-text-routing"
+ADAPTER_VERSION = "2026-10-12-shared-person-v1"
 TARGET_FEATURE_SCHEMA = 1
 
 
@@ -805,116 +807,6 @@ def query_compose_text(query: dict[str, Any], subject: dict[str, Any]) -> str:
     raise ValueError(f"Query {query.get('query_id')} has no usable modification text")
 
 
-@torch.no_grad()
-def clip_image_features(
-    model,
-    preprocess,
-    crops: list[Image.Image],
-    batch_size: int,
-    device: torch.device,
-) -> np.ndarray:
-    chunks: list[np.ndarray] = []
-    for start in range(0, len(crops), batch_size):
-        batch = torch.stack(
-            [preprocess(im) for im in crops[start : start + batch_size]], dim=0
-        ).to(device, non_blocking=True)
-        feat = model.encode_image(batch).float()
-        feat /= feat.norm(dim=1, keepdim=True).clamp_min(1e-12)
-        chunks.append(feat.cpu().numpy())
-    return np.concatenate(chunks, axis=0).astype(np.float32, copy=False)
-
-
-@torch.no_grad()
-def clip_text_features(
-    model,
-    texts: list[str],
-    batch_size: int,
-    device: torch.device,
-) -> np.ndarray:
-    chunks: list[np.ndarray] = []
-    for start in range(0, len(texts), batch_size):
-        tokens = clip.tokenize(texts[start : start + batch_size], truncate=True).to(device)
-        feat = model.encode_text(tokens).float()
-        feat /= feat.norm(dim=1, keepdim=True).clamp_min(1e-12)
-        chunks.append(feat.cpu().numpy())
-    return np.concatenate(chunks, axis=0).astype(np.float32, copy=False)
-
-
-def hungarian_maximize(similarity: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    try:
-        return linear_sum_assignment(similarity, maximize=True)
-    except TypeError:
-        return linear_sum_assignment(-similarity)
-
-
-def select_subject_boxes(
-    *,
-    query: dict[str, Any],
-    image: Image.Image,
-    boxes: np.ndarray,
-    selector_model,
-    selector_preprocess,
-    selector_device: torch.device,
-    image_batch_size: int,
-    text_batch_size: int,
-) -> tuple[list[list[float]], list[str]] | None:
-    subjects = query.get("subjects")
-    if not isinstance(subjects, list) or not subjects:
-        return None
-    m = len(subjects)
-    if len(boxes) < m:
-        return None
-
-    crops: list[Image.Image] = []
-    valid_boxes: list[list[float]] = []
-    for box in boxes:
-        left = max(0, int(math.floor(float(box[0]))))
-        top = max(0, int(math.floor(float(box[1]))))
-        right = min(image.width, int(math.ceil(float(box[2]))))
-        bottom = min(image.height, int(math.ceil(float(box[3]))))
-        if right <= left or bottom <= top:
-            continue
-        crops.append(image.crop((left, top, right, bottom)))
-        valid_boxes.append([float(box[0]), float(box[1]), float(box[2]), float(box[3])])
-
-    if len(crops) < m:
-        return None
-
-    select_texts: list[str] = []
-    compose_texts: list[str] = []
-    for si, subject in enumerate(subjects):
-        if not isinstance(subject, dict):
-            raise TypeError(f"Query {query.get('query_id')}: subject {si} is not an object")
-        select_text = str(subject.get("select_text") or "").strip()
-        if not select_text:
-            raise ValueError(f"Query {query.get('query_id')}: subject {si} has empty select_text")
-        select_texts.append(select_text)
-        compose_texts.append(query_compose_text(query, subject))
-
-    person_feat = clip_image_features(
-        selector_model,
-        selector_preprocess,
-        crops,
-        image_batch_size,
-        selector_device,
-    )
-    text_feat = clip_text_features(
-        selector_model, select_texts, text_batch_size, selector_device
-    )
-    sim = text_feat @ person_feat.T
-
-    if m == 1:
-        assignment = np.asarray([int(np.argmax(sim[0]))], dtype=np.int64)
-    else:
-        rows, cols = hungarian_maximize(sim)
-        if len(rows) != m:
-            return None
-        assignment = cols[np.argsort(rows)].astype(np.int64, copy=False)
-
-    selected = [valid_boxes[int(i)] for i in assignment]
-    return selected, compose_texts
-
-
 def target_feature_fingerprint(
     *,
     cfg: dict[str, Any],
@@ -926,8 +818,9 @@ def target_feature_fingerprint(
     return {
         "schema": TARGET_FEATURE_SCHEMA,
         "adapter_version": ADAPTER_VERSION,
-        "config_sha256": sha256_file(config_path),
+        "feature_config_sha256": feature_config_hash(config_path),
         "detection_cache_sha256": sha256_file(detection_cache),
+        "shared_detection_identity": detection_cache.parent.name,
         "adafocal_checkpoint_sha256": sha256_file(checkpoint),
         "official_source_commit": source_commit,
         "target_candidate": str(cfg["adaptation"]["target_candidate"]),
@@ -1183,70 +1076,8 @@ def score_query_anchors_against_persons(
     return result
 
 
-def aggregate_setmatch(
-    *,
-    pair_scores: np.ndarray,
-    offsets: np.ndarray,
-    unmatched_score: float,
-) -> np.ndarray:
-    """Image-level SetMatch: max-sum assignment then strict minimum of assigned pairs."""
-    counts = np.diff(offsets).astype(np.int64, copy=False)
-    num_gallery = len(counts)
-    m = int(pair_scores.shape[0])
-    result = np.full(num_gallery, unmatched_score, dtype=np.float32)
-
-    if m == 0:
-        return result
-
-    if m == 1:
-        total_persons = int(offsets[-1])
-        person_image_index = np.repeat(
-            np.arange(num_gallery, dtype=np.int64), counts
-        )
-        if person_image_index.shape != (total_persons,):
-            raise RuntimeError("Person-to-image index shape mismatch")
-        image_scores = np.full(num_gallery, -np.inf, dtype=np.float32)
-        np.maximum.at(image_scores, person_image_index, pair_scores[0])
-        nonempty = counts > 0
-        result[nonempty] = image_scores[nonempty]
-        return result
-
-    eligible = np.flatnonzero(counts >= m)
-
-    # Fast exact specialization for two-person matching.
-    if m == 2:
-        for gi in eligible:
-            start, end = int(offsets[gi]), int(offsets[gi + 1])
-            s0 = pair_scores[0, start:end]
-            s1 = pair_scores[1, start:end]
-            i0 = int(np.argmax(s0))
-            i1 = int(np.argmax(s1))
-            if i0 != i1:
-                assigned0, assigned1 = float(s0[i0]), float(s1[i1])
-            else:
-                if len(s0) < 2:
-                    continue
-                second0 = int(np.argpartition(s0, -2)[-2])
-                second1 = int(np.argpartition(s1, -2)[-2])
-                option_a = float(s0[i0] + s1[second1])
-                option_b = float(s0[second0] + s1[i1])
-                if option_a >= option_b:
-                    assigned0, assigned1 = float(s0[i0]), float(s1[second1])
-                else:
-                    assigned0, assigned1 = float(s0[second0]), float(s1[i1])
-            result[gi] = min(assigned0, assigned1)
-        return result
-
-    for gi in eligible:
-        start, end = int(offsets[gi]), int(offsets[gi + 1])
-        similarity = pair_scores[:, start:end]
-        rows, cols = hungarian_maximize(similarity)
-        if len(rows) != m:
-            raise RuntimeError(
-                f"Hungarian returned {len(rows)} assignments for query set size {m}"
-            )
-        result[gi] = float(np.min(similarity[rows, cols]))
-    return result
+def aggregate_setmatch(*, pair_scores, offsets, unmatched_score):
+    return aggregate_people(pair_scores, offsets, unmatched_score)
 
 
 def validate_scores(scores: np.ndarray, expected_shape: tuple[int, int]) -> None:
@@ -1283,7 +1114,7 @@ def main() -> None:
     with tracker.phase("Load selector and official AdaFocal"):
         device = device_from(str(cfg["runtime"]["device"]))
 
-        selector_checkpoint = resolve_path(str(cfg["selector"]["checkpoint"]))
+        selector_checkpoint = resolve_path(str(protocol_config()["selector"]["checkpoint"]))
         if not selector_checkpoint.is_file():
             raise FileNotFoundError(
                 f"Missing selector checkpoint: {rel(selector_checkpoint)}"
@@ -1291,13 +1122,6 @@ def main() -> None:
         selector_sha = sha256_file(selector_checkpoint)
         if selector_sha != str(cfg["selector"]["checkpoint_sha256"]):
             raise RuntimeError("CLIP ViT-B/32 selector checkpoint checksum mismatch")
-        selector_model, selector_preprocess = clip.load(
-            str(selector_checkpoint), device=device, jit=False
-        )
-        selector_model.eval()
-        if device.type != "cuda":
-            selector_model.float()
-
         oacir_checkout = ensure_clean_pinned_source(cfg)
         (
             adafocal,
@@ -1322,51 +1146,10 @@ def main() -> None:
         )
         return
 
-    with tracker.phase("Prepare shared predicted person detections"):
-        s5_method_dir = resolve_path(str(cfg["shared_protocol"]["method_dir"]))
-        s5_config_path = resolve_path(str(cfg["shared_protocol"]["config"]))
-        s5_cfg = load_yaml(s5_config_path)
-        s5 = load_module(s5_method_dir, "cpr_p9_source_s5")
-        detector_device = s5.device_from(str(s5_cfg["runtime"]["device"]))
-
-        gd_checkout = s5.ensure_clean_pinned_source(
-            s5_cfg["source"]["groundingdino"], "Grounding DINO"
-        )
-        detector_config = s5.require_file(
-            gd_checkout / str(s5_cfg["detector"]["config"]), "Grounding DINO config"
-        )
-        detector_checkpoint = s5.require_file(
-            resolve_path(str(s5_cfg["detector"]["checkpoint"])),
-            "Grounding DINO checkpoint",
-        )
-        s5.configure_groundingdino_offline(s5_cfg)
-        attention_backend = s5.configure_groundingdino_source(gd_checkout)
-
-        detection_cache = resolve_path(str(cfg["cache"]["detections"]))
-        det_meta = s5.detection_fingerprint(
-            cfg=s5_cfg,
-            config_path=s5_config_path,
-            gallery_manifest=gallery_manifest,
-            detector_config=detector_config,
-            detector_checkpoint=detector_checkpoint,
-            attention_backend=attention_backend,
-        )
-        loaded = s5.load_detection_cache(detection_cache, det_meta, len(gallery))
-        if loaded is None:
-            offsets, boxes, confidence = s5.compute_detections(
-                cfg=s5_cfg,
-                gallery=gallery,
-                detector_config=detector_config,
-                detector_checkpoint=detector_checkpoint,
-                device=detector_device,
-            )
-            s5.save_detection_cache(
-                detection_cache, det_meta, offsets, boxes, confidence
-            )
-        else:
-            offsets, boxes, confidence = loaded
-        del confidence
-        tracker.log(f"predicted_persons={int(offsets[-1]):,}")
+    with tracker.phase("Consume shared candidates and Subject memberships"):
+        person = load_person_context(gallery, queries, gallery_manifest, query_manifest, device)
+        detection_cache, offsets, boxes = person.detections.path, person.detections.offsets, person.detections.boxes
+        attention_backend = protocol_config()["detector"]["attention_backend"]
 
     with tracker.phase("Prepare AdaFocal gallery-person target features"):
         checkpoint = resolve_path(str(cfg["adafocal"]["checkpoint"]))
@@ -1430,25 +1213,14 @@ def main() -> None:
             )
         ):
             source_gi = int(query_indices[qi])
-            start, end = int(offsets[source_gi]), int(offsets[source_gi + 1])
-            source_boxes = np.asarray(boxes[start:end], dtype=np.float32)
 
             try:
                 with Image.open(image_path(gallery[source_gi], source_gi)) as opened:
                     image = opened.convert("RGB")
-                    selected = select_subject_boxes(
-                        query=query,
-                        image=image,
-                        boxes=source_boxes,
-                        selector_model=selector_model,
-                        selector_preprocess=selector_preprocess,
-                        selector_device=device,
-                        image_batch_size=int(cfg["runtime"]["selector_image_batch_size"]),
-                        text_batch_size=int(cfg["runtime"]["selector_text_batch_size"]),
-                    )
-                    if selected is None:
-                        raise RuntimeError("could_not_localize_all_subjects")
-                    selected_boxes, modification_texts = selected
+                    selected_members = person.localization.flat(qi)
+                    selected_boxes = [member["box"] for si, member in selected_members]
+                    modification_texts = [query_compose_text(query, query["subjects"][si])
+                                          for si, member in selected_members]
 
                     transformed_boxes: list[list[int]] = []
                     for box in selected_boxes:
@@ -1522,6 +1294,7 @@ def main() -> None:
 
     with tracker.phase("Write run metadata"):
         run_payload = {
+            "shared_person_protocol": person.metadata(),
             "method": cfg["method"],
             "display_name": cfg["display_name"],
             "group": cfg["group"],
@@ -1548,7 +1321,7 @@ def main() -> None:
                 "gt_box_used": False,
             },
             "gallery_candidates": "shared-detector person crops encoded by official AdaFocal target branch",
-            "setmatch": cfg["setmatch"],
+            "setmatch": matching_metadata(cfg, score_space="cosine_max_over_target_tokens"),
             "relational_text_behavior": cfg["adaptation"]["relational_text_behavior"],
             "groundingdino_attention_backend": attention_backend,
             "num_queries": len(queries),
@@ -1560,6 +1333,7 @@ def main() -> None:
             "higher_is_better": True,
             "config": rel(config_path),
         }
+        run_payload["data_fingerprint"] = manifest_identity(run_payload["shared_person_protocol"])
         write_json(output_dir / "run.json", run_payload)
         tracker.log(f"run={rel(output_dir / 'run.json')}")
 

@@ -1,5 +1,10 @@
 # CPR Baseline Benchmark
 
+Person-level baselines now use the shared predicted-person protocol in `cpr_person/`:
+Grounding DINO, CLIP Subject membership and Partial SetMatch. Native scene-level
+methods retain their inference paths. See [protocol, method coverage, caches and run commands](docs/baselines.md).
+
+
 This repository provides a common evaluation protocol for Composed Person Retrieval (CPR) baselines.
 
 Each method may keep its own implementation and method-specific dependencies, but every method must use the same canonical data, score-matrix contract, evaluator, and table builder.
@@ -445,7 +450,7 @@ aggregation of assigned target scores
 behavior when a gallery image has fewer persons than targets
 ```
 
-The current published adapters use maximum-weight one-to-one matching and an AND-style minimum over the assigned target scores, with an explicit unmatched score for missing person slots.
+The affected person adapters use the shared protocol in `cpr_person/`: maximum-sum rectangular Hungarian with exactly `min(K,N)` real pairs, followed by `(matched_sum + (K-min(K,N))*b) / K`. All Subjects can have multiple predicted members, including GROUP. Native model pair scores and preprocessing are preserved. Fixed, score-space-specific unmatched references are documented in [docs/baselines.md](docs/baselines.md).
 
 ---
 

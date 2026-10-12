@@ -21,15 +21,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Sequence
 
-import clip
 import numpy as np
 import torch
 import yaml
 from PIL import Image
-from scipy.optimize import linear_sum_assignment
 from torchvision import transforms as TVT
-from torchvision.models.detection import fasterrcnn_resnet50_fpn_v2
-from torchvision.transforms import functional as TVF
 
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 os.environ["HF_HUB_OFFLINE"] = "1"
@@ -42,9 +38,13 @@ if str(ROOT) not in sys.path:
 
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
+from cpr_person.adapter import load_person_context, matching_metadata, manifest_identity
+from cpr_person.matching import score_feature_sets
+from cpr_person.detection import crop_person as crop_box
+from cpr_person.calibration import apply_instruct_calibration
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "instruct_reid_setmatch"
-ADAPTER_VERSION = "2026-08-13-v1-official-language-reid-setmatch"
+ADAPTER_VERSION = "2026-10-12-shared-person-v1"
 DETECTION_CACHE_SCHEMA = 1
 SELECTOR_CACHE_SCHEMA = 1
 GALLERY_FEATURE_CACHE_SCHEMA = 1
@@ -203,153 +203,6 @@ def query_gallery_indices(
     return np.asarray(indices, dtype=np.int64)
 
 
-def validate_detection_arrays(
-    offsets: np.ndarray, boxes: np.ndarray, confidences: np.ndarray, num_images: int
-) -> None:
-    if offsets.shape != (num_images + 1,):
-        raise ValueError(f"Detection offsets shape={offsets.shape}, expected {(num_images + 1,)}")
-    if offsets.dtype.kind not in "iu" or int(offsets[0]) != 0 or np.any(np.diff(offsets) < 0):
-        raise ValueError("Detection offsets must be monotonic integers starting at zero")
-    if boxes.shape != (int(offsets[-1]), 4):
-        raise ValueError("Detection box count does not match offsets")
-    if confidences.shape != (int(offsets[-1]),):
-        raise ValueError("Detection confidence count does not match offsets")
-    if not np.isfinite(boxes).all() or not np.isfinite(confidences).all():
-        raise ValueError("Detection cache contains NaN/Inf")
-    if len(boxes) and np.any((boxes[:, 2] <= boxes[:, 0]) | (boxes[:, 3] <= boxes[:, 1])):
-        raise ValueError("Detection cache contains invalid xyxy boxes")
-
-
-def detection_fingerprint(
-    cfg: dict[str, Any], gallery_manifest: Path, detector_checkpoint: Path
-) -> dict[str, Any]:
-    detector = cfg["localization"]["detector"]
-    return {
-        "schema": DETECTION_CACHE_SCHEMA,
-        "adapter_version": ADAPTER_VERSION,
-        "gallery_manifest_sha256": sha256_file(gallery_manifest),
-        "detector_checkpoint_sha256": sha256_file(detector_checkpoint),
-        "backend": str(detector["backend"]),
-        "score_threshold": float(detector["score_threshold"]),
-        "max_persons_per_image": int(detector["max_persons_per_image"]),
-        "person_label": int(detector["person_label"]),
-    }
-
-
-def load_detection_cache(
-    path: Path, expected_meta: dict[str, Any], num_images: int
-) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-    if not path.is_file() or read_json(meta_path(path)) != expected_meta:
-        return None
-    try:
-        with np.load(path, allow_pickle=False) as data:
-            offsets = np.asarray(data["offsets"], dtype=np.int64)
-            boxes = np.asarray(data["boxes"], dtype=np.float32)
-            confidences = np.asarray(data["confidences"], dtype=np.float32)
-        validate_detection_arrays(offsets, boxes, confidences, num_images)
-    except Exception as error:
-        print(f"Ignoring invalid detection cache {rel(path)}: {error}", flush=True)
-        return None
-    print(f"Using person-detection cache: {rel(path)}", flush=True)
-    return offsets, boxes, confidences
-
-
-def save_detection_cache(
-    path: Path,
-    cache_meta: dict[str, Any],
-    offsets: np.ndarray,
-    boxes: np.ndarray,
-    confidences: np.ndarray,
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(path.name + ".part")
-    temp.unlink(missing_ok=True)
-    try:
-        with temp.open("wb") as handle:
-            np.savez(handle, offsets=offsets, boxes=boxes, confidences=confidences)
-        os.replace(temp, path)
-        write_json(meta_path(path), cache_meta)
-    except Exception:
-        temp.unlink(missing_ok=True)
-        raise
-
-
-@torch.no_grad()
-def compute_detections(
-    cfg: dict[str, Any], gallery: Sequence[dict[str, Any]], checkpoint: Path, device: torch.device
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    detector_cfg = cfg["localization"]["detector"]
-    model = fasterrcnn_resnet50_fpn_v2(weights=None, weights_backbone=None)
-    try:
-        state = torch.load(checkpoint, map_location="cpu", weights_only=True)
-    except TypeError:
-        state = torch.load(checkpoint, map_location="cpu")
-    model.load_state_dict(state, strict=True)
-    model.to(device).eval()
-
-    threshold = float(detector_cfg["score_threshold"])
-    person_label = int(detector_cfg["person_label"])
-    max_persons = int(detector_cfg["max_persons_per_image"])
-    offsets = np.zeros(len(gallery) + 1, dtype=np.int64)
-    boxes_all: list[np.ndarray] = []
-    conf_all: list[np.ndarray] = []
-    total = 0
-
-    for gi, row in enumerate(progress_bar(gallery, desc="Detect persons", total=len(gallery), unit="image")):
-        with Image.open(image_path(row, gi)) as handle:
-            tensor = TVF.to_tensor(handle.convert("RGB")).to(device)
-        output = model([tensor])[0]
-        labels = output["labels"]
-        scores = output["scores"]
-        boxes = output["boxes"]
-        keep = (labels == person_label) & (scores >= threshold)
-        boxes = boxes[keep]
-        scores = scores[keep]
-        if len(scores):
-            order = torch.argsort(scores, descending=True)[:max_persons]
-            boxes = boxes[order]
-            scores = scores[order]
-            box_np = boxes.detach().cpu().numpy().astype(np.float32, copy=False)
-            conf_np = scores.detach().cpu().numpy().astype(np.float32, copy=False)
-        else:
-            box_np = np.empty((0, 4), dtype=np.float32)
-            conf_np = np.empty((0,), dtype=np.float32)
-        boxes_all.append(box_np)
-        conf_all.append(conf_np)
-        total += len(box_np)
-        offsets[gi + 1] = total
-
-    del model
-    torch.cuda.empty_cache()
-    boxes_np = np.concatenate(boxes_all, axis=0) if total else np.empty((0, 4), np.float32)
-    conf_np = np.concatenate(conf_all, axis=0) if total else np.empty((0,), np.float32)
-    validate_detection_arrays(offsets, boxes_np, conf_np, len(gallery))
-    return offsets, boxes_np, conf_np
-
-
-def crop_box(image: Image.Image, box: np.ndarray) -> Image.Image:
-    left = max(0, int(math.floor(float(box[0]))))
-    top = max(0, int(math.floor(float(box[1]))))
-    right = min(image.width, int(math.ceil(float(box[2]))))
-    bottom = min(image.height, int(math.ceil(float(box[3]))))
-    if right <= left or bottom <= top:
-        raise RuntimeError(f"Invalid crop box: {box.tolist()}")
-    return image.crop((left, top, right, bottom))
-
-
-def selector_fingerprint(
-    detection_cache: Path, selector_checkpoint: Path, gallery_manifest: Path
-) -> dict[str, Any]:
-    return {
-        "schema": SELECTOR_CACHE_SCHEMA,
-        "adapter_version": ADAPTER_VERSION,
-        "detection_cache_sha256": sha256_file(detection_cache),
-        "selector_checkpoint_sha256": sha256_file(selector_checkpoint),
-        "gallery_manifest_sha256": sha256_file(gallery_manifest),
-        "selector_model": "ViT-B/32",
-    }
-
-
 def load_array_cache(
     path: Path, expected_meta: dict[str, Any], expected_shape: tuple[int, ...], label: str
 ) -> np.ndarray | None:
@@ -367,95 +220,6 @@ def load_array_cache(
     return array
 
 
-@torch.no_grad()
-def compute_selector_person_features(
-    *,
-    gallery: Sequence[dict[str, Any]],
-    offsets: np.ndarray,
-    boxes: np.ndarray,
-    model,
-    preprocess,
-    device: torch.device,
-    cache_path: Path,
-    cache_meta: dict[str, Any],
-    batch_size: int,
-) -> np.ndarray:
-    total = int(offsets[-1])
-    feature_dim = int(model.text_projection.shape[1])
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    temp = cache_path.with_name(cache_path.name + ".part")
-    temp.unlink(missing_ok=True)
-    mmap = np.lib.format.open_memmap(temp, mode="w+", dtype=np.float16, shape=(total, feature_dim))
-    pending: list[torch.Tensor] = []
-    cursor = 0
-
-    def flush() -> None:
-        nonlocal pending, cursor
-        if not pending:
-            return
-        batch = torch.stack(pending).to(device, non_blocking=True)
-        feat = model.encode_image(batch).float()
-        feat /= feat.norm(dim=1, keepdim=True).clamp_min(1e-12)
-        count = len(feat)
-        mmap[cursor : cursor + count] = feat.cpu().numpy().astype(np.float16)
-        cursor += count
-        pending = []
-
-    try:
-        for gi, row in enumerate(progress_bar(gallery, desc="Encode selector person crops", total=len(gallery), unit="image")):
-            start, end = int(offsets[gi]), int(offsets[gi + 1])
-            if end <= start:
-                continue
-            with Image.open(image_path(row, gi)) as handle:
-                image = handle.convert("RGB")
-                for box in boxes[start:end]:
-                    pending.append(preprocess(crop_box(image, box)))
-                    if len(pending) >= batch_size:
-                        flush()
-        flush()
-        if cursor != total:
-            raise RuntimeError(f"Selector encoded {cursor} persons, expected {total}")
-        mmap.flush()
-        del mmap
-        os.replace(temp, cache_path)
-        write_json(meta_path(cache_path), cache_meta)
-    except Exception:
-        try:
-            del mmap
-        except Exception:
-            pass
-        temp.unlink(missing_ok=True)
-        raise
-    return np.load(cache_path, mmap_mode="r", allow_pickle=False)
-
-
-def selector_text(subject: dict[str, Any], query: dict[str, Any], fallback_order: Sequence[str]) -> str:
-    for field in fallback_order:
-        if field == "text":
-            value = query.get("text")
-        else:
-            value = subject.get(field)
-        text = str(value or "").strip()
-        if text:
-            return text
-    raise ValueError(f"Query {query.get('query_id')} subject has no usable selector text")
-
-
-@torch.no_grad()
-def encode_clip_texts(model, texts: list[str], device: torch.device) -> np.ndarray:
-    tokens = clip.tokenize(texts, truncate=True).to(device)
-    feat = model.encode_text(tokens).float()
-    feat /= feat.norm(dim=1, keepdim=True).clamp_min(1e-12)
-    return feat.cpu().numpy().astype(np.float32, copy=False)
-
-
-def hungarian_maximize(similarity: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    try:
-        return linear_sum_assignment(similarity, maximize=True)
-    except TypeError:
-        return linear_sum_assignment(-similarity)
-
-
 def modification_instruction(query: dict[str, Any], subject: dict[str, Any]) -> str:
     # RELATIONAL adaptation without consuming the `case` annotation: the presence
     # of relation_text tells us to preserve the full multi-person instruction.
@@ -470,58 +234,6 @@ def modification_instruction(query: dict[str, Any], subject: dict[str, Any]) -> 
     if full:
         return full
     raise ValueError(f"Query {query.get('query_id')} has no usable modification instruction")
-
-
-def localize_query_targets(
-    *,
-    queries: Sequence[dict[str, Any]],
-    query_indices: np.ndarray,
-    offsets: np.ndarray,
-    selector_features: np.ndarray,
-    selector_model,
-    device: torch.device,
-    fallback_order: Sequence[str],
-) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    for qi, query in enumerate(progress_bar(queries, desc="Localize query targets", total=len(queries), unit="query")):
-        subjects = query.get("subjects")
-        if not isinstance(subjects, list) or not subjects:
-            result.append({"valid": False, "reason": "no_subjects", "targets": []})
-            continue
-        source_gi = int(query_indices[qi])
-        start, end = int(offsets[source_gi]), int(offsets[source_gi + 1])
-        num_detected = end - start
-        if num_detected < len(subjects):
-            result.append({"valid": False, "reason": "too_few_predicted_persons", "targets": []})
-            continue
-        try:
-            texts = [selector_text(subject, query, fallback_order) for subject in subjects]
-            instructions = [modification_instruction(query, subject) for subject in subjects]
-        except Exception as error:
-            result.append({"valid": False, "reason": f"text_error:{error}", "targets": []})
-            continue
-        text_feat = encode_clip_texts(selector_model, texts, device)
-        person_feat = np.asarray(selector_features[start:end], dtype=np.float32)
-        similarity = text_feat @ person_feat.T
-        if len(subjects) == 1:
-            cols = np.asarray([int(np.argmax(similarity[0]))], dtype=np.int64)
-        else:
-            rows, raw_cols = hungarian_maximize(similarity)
-            if len(rows) != len(subjects):
-                result.append({"valid": False, "reason": "hungarian_localization_failed", "targets": []})
-                continue
-            order = np.argsort(rows)
-            cols = raw_cols[order].astype(np.int64, copy=False)
-        targets = [
-            {
-                "source_gallery_index": source_gi,
-                "global_person_index": start + int(col),
-                "instruction": instructions[si],
-            }
-            for si, col in enumerate(cols)
-        ]
-        result.append({"valid": True, "reason": None, "targets": targets})
-    return result
 
 
 def pre_caption(text: str, max_words: int) -> str:
@@ -665,6 +377,7 @@ def gallery_feature_fingerprint(
         "adapter_version": ADAPTER_VERSION,
         "source_commit": str(cfg["source"]["commit"]),
         "detection_cache_sha256": sha256_file(detection_cache),
+        "shared_detection_identity": detection_cache.parent.name,
         "checkpoint_sha256": sha256_file(checkpoint),
         "bert_weight_sha256": sha256_file(bert_weight),
         "config_bert_sha256": sha256_file(config_bert),
@@ -736,12 +449,12 @@ def compute_gallery_instruct_features(
         if cursor != total:
             raise RuntimeError(f"Encoded {cursor} gallery persons, expected {total}")
         mmap.flush()
-        del mmap
+        mmap = None
         os.replace(temp, cache_path)
         write_json(meta_path(cache_path), cache_meta)
     except Exception:
         try:
-            del mmap
+            mmap = None
         except Exception:
             pass
         temp.unlink(missing_ok=True)
@@ -763,7 +476,7 @@ def query_feature_fingerprint(
     compact_localization = [
         {
             "valid": bool(item.get("valid")),
-            "global_person_indices": [int(t["global_person_index"]) for t in item.get("targets", [])],
+            "predicted_boxes": [t["box"] for t in item.get("targets", [])],
             "instructions": [str(t["instruction"]) for t in item.get("targets", [])],
         }
         for item in localization
@@ -774,6 +487,7 @@ def query_feature_fingerprint(
         "source_commit": str(cfg["source"]["commit"]),
         "query_manifest_sha256": sha256_file(query_manifest),
         "detection_cache_sha256": sha256_file(detection_cache),
+        "shared_detection_identity": detection_cache.parent.name,
         "selector_cache_sha256": sha256_file(selector_cache),
         "checkpoint_sha256": sha256_file(checkpoint),
         "bert_weight_sha256": sha256_file(bert_weight),
@@ -831,7 +545,7 @@ def compute_query_instruct_features(
                 tasks.append(
                     (
                         int(target["source_gallery_index"]),
-                        int(target["global_person_index"]),
+                        np.asarray(target["box"], dtype=np.float32),
                         pre_caption(str(target["instruction"]), max_words),
                     )
                 )
@@ -855,12 +569,12 @@ def compute_query_instruct_features(
         pending_indices = []
 
     # Grouping by task rather than query keeps exact query-target order while batching model calls.
-    for ti, (source_gi, global_person_index, instruction) in enumerate(
+    for ti, (source_gi, predicted_box, instruction) in enumerate(
         progress_bar(tasks, desc="Encode query targets with Instruct-ReID", total=len(tasks), unit="target")
     ):
         with Image.open(image_path(gallery[source_gi], source_gi)) as handle:
             image = handle.convert("RGB")
-            pending_images.append(transform(crop_box(image, boxes[global_person_index])))
+            pending_images.append(transform(crop_box(image, predicted_box)))
         pending_texts.append(instruction)
         pending_indices.append(ti)
         if len(pending_images) >= batch_size:
@@ -894,49 +608,10 @@ def negative_squared_euclidean(query: np.ndarray, gallery: np.ndarray) -> np.nda
     )
 
 
-def score_one_query(
-    *,
-    query_features: np.ndarray,
-    gallery_features: np.ndarray,
-    offsets: np.ndarray,
-    counts: np.ndarray,
-    person_image_index: np.ndarray,
-    unmatched_score: float,
-    person_chunk_size: int,
-) -> np.ndarray:
-    num_gallery = len(counts)
-    m = int(query_features.shape[0])
-    result = np.full(num_gallery, unmatched_score, dtype=np.float32)
-    if m == 0:
-        return result
-
-    q = np.asarray(query_features, dtype=np.float32)
-    if m == 1:
-        total_persons = int(offsets[-1])
-        if total_persons == 0:
-            return result
-        person_scores = np.empty(total_persons, dtype=np.float32)
-        q_norm = float(np.dot(q[0], q[0]))
-        for start in range(0, total_persons, person_chunk_size):
-            end = min(start + person_chunk_size, total_persons)
-            g = np.asarray(gallery_features[start:end], dtype=np.float32)
-            person_scores[start:end] = -(q_norm + np.sum(g * g, axis=1) - 2.0 * (g @ q[0]))
-        image_scores = np.full(num_gallery, -np.inf, dtype=np.float32)
-        np.maximum.at(image_scores, person_image_index, person_scores)
-        nonempty = counts > 0
-        result[nonempty] = image_scores[nonempty]
-        return result
-
-    eligible = np.flatnonzero(counts >= m)
-    for gi in eligible:
-        start, end = int(offsets[gi]), int(offsets[gi + 1])
-        gallery = np.asarray(gallery_features[start:end], dtype=np.float32)
-        similarity = negative_squared_euclidean(q, gallery)
-        rows, cols = hungarian_maximize(similarity)
-        if len(rows) != m:
-            raise RuntimeError(f"Hungarian returned {len(rows)} pairs for query set size {m}")
-        result[gi] = float(np.min(similarity[rows, cols]))
-    return result
+def score_one_query(*, query_features, gallery_features, offsets, counts,
+                    person_image_index, unmatched_score, person_chunk_size):
+    return score_feature_sets(query_features, gallery_features, offsets, unmatched_score,
+                              person_chunk_size, metric="negative_squared_euclidean")
 
 
 def compute_scores(
@@ -1016,6 +691,7 @@ def main() -> None:
 
         checkout = ensure_clean_pinned_source(cfg)
         checkpoint_path = require_file(resolve_path(str(cfg["checkpoint"]["path"])), "final Instruct-ReID checkpoint")
+        apply_instruct_calibration(cfg, checkpoint_path, query_manifest, gallery_manifest)
         checkpoint_marker_path = require_file(
             resolve_path(str(cfg["checkpoint"]["prepared_marker"])), "final checkpoint prepared marker"
         )
@@ -1026,12 +702,6 @@ def main() -> None:
         bert_dir = resolve_path(str(cfg["runtime_assets"]["bert_dir"]))
         bert_weight = require_file(bert_dir / "pytorch_model.bin", "BERT runtime weight")
         config_bert = require_file(resolve_path(str(cfg["runtime_assets"]["config_bert"])), "BERT config")
-        detector_checkpoint = require_file(
-            resolve_path(str(cfg["localization"]["detector"]["checkpoint"])), "person detector checkpoint"
-        )
-        selector_checkpoint = require_file(
-            resolve_path(str(cfg["localization"]["query_selector"]["checkpoint"])), "CLIP selector checkpoint"
-        )
         device = device_from(str(cfg["runtime"]["device"]))
         tracker.log(f"gallery={len(gallery):,} queries={len(queries):,} device={device}")
 
@@ -1053,58 +723,20 @@ def main() -> None:
             f"feature_dim={cfg['model']['feature_dim']} constructor=ok"
         )
 
-    with tracker.phase("Detect predicted person instances"):
-        detection_cache = resolve_path(str(cfg["cache"]["detections"]))
-        det_meta = detection_fingerprint(cfg, gallery_manifest, detector_checkpoint)
-        loaded = load_detection_cache(detection_cache, det_meta, len(gallery))
-        if loaded is None:
-            offsets, boxes, confidences = compute_detections(cfg, gallery, detector_checkpoint, device)
-            save_detection_cache(detection_cache, det_meta, offsets, boxes, confidences)
-        else:
-            offsets, boxes, confidences = loaded
-        counts = np.diff(offsets)
-        tracker.log(
-            f"detected_persons={int(offsets[-1]):,} images_without_person={int(np.sum(counts == 0)):,}"
-        )
-
-    with tracker.phase("Encode person crops for target selection"):
-        selector_model, selector_preprocess = clip.load(str(selector_checkpoint), device=device, jit=False)
-        selector_model.eval()
-        selector_cache = resolve_path(str(cfg["cache"]["selector_features"]))
-        selector_meta = selector_fingerprint(detection_cache, selector_checkpoint, gallery_manifest)
-        selector_dim = int(selector_model.text_projection.shape[1])
-        selector_features = load_array_cache(
-            selector_cache,
-            selector_meta,
-            (int(offsets[-1]), selector_dim),
-            "CLIP selector person-feature",
-        )
-        if selector_features is None:
-            selector_features = compute_selector_person_features(
-                gallery=gallery,
-                offsets=offsets,
-                boxes=boxes,
-                model=selector_model,
-                preprocess=selector_preprocess,
-                device=device,
-                cache_path=selector_cache,
-                cache_meta=selector_meta,
-                batch_size=int(cfg["runtime"]["selector_batch_size"]),
-            )
-
-        localization = localize_query_targets(
-            queries=queries,
-            query_indices=query_indices,
-            offsets=offsets,
-            selector_features=selector_features,
-            selector_model=selector_model,
-            device=device,
-            fallback_order=list(cfg["localization"]["query_selector"]["fallback_order"]),
-        )
-        valid_queries = sum(bool(item.get("valid")) for item in localization)
-        tracker.log(f"localized_queries={valid_queries:,}/{len(queries):,}")
-        del selector_model
-        torch.cuda.empty_cache()
+    with tracker.phase("Consume shared person candidates and Subject memberships"):
+        person = load_person_context(gallery, queries, gallery_manifest, query_manifest, device)
+        detection_cache = person.detections.path
+        offsets, boxes = person.detections.offsets, person.detections.boxes
+        selector_cache = person.localization.path
+        localization = []
+        for qi, query in enumerate(queries):
+            targets = [{"source_gallery_index": int(query_indices[qi]),
+                        "global_person_index": member["global_person_index"],
+                        "box": member["box"],
+                        "instruction": modification_instruction(query, query["subjects"][si])}
+                       for si, member in person.localization.flat(qi)]
+            localization.append({"valid": True, "reason": None, "targets": targets})
+        valid_queries = len(localization)
 
     with tracker.phase("Move pinned official Instruct-ReID model to CUDA"):
         model.to(device).eval()
@@ -1172,7 +804,7 @@ def main() -> None:
         del model
         torch.cuda.empty_cache()
 
-    with tracker.phase("Compute Hungarian + strict-min SetMatch scores"):
+    with tracker.phase("Compute Partial SetMatch scores"):
         output_dir = resolve_path(str(cfg["output"]["dir"]))
         output_dir.mkdir(parents=True, exist_ok=True)
         scores_path = output_dir / "scores.npy"
@@ -1221,7 +853,8 @@ def main() -> None:
             },
             "localization": cfg["localization"],
             "instruction_adapter": cfg["instruction_adapter"],
-            "setmatch": cfg["setmatch"],
+            "setmatch": matching_metadata(cfg),
+            "shared_person_protocol": person.metadata(),
             "adapter_semantics": {
                 "predicted_person_instances": True,
                 "gt_target_boxes_used": False,
@@ -1250,6 +883,7 @@ def main() -> None:
             "scores": rel(scores_path),
             "higher_is_better": True,
         }
+        run["data_fingerprint"] = manifest_identity(run["shared_person_protocol"])
         run_path = output_dir / "run.json"
         write_json(run_path, run)
         tracker.log(f"scores={rel(scores_path)} run={rel(run_path)}")

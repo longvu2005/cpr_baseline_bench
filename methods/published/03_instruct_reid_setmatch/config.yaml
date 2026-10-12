@@ -1,19 +1,16 @@
 method: instruct_reid_setmatch
-display_name: Instruct-ReID + SetMatch
+display_name: Instruct-ReID + Partial SetMatch
 group: Published / SOTA Baselines
 cpr_supervision: 'No'
-
 paper:
   title: 'Instruct-ReID: A Multi-purpose Person Re-identification Task with Instructions'
   venue: CVPR 2024
   arxiv: '2306.07520'
-
 source:
   repository: https://github.com/hwz-zju/Instruct-ReID.git
   commit: 8250f44a301a50d8afcd2e09a46c3e96bf52090d
   local_checkout: runs/instruct_reid_setmatch/official_source/Instruct-ReID
   auto_clone: true
-
 checkpoint:
   path: checkpoints/instruct_reid/inference_language_reid.pth.tar
   status: OFFICIAL_RELEASED
@@ -22,27 +19,31 @@ checkpoint:
   inference_folder_url: https://drive.google.com/drive/folders/1QBJ-GTI3Luvv-9c7_QJbhlx3ljo2t5kb?usp=drive_link
   direct_file_url: null
   discovery:
-    # Official inference-folder basename for the language-instructed (LI) model.
-    # Pin the exact released filename instead of inferring the task from loose regexes.
     expected_filename: checkpoint_li.pth.tar
-    required_regex: '(?i)(attr|language|checkpoint[_ -]?li(?:\.|$)|li[-_ ]?reid|real2)'
-    checkpoint_regex: '(?i)\.(pth|pt)(\.tar)?$'
-    exclude_regex: '(?i)(t2i|cuhk|market|msmt|ltcc|prcc|vc[_ -]?clothes|llcm|ctcc)'
+    required_regex: (?i)(attr|language|checkpoint[_ -]?li(?:\.|$)|li[-_ ]?reid|real2)
+    checkpoint_regex: (?i)\.(pth|pt)(\.tar)?$
+    exclude_regex: (?i)(t2i|cuhk|market|msmt|ltcc|prcc|vc[_ -]?clothes|llcm|ctcc)
   prepared_marker: checkpoints/instruct_reid/inference_language_reid.prepared.json
-
 runtime_assets:
   bert_dir: checkpoints/instruct_reid/bert-base-uncased
   bert_weight_url: https://huggingface.co/google-bert/bert-base-uncased/resolve/main/pytorch_model.bin
   config_bert: checkpoints/instruct_reid/config_bert.json
-
 model:
   architecture: PASS_Transformer_DualAttn_joint
   test_task_type: attr
   validate_feat: fusion
   feature_dim: 1536
-  image_size: [256, 128]
-  normalization_mean: [0.485, 0.456, 0.406]
-  normalization_std: [0.229, 0.224, 0.225]
+  image_size:
+  - 256
+  - 128
+  normalization_mean:
+  - 0.485
+  - 0.456
+  - 0.406
+  normalization_std:
+  - 0.229
+  - 0.224
+  - 0.225
   official_text_max_words: 50
   official_token_max_length: 70
   args:
@@ -58,36 +59,60 @@ model:
     test_feat_type: f
     dropout_clo: 0.0
     pool_clo: false
-
 localization:
   detector:
-    backend: torchvision_fasterrcnn_resnet50_fpn_v2
-    score_threshold: 0.55
+    backend: groundingdino_swint_ogc
+    source:
+      repository: https://github.com/IDEA-Research/GroundingDINO.git
+      commit: 856dde20aee659246248e20734ef9ba5214f5e44
+      local_checkout: runs/groundingdino_clipreid_set/official_source/GroundingDINO
+      auto_clone: true
+    config: groundingdino/config/GroundingDINO_SwinT_OGC.py
+    config_sha256: 172e80017f9395668a9cb5d1b8bd9d061c0e360471c6ed673c83b69bb14399f1
+    checkpoint: checkpoints/groundingdino/groundingdino_swint_ogc.pth
+    checkpoint_url: https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth
+    runtime_cache: checkpoints/groundingdino/runtime_cache
+    runtime_assets_marker: checkpoints/groundingdino/runtime_assets_ready.json
+    text_prompt: person
+    box_threshold: 0.35
+    text_threshold: 0.25
+    score_threshold: 0.35
+    nms_iou_threshold: 0.5
+    min_box_size_px: 4
     max_persons_per_image: 10
-    person_label: 1
-    checkpoint: checkpoints/torchvision/fasterrcnn_resnet50_fpn_v2_coco-dd69338a.pth
-    checkpoint_url: https://download.pytorch.org/models/fasterrcnn_resnet50_fpn_v2_coco-dd69338a.pth
+    batch_size: 2
+    max_padding_ratio: 1.3
+    attention_backend: official_pytorch_fallback
   query_selector:
     backend: openai_clip
     model: ViT-B/32
-    assignment: hungarian_max_sum
+    source_commit: a1d071733d7111c9c014f024669f959182114e33
     checkpoint: checkpoints/clip/ViT-B-32.pt
-    fallback_order: [select_text, modify_text, text]
-
+    checkpoint_sha256: 40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af
+    checkpoint_url: https://openaipublic.azureedge.net/clip/models/40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af/ViT-B-32.pt
+    membership_threshold: 0.2
+    membership_margin: 0.03
+    max_members_per_subject: 5
+    tokenize_truncate: true
+    assignment: hungarian_anchors_then_disjoint_expansion
+    tokenizer_packages:
+      ftfy: '5.8'
+      wcwidth: 0.2.13
+    tokenizer_runtime_dir: checkpoints/clip/selector_tokenizer
 instruction_adapter:
   query_instruction:
     ordinary: subject.modify_text_then_query_text
     relational: full_query_text_when_relation_text_present
-  gallery_instruction: 'Do not change clothes.'
+  gallery_instruction: Do not change clothes.
   gallery_instruction_source: native_traditional_reid_instruction_from_paper
-
 setmatch:
   enabled: true
   pairwise_metric: negative_squared_euclidean
   assignment: hungarian_max_sum
-  aggregation: strict_minimum
+  aggregation: mean
   unmatched_score: -1000000.0
-
+  unmatched_calibration: null
+  unmatched_score_source: fixed_native_euclidean_distance_cutoff_1000_uncalibrated
 runtime:
   device: cuda
   detector_device: cuda
@@ -96,16 +121,14 @@ runtime:
   instruct_batch_size: 64
   score_person_chunk_size: 8192
   gallery_feature_dtype: float16
-
 cache:
   detections: runs/instruct_reid_setmatch/cache/person_detections.npz
   selector_features: runs/instruct_reid_setmatch/cache/selector_person_features.npy
   gallery_features: runs/instruct_reid_setmatch/cache/gallery_instruct_features.npy
   query_features: runs/instruct_reid_setmatch/cache/query_target_features.npz
-
 data:
   gallery_manifest: data/gallery.jsonl
   query_manifest: data/queries.jsonl
-
 output:
   dir: runs/instruct_reid_setmatch
+person_protocol: cpr_person/protocol.yaml

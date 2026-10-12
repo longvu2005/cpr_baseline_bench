@@ -36,7 +36,7 @@ def main() -> None:
 
     tracker = PhaseTracker("s10_prepare", total=2)
     tracker.advance("Prepare shared Grounding DINO protocol assets")
-    cmd = [sys.executable, "-u", "methods/simple/05_reid_set/download_checkpoint.py"]
+    cmd = [sys.executable, "-m", "cpr_person.prepare"]
     if args.force:
         cmd.append("--force")
     run_step(cmd)

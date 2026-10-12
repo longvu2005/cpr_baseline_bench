@@ -26,6 +26,8 @@ if str(ROOT) not in sys.path:
 
 from benchmark_progress import PhaseTracker  # noqa: E402
 
+from cpr_person.adapter import prepare_shared
+from cpr_person.detection import protocol_config
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 
 
@@ -441,20 +443,14 @@ def main() -> None:
     preset, model_cache_files = prepare_basic_model_cache(cfg, checkout, args.force)
 
     tracker.advance("Prepare benchmark detector and query-person selector")
-    selector_cfg = cfg["runtime_assets"]["selector"]
-    selector_info = download_http(
-        url=str(selector_cfg["url"]),
-        path=resolve_path(str(selector_cfg["path"])),
-        force=args.force,
-        expected_sha256=str(selector_cfg["sha256"]),
-    )
-    detector_cfg = cfg["runtime_assets"]["detector"]
-    detector_info = download_http(
-        url=str(detector_cfg["url"]),
-        path=resolve_path(str(detector_cfg["path"])),
-        force=args.force,
-        expected_prefix=str(detector_cfg["sha256_prefix"]),
-    )
+    prepare_shared(args.force)
+    shared = protocol_config()
+    cfg["runtime_assets"]["selector"]["path"] = shared["selector"]["checkpoint"]
+    cfg["runtime_assets"]["detector"]["path"] = shared["detector"]["checkpoint"]
+    selector_path = resolve_path(shared["selector"]["checkpoint"])
+    detector_path = resolve_path(shared["detector"]["checkpoint"])
+    selector_info = {"size": selector_path.stat().st_size, "sha256": sha256_file(selector_path)}
+    detector_info = {"size": detector_path.stat().st_size, "sha256": sha256_file(detector_path)}
 
     tracker.advance("Write reproducibility marker")
     write_marker(

@@ -334,6 +334,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="List discovered runnable methods and exit.",
     )
+    parser.add_argument("--all", action="store_true", help="Run all discovered methods in dependency order.")
     parser.add_argument(
         "--skip-install",
         action="store_true",
@@ -359,6 +360,22 @@ def main() -> None:
 
     if args.list:
         print_methods(methods)
+        return
+
+    if args.all:
+        if args.method:
+            raise SystemExit("Choose a method or --all.")
+        # The existing simple ordering runs S5/S6/S8 before their dependents.
+        # Scene methods retain their own preparation, inference and evaluation.
+        failures = []
+        for method in methods:
+            try:
+                run_pipeline(method, args.force_checkpoint, args.skip_install)
+            except (subprocess.CalledProcessError, FileNotFoundError, RuntimeError, ValueError) as error:
+                print(f"FAILED {method.method_id}: {error}", flush=True)
+                failures.append(method.method_id)
+        if failures:
+            raise SystemExit("Failed methods: " + ", ".join(failures))
         return
 
     if not args.method:

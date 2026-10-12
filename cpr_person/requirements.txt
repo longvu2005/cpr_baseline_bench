@@ -1,0 +1,18 @@
+# Detector runtime and shared CLIP selector; no retrieval checkpoint dependency.
+numpy>=1.24,<2
+Pillow>=9.5
+PyYAML>=6
+scipy>=1.10
+torch>=2.0
+torchvision>=0.15
+tqdm>=4.65
+transformers==4.39.3
+supervision==0.22.0
+addict
+yapf==0.40.1
+pycocotools
+git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33
+
+# Selector ftfy is isolated by prepare.py, preserving Word4Per's >=6.1 and
+# Instruct-ReID's ==5.8 native requirements without a package conflict.
+regex==2023.10.3

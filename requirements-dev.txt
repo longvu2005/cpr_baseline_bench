@@ -1,0 +1,8 @@
+# CPU protocol/integration tests need no weights, CUDA, torch or torchvision.
+numpy>=1.24,<2
+Pillow>=9.5
+PyYAML>=6
+scipy>=1.10
+tqdm>=4.65
+pytest>=8
+pyflakes>=3

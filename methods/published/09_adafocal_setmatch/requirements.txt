@@ -1,5 +1,5 @@
 # Reuse the benchmark's shared Grounding DINO protocol dependencies.
--r ../../simple/05_reid_set/requirements.txt
+-r ../../../cpr_person/requirements.txt
 
 # Target-person selector.
 git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33

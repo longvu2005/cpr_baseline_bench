@@ -35,6 +35,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from benchmark_progress import PhaseTracker, byte_progress  # noqa: E402
+from cpr_person.adapter import prepare_shared
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 GOOGLE_DRIVE_ID = "1Bf2Ia7zmxx5k3Dj-nRr3CLbAqc_zkM0y"
 CLIP_B32_SHA256 = "40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af"
@@ -327,7 +328,7 @@ def prewarm_fafa_runtime_assets(
 
 
 def prepare(config_path: Path, force: bool) -> None:
-    tracker = PhaseTracker("fafa_prepare", total=5)
+    tracker = PhaseTracker("fafa_prepare", total=4)
     cfg = load_yaml(config_path)
     ckpt = cfg["checkpoint"]
 
@@ -337,25 +338,10 @@ def prepare(config_path: Path, force: bool) -> None:
     tracker.advance("Prepare released FAFA checkpoint")
     download_fafa_checkpoint(resolve_path(str(ckpt["path"])), force)
 
-    tracker.advance("Prepare CLIP query-selector checkpoint")
-    selector = cfg["localization"]["query_selector"]
-    if str(selector["model"]) != "ViT-B/32":
-        raise ValueError("FAFA query selector currently supports only OpenAI CLIP ViT-B/32")
-    download_with_hash(
-        url=CLIP_B32_URL,
-        path=resolve_path(str(selector["checkpoint"])),
-        expected_sha256=CLIP_B32_SHA256,
-        force=force,
-    )
-
     tracker.advance("Prepare official Grounding DINO source, checkpoint and runtime")
     # Separate HF caches must be initialized in separate processes: changing
     # HF_HOME after transformers is imported does not update its cache constants.
-    command = [sys.executable, "-u", str(Path(__file__).with_name("groundingdino_adapter.py")),
-               "--prepare", "--config", str(config_path)]
-    if force:
-        command.append("--force")
-    subprocess.run(command, cwd=ROOT, check=True)
+    prepare_shared(force)
 
     tracker.advance("Pre-warm FAFA/LAVIS runtime assets")
     cache_root = resolve_path(str(ckpt["cache_root"]))

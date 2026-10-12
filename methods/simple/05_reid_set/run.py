@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
-"""Grounding DINO + CLIP-ReID - Set baseline for the CPR benchmark.
-
-This deliberately text-free S5 baseline tests the reviewer hypothesis that CPR
-can be solved by detecting people and re-identifying them. Every predicted
-person in the query/reference scene and every predicted person in each gallery
-scene is embedded with the official MSMT17 CLIP-ReID ViT-B/16 model. Pairwise
-cosine similarity is matched one-to-one with maximum-weight Hungarian
-assignment, then aggregated with a strict minimum over the assigned pairs.
-
-No CPR target_ids, positives, GT boxes, subject-to-box mapping, select_text,
-modify_text, relation_text, or query text is used by the method.
+"""Native CLIP-ReID embeddings with shared text-based Subject localization.
+The primary S5 ID is an adapted baseline; text does not enter ReID scoring.
+Use --text-free-diagnostic for the separately labeled all-reference-person set.
 """
 
 from __future__ import annotations
@@ -30,23 +22,23 @@ import torch
 import torch.nn.functional as F
 import yaml
 from PIL import Image
-from scipy.optimize import linear_sum_assignment
 from torchvision import transforms as TVT
-from torchvision.ops import box_convert, nms
 
 ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
+from benchmark_progress import progress_bar
 
+from cpr_person.adapter import load_person_context, matching_metadata, PersonContext, manifest_identity
+from cpr_person.cache import feature_config_hash
+from cpr_person.matching import score_feature_sets
+from cpr_person.detection import detection_fingerprint, load_detections, get_detections
+from cpr_person.localization import Localization
+from cpr_person.cache import StageCache
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "groundingdino_clipreid_set"
-ADAPTER_VERSION = "2026-08-13-v4-clipreid-preflight-oomsafe"
-# Keep the detector-stage cache identity stable: this patch changes only the
-# CLIP-ReID adapter/config loading path, not Grounding DINO detections.
-DETECTION_ADAPTER_VERSION = "2026-08-13-v2-py312-source-setmatch"
-DETECTION_CACHE_SCHEMA = 1
+ADAPTER_VERSION = "2026-10-12-shared-person-v1"
 FEATURE_CACHE_SCHEMA = 1
 
 
@@ -191,73 +183,6 @@ def ensure_clean_pinned_source(source: dict[str, Any], label: str) -> Path:
     return checkout
 
 
-def configure_groundingdino_source(source_root: Path) -> str:
-    """Import Grounding DINO from the pinned checkout without building a wheel.
-
-    The upstream package tries to compile its optional CUDA/C++ extension during
-    pip installation.  That wheel build is fragile on hosted Python 3.12
-    environments.  The pinned source already contains an equivalent PyTorch
-    implementation of multi-scale deformable attention, so use it when the
-    custom extension is unavailable.
-
-    Returns the attention backend name for cache/reproducibility metadata.
-    """
-
-    source_text = str(source_root)
-    if source_text in sys.path:
-        sys.path.remove(source_text)
-    sys.path.insert(0, source_text)
-
-    # Import the exact module from the pinned checkout.  It may emit the
-    # upstream "custom C++ ops" warning before we install the explicit fallback.
-    import groundingdino  # type: ignore
-    from groundingdino.models.GroundingDINO import ms_deform_attn as msda  # type: ignore
-
-    package_root = Path(groundingdino.__file__).resolve().parent
-    expected_root = (source_root / "groundingdino").resolve()
-    if package_root != expected_root:
-        raise RuntimeError(
-            "Grounding DINO import did not resolve to the pinned checkout: "
-            f"expected {rel(expected_root)}, got {rel(package_root)}"
-        )
-
-    try:
-        from groundingdino import _C as _groundingdino_c  # type: ignore
-        getattr(_groundingdino_c, "ms_deform_attn_forward")
-    except Exception as error:
-        class _PytorchMSDeformAttnFunction:
-            @staticmethod
-            def apply(
-                value: torch.Tensor,
-                value_spatial_shapes: torch.Tensor,
-                value_level_start_index: torch.Tensor,
-                sampling_locations: torch.Tensor,
-                attention_weights: torch.Tensor,
-                im2col_step: int,
-            ) -> torch.Tensor:
-                del value_level_start_index, im2col_step
-                return msda.multi_scale_deformable_attn_pytorch(
-                    value,
-                    value_spatial_shapes,
-                    sampling_locations,
-                    attention_weights,
-                )
-
-        # MultiScaleDeformableAttention.forward resolves this module global at
-        # call time, so replacing it here affects model inference without
-        # modifying the pinned official checkout.
-        msda.MultiScaleDeformableAttnFunction = _PytorchMSDeformAttnFunction
-        print(
-            "[warn] Grounding DINO custom CUDA/C++ op is unavailable; "
-            "using the official pure-PyTorch deformable-attention fallback. "
-            f"Original import error: {type(error).__name__}: {error}",
-            flush=True,
-        )
-        return "official_pytorch_fallback"
-
-    return "official_custom_cuda_op"
-
-
 def require_file(path: Path, label: str) -> Path:
     if not path.is_file() or path.stat().st_size <= 0:
         raise FileNotFoundError(
@@ -312,81 +237,6 @@ def merge_clipreid_official_config(model_cfg: Any, config_path: Path) -> None:
         flush=True,
     )
 
-def configure_groundingdino_offline(cfg: dict[str, Any]) -> Path:
-    cache_root = resolve_path(str(cfg["detector"]["runtime_cache"]))
-    marker = resolve_path(str(cfg["detector"]["runtime_assets_marker"]))
-    if not marker.is_file():
-        raise FileNotFoundError(
-            f"Missing Grounding DINO runtime-assets marker: {rel(marker)}. "
-            "Run download_checkpoint.py first."
-        )
-    marker_data = read_meta(marker)
-    expected = {
-        "source_commit": str(cfg["source"]["groundingdino"]["commit"]),
-        "text_encoder": "bert-base-uncased",
-        "hf_home": rel(cache_root / "huggingface"),
-    }
-    if marker_data is None or any(marker_data.get(k) != v for k, v in expected.items()):
-        raise RuntimeError(
-            f"Stale Grounding DINO runtime-assets marker: {rel(marker)}. "
-            "Re-run download_checkpoint.py."
-        )
-    files = marker_data.get("files")
-    if not isinstance(files, list) or not files:
-        raise RuntimeError(f"Runtime-assets marker has no cache inventory: {rel(marker)}")
-    for item in files:
-        if not isinstance(item, dict):
-            raise RuntimeError(f"Invalid runtime cache inventory in {rel(marker)}")
-        name = item.get("path")
-        size = item.get("size")
-        if not isinstance(name, str) or not isinstance(size, int):
-            raise RuntimeError(f"Invalid runtime cache inventory in {rel(marker)}")
-        path = cache_root / name
-        if not path.is_file() or path.stat().st_size != size:
-            raise RuntimeError(
-                f"Grounding DINO runtime cache is incomplete: {rel(path)}. "
-                "Re-run download_checkpoint.py."
-            )
-
-    os.environ["HF_HOME"] = str(cache_root / "huggingface")
-    os.environ["XDG_CACHE_HOME"] = str(cache_root / "xdg")
-    os.environ["HF_HUB_OFFLINE"] = "1"
-    os.environ["TRANSFORMERS_OFFLINE"] = "1"
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    return cache_root
-
-
-def detection_fingerprint(
-    *,
-    cfg: dict[str, Any],
-    config_path: Path,
-    gallery_manifest: Path,
-    detector_config: Path,
-    detector_checkpoint: Path,
-    attention_backend: str,
-) -> dict[str, Any]:
-    detector_cfg = cfg["detector"]
-    payload = {
-        "schema": DETECTION_CACHE_SCHEMA,
-        "adapter_version": DETECTION_ADAPTER_VERSION,
-        "config_sha256": sha256_file(config_path),
-        "gallery_manifest_sha256": sha256_file(gallery_manifest),
-        "groundingdino_source_commit": str(cfg["source"]["groundingdino"]["commit"]),
-        "detector_config_sha256": sha256_file(detector_config),
-        "detector_checkpoint_sha256": sha256_file(detector_checkpoint),
-        "attention_backend": attention_backend,
-        "detector": {
-            "text_prompt": str(detector_cfg["text_prompt"]),
-            "box_threshold": float(detector_cfg["box_threshold"]),
-            "text_threshold": float(detector_cfg["text_threshold"]),
-            "nms_iou_threshold": float(detector_cfg["nms_iou_threshold"]),
-            "min_box_size_px": float(detector_cfg["min_box_size_px"]),
-            "max_persons_per_image": detector_cfg.get("max_persons_per_image"),
-        },
-    }
-    payload["fingerprint"] = canonical_hash(payload)
-    return payload
-
 
 def feature_fingerprint(
     *,
@@ -400,8 +250,9 @@ def feature_fingerprint(
     payload = {
         "schema": FEATURE_CACHE_SCHEMA,
         "adapter_version": ADAPTER_VERSION,
-        "config_sha256": sha256_file(config_path),
+        "feature_config_sha256": feature_config_hash(config_path),
         "detection_cache_sha256": sha256_file(detection_cache),
+        "shared_detection_identity": detection_cache.parent.name,
         "clip_reid_source_commit": str(cfg["source"]["clip_reid"]["commit"]),
         "reid_checkpoint_sha256": sha256_file(reid_checkpoint),
         "openai_clip_checkpoint_sha256": sha256_file(clip_backbone),
@@ -420,188 +271,6 @@ def feature_fingerprint(
     }
     payload["fingerprint"] = canonical_hash(payload)
     return payload
-
-
-def validate_detection_arrays(
-    offsets: np.ndarray,
-    boxes: np.ndarray,
-    confidences: np.ndarray,
-    num_images: int,
-) -> None:
-    if offsets.shape != (num_images + 1,):
-        raise ValueError(f"Detection offsets shape {offsets.shape}, expected {(num_images + 1,)}")
-    if offsets.dtype.kind not in "iu":
-        raise TypeError("Detection offsets must be integer")
-    if int(offsets[0]) != 0:
-        raise ValueError("Detection offsets must start at zero")
-    if np.any(offsets[1:] < offsets[:-1]):
-        raise ValueError("Detection offsets must be monotonic")
-    total = int(offsets[-1])
-    if boxes.shape != (total, 4):
-        raise ValueError(f"Detection boxes shape {boxes.shape}, expected {(total, 4)}")
-    if confidences.shape != (total,):
-        raise ValueError(
-            f"Detection confidences shape {confidences.shape}, expected {(total,)}"
-        )
-    if not np.isfinite(boxes).all() or not np.isfinite(confidences).all():
-        raise ValueError("Detection cache contains non-finite values")
-    if total and np.any(boxes[:, 2:] <= boxes[:, :2]):
-        raise ValueError("Detection cache contains invalid xyxy boxes")
-
-
-def load_detection_cache(
-    cache_path: Path,
-    expected_meta: dict[str, Any],
-    num_images: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-    sidecar = meta_path(cache_path)
-    if not cache_path.is_file() or not sidecar.is_file():
-        return None
-    current_meta = read_meta(sidecar)
-    if current_meta != expected_meta:
-        print(f"Ignoring stale detection cache: {rel(cache_path)}", flush=True)
-        return None
-    try:
-        with np.load(cache_path, allow_pickle=False) as data:
-            offsets = np.asarray(data["offsets"], dtype=np.int64)
-            boxes = np.asarray(data["boxes"], dtype=np.float32)
-            confidences = np.asarray(data["confidences"], dtype=np.float32)
-        validate_detection_arrays(offsets, boxes, confidences, num_images)
-    except Exception as error:
-        print(f"Ignoring invalid detection cache {rel(cache_path)}: {error}", flush=True)
-        return None
-    print(f"Using person-detection cache: {rel(cache_path)}", flush=True)
-    return offsets, boxes, confidences
-
-
-def save_detection_cache(
-    cache_path: Path,
-    cache_meta: dict[str, Any],
-    offsets: np.ndarray,
-    boxes: np.ndarray,
-    confidences: np.ndarray,
-) -> None:
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    temp = cache_path.with_name(cache_path.name + ".part")
-    temp.unlink(missing_ok=True)
-    try:
-        with temp.open("wb") as handle:
-            np.savez(handle, offsets=offsets, boxes=boxes, confidences=confidences)
-        os.replace(temp, cache_path)
-    except Exception:
-        temp.unlink(missing_ok=True)
-        raise
-    write_meta(meta_path(cache_path), cache_meta)
-
-
-def filter_person_boxes(
-    *,
-    boxes_cxcywh: torch.Tensor,
-    confidences: torch.Tensor,
-    width: int,
-    height: int,
-    cfg: dict[str, Any],
-) -> tuple[np.ndarray, np.ndarray]:
-    if boxes_cxcywh.numel() == 0:
-        return np.empty((0, 4), np.float32), np.empty((0,), np.float32)
-
-    scale = torch.tensor([width, height, width, height], dtype=boxes_cxcywh.dtype)
-    xyxy = box_convert(boxes_cxcywh * scale, in_fmt="cxcywh", out_fmt="xyxy").float()
-    scores = confidences.float()
-
-    xyxy[:, 0::2].clamp_(0.0, float(width))
-    xyxy[:, 1::2].clamp_(0.0, float(height))
-    min_size = float(cfg["detector"]["min_box_size_px"])
-    valid = (xyxy[:, 2] - xyxy[:, 0] >= min_size) & (
-        xyxy[:, 3] - xyxy[:, 1] >= min_size
-    )
-    xyxy = xyxy[valid]
-    scores = scores[valid]
-    if xyxy.numel() == 0:
-        return np.empty((0, 4), np.float32), np.empty((0,), np.float32)
-
-    keep = nms(xyxy, scores, float(cfg["detector"]["nms_iou_threshold"]))
-    xyxy = xyxy[keep]
-    scores = scores[keep]
-
-    order = torch.argsort(scores, descending=True)
-    xyxy = xyxy[order]
-    scores = scores[order]
-    max_persons = cfg["detector"].get("max_persons_per_image")
-    if max_persons is not None:
-        limit = int(max_persons)
-        if limit <= 0:
-            raise ValueError("max_persons_per_image must be null or a positive integer")
-        xyxy = xyxy[:limit]
-        scores = scores[:limit]
-
-    return xyxy.cpu().numpy().astype(np.float32), scores.cpu().numpy().astype(np.float32)
-
-
-@torch.no_grad()
-def compute_detections(
-    *,
-    cfg: dict[str, Any],
-    gallery: Sequence[dict[str, Any]],
-    detector_config: Path,
-    detector_checkpoint: Path,
-    device: torch.device,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    # Environment has already been switched to repository-local HF offline mode.
-    from groundingdino.util.inference import load_image, load_model, predict
-
-    detector = load_model(
-        str(detector_config), str(detector_checkpoint), device=str(device)
-    ).to(device)
-    detector.eval()
-
-    all_boxes: list[np.ndarray] = []
-    all_confidences: list[np.ndarray] = []
-    offsets = np.zeros(len(gallery) + 1, dtype=np.int64)
-    total = 0
-
-    for gi, row in enumerate(
-        progress_bar(gallery, desc="Detect persons", total=len(gallery), unit="image")
-    ):
-        path = image_path(row, gi)
-        image_source, image_tensor = load_image(str(path))
-        height, width = image_source.shape[:2]
-        boxes, logits, _phrases = predict(
-            model=detector,
-            image=image_tensor,
-            caption=str(cfg["detector"]["text_prompt"]),
-            box_threshold=float(cfg["detector"]["box_threshold"]),
-            text_threshold=float(cfg["detector"]["text_threshold"]),
-            device=str(device),
-        )
-        boxes_np, conf_np = filter_person_boxes(
-            boxes_cxcywh=boxes,
-            confidences=logits,
-            width=width,
-            height=height,
-            cfg=cfg,
-        )
-        all_boxes.append(boxes_np)
-        all_confidences.append(conf_np)
-        total += len(boxes_np)
-        offsets[gi + 1] = total
-
-    del detector
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-
-    boxes = (
-        np.concatenate(all_boxes, axis=0)
-        if total
-        else np.empty((0, 4), dtype=np.float32)
-    )
-    confidences = (
-        np.concatenate(all_confidences, axis=0)
-        if total
-        else np.empty((0,), dtype=np.float32)
-    )
-    validate_detection_arrays(offsets, boxes, confidences, len(gallery))
-    return offsets, boxes, confidences
 
 
 def validate_clipreid_adapter_contract(model_cfg: Any, cfg: dict[str, Any]) -> None:
@@ -945,127 +614,50 @@ def compute_reid_features(
                 f"Encoded {write_cursor} persons, expected {total_persons} from detection cache"
             )
         mmap.flush()
-        del mmap
+        mmap = None
         os.replace(temp, cache_path)
         write_meta(meta_path(cache_path), cache_meta)
     except Exception:
         try:
-            del mmap
+            mmap = None
         except Exception:
             pass
         temp.unlink(missing_ok=True)
         raise
     finally:
-        del model
+        model = None
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
     return np.load(cache_path, mmap_mode="r")
 
 
-def hungarian_maximize(similarity: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    try:
-        return linear_sum_assignment(similarity, maximize=True)
-    except TypeError:
-        return linear_sum_assignment(-similarity)
+def score_one_query(*, query_features, all_features, offsets, counts,
+                    person_image_index, unmatched_score, feature_chunk_size):
+    return score_feature_sets(query_features, all_features, offsets, unmatched_score, feature_chunk_size)
 
 
-def score_one_query(
-    *,
-    query_features: np.ndarray,
-    all_features: np.ndarray,
-    offsets: np.ndarray,
-    counts: np.ndarray,
-    person_image_index: np.ndarray,
-    unmatched_score: float,
-    feature_chunk_size: int,
-) -> np.ndarray:
-    num_gallery = len(counts)
-    m = int(query_features.shape[0])
-    result = np.full(num_gallery, unmatched_score, dtype=np.float32)
-    if m == 0:
-        return result
-
-    q = np.asarray(query_features, dtype=np.float32)
-    if m == 1:
-        total_persons = int(offsets[-1])
-        if total_persons == 0:
-            return result
-        person_scores = np.empty(total_persons, dtype=np.float32)
-        query_vector = q[0]
-        for start in range(0, total_persons, feature_chunk_size):
-            end = min(start + feature_chunk_size, total_persons)
-            chunk = np.asarray(all_features[start:end], dtype=np.float32)
-            person_scores[start:end] = chunk @ query_vector
-        image_scores = np.full(num_gallery, -np.inf, dtype=np.float32)
-        np.maximum.at(image_scores, person_image_index, person_scores)
-        nonempty = counts > 0
-        result[nonempty] = image_scores[nonempty]
-        return result
-
-    eligible = np.flatnonzero(counts >= m)
-    for gi in eligible:
-        start, end = int(offsets[gi]), int(offsets[gi + 1])
-        gallery_features = np.asarray(all_features[start:end], dtype=np.float32)
-        similarity = q @ gallery_features.T
-        rows, cols = hungarian_maximize(similarity)
-        if len(rows) != m:
-            raise RuntimeError(
-                f"Hungarian assignment returned {len(rows)} pairs for query set size {m}"
-            )
-        assigned = similarity[rows, cols]
-        result[gi] = float(np.min(assigned))
-    return result
-
-
-def compute_scores(
-    *,
-    cfg: dict[str, Any],
-    queries: Sequence[dict[str, Any]],
-    query_indices: np.ndarray,
-    features: np.ndarray,
-    offsets: np.ndarray,
-    output_path: Path,
-) -> np.ndarray:
-    counts = np.diff(offsets).astype(np.int64, copy=False)
-    total_persons = int(offsets[-1])
-    person_image_index = np.repeat(
-        np.arange(len(counts), dtype=np.int64), counts.astype(np.int64)
-    )
-    if person_image_index.shape != (total_persons,):
-        raise RuntimeError("Internal person-to-image index shape mismatch")
-
-    unmatched_score = float(cfg["setmatch"]["unmatched_score"])
-    if not math.isfinite(unmatched_score):
-        raise ValueError("setmatch.unmatched_score must be finite")
-    chunk_size = int(cfg["runtime"]["score_feature_chunk_size"])
-    if chunk_size <= 0:
-        raise ValueError("score_feature_chunk_size must be > 0")
-
+def compute_scores(*, cfg, queries, query_indices, features, offsets, output_path,
+                   query_features_list=None):
+    if query_features_list is None:
+        raise ValueError("Standard S5 scoring requires shared Subject localization; pass query_features_list")
+    if len(query_features_list) != len(queries):
+        raise ValueError("Query component list does not match the complete manifest")
+    counts = np.diff(offsets)
+    person_image_index = np.repeat(np.arange(len(counts)), counts)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    scores = np.lib.format.open_memmap(
-        output_path,
-        mode="w+",
-        dtype=np.float32,
-        shape=(len(queries), len(counts)),
-    )
-    for qi in progress_bar(
-        range(len(queries)), desc="Hungarian SetMatch", total=len(queries), unit="query"
-    ):
-        source_gi = int(query_indices[qi])
-        q_start, q_end = int(offsets[source_gi]), int(offsets[source_gi + 1])
-        query_features = features[q_start:q_end]
-        scores[qi] = score_one_query(
-            query_features=query_features,
-            all_features=features,
-            offsets=offsets,
-            counts=counts,
-            person_image_index=person_image_index,
-            unmatched_score=unmatched_score,
-            feature_chunk_size=chunk_size,
-        )
+    temp = output_path.with_name(output_path.name + ".partial")
+    scores = np.lib.format.open_memmap(temp, mode="w+", dtype=np.float32,
+                                     shape=(len(queries), len(counts)))
+    for qi in progress_bar(range(len(queries)), desc="CLIP-ReID Partial SetMatch", total=len(queries), unit="query"):
+        scores[qi] = score_one_query(query_features=query_features_list[qi], all_features=features,
+            offsets=offsets, counts=counts, person_image_index=person_image_index,
+            unmatched_score=float(cfg["setmatch"]["unmatched_score"]),
+            feature_chunk_size=int(cfg["runtime"]["score_feature_chunk_size"]))
     scores.flush()
-    return scores
+    del scores
+    os.replace(temp, output_path)
+    return np.load(output_path, mmap_mode="r")
 
 
 def validate_scores(scores: np.ndarray, num_queries: int, num_gallery: int) -> None:
@@ -1080,297 +672,130 @@ def validate_scores(scores: np.ndarray, num_queries: int, num_gallery: int) -> N
         raise ValueError(f"scores.npy contains {bad} non-finite values")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
+def prepare_person_branch(*, cfg, config_path, gallery_manifest, query_manifest, device,
+                          feature_cache=None, require_cache=False, preflight=True, text_free=False):
+    gallery, queries = load_jsonl(gallery_manifest), load_jsonl(query_manifest)
+    source_root = ensure_clean_pinned_source(cfg["source"]["clip_reid"], "CLIP-ReID")
+    checkpoint = require_file(resolve_path(cfg["reid"]["checkpoint"]), "CLIP-ReID checkpoint")
+    backbone = require_file(resolve_path(cfg["reid"]["openai_clip_checkpoint"]), "CLIP backbone")
+    if preflight:
+        model = load_clipreid_model(cfg=cfg, source_root=source_root, checkpoint=checkpoint,
+                                   clip_backbone=backbone, device=device)
+        validate_clipreid_forward(model=model, cfg=cfg, device=device)
+        del model
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+    if text_free:
+        d = get_detections(gallery, gallery_manifest, device, require_cache=require_cache)
+        person = PersonContext(d, Localization([], {}, {}, None), gallery, queries)
+    else:
+        person = load_person_context(gallery, queries, gallery_manifest, query_manifest, device,
+                                     require_cache=require_cache)
+    d = person.detections
+    cache = feature_cache or resolve_path(cfg["cache"]["reid_features"])
+    meta = feature_fingerprint(cfg=cfg, config_path=config_path, detection_cache=d.path,
+                               reid_checkpoint=checkpoint, clip_backbone=backbone)
+    features = load_feature_cache(cache, meta, (int(d.offsets[-1]), int(cfg["reid"]["feature_dim"])))
+    hit = features is not None
+    if features is None:
+        features = compute_reid_features(cfg=cfg, gallery=gallery, offsets=d.offsets, boxes=d.boxes,
+            source_root=source_root, checkpoint=checkpoint, clip_backbone=backbone,
+            cache_path=cache, cache_meta=meta, device=device)
+    if text_free:
+        index = build_gallery_index(gallery)
+        sets = [features[d.offsets[index[q["image_id"]]]:d.offsets[index[q["image_id"]]+1]] for q in queries]
+        return person, features, sets, {"detections_hit": d.cache_hit, "features_hit": hit}
+    # Full-reference query padding uses the same native ReID preprocessing and
+    # encoder, rather than reusing a detected person's embedding.
+    gallery_index = build_gallery_index(gallery)
+    missing_gi = sorted({gallery_index[queries[qi]["image_id"]]
+                         for qi in range(len(queries))
+                         if any(m["global_person_index"] is None for si,m in person.localization.flat(qi))})
+    full_features = {}
+    if missing_gi:
+        subset = [gallery[gi] for gi in missing_gi]
+        full_boxes = np.asarray([[0,0,*d.image_sizes[gi]] for gi in missing_gi], np.float32)
+        full_meta = {**meta, "kind": "full_reference_query_padding", "gallery_indices": missing_gi}
+        full_cache = cache.with_name("full_reference_" + canonical_hash(full_meta)[:20] + ".npy")
+        full = load_feature_cache(full_cache, full_meta, (len(subset), int(cfg["reid"]["feature_dim"])))
+        if full is None:
+            full = compute_reid_features(cfg=cfg, gallery=subset, offsets=np.arange(len(subset)+1),
+                boxes=full_boxes, source_root=source_root, checkpoint=checkpoint, clip_backbone=backbone,
+                cache_path=full_cache, cache_meta=full_meta, device=device)
+        full_features = dict(zip(missing_gi, full))
+    query_sets = []
+    for qi, query in enumerate(queries):
+        gi = gallery_index[query["image_id"]]
+        query_sets.append(np.stack([features[m["global_person_index"]] if m["global_person_index"] is not None
+                                   else full_features[gi] for si,m in person.localization.flat(qi)]).astype(np.float32))
+    stats = {"detections_hit": d.cache_hit, "features_hit": hit,
+             "num_detected_persons": int(d.offsets[-1]), "shared_person_protocol": person.metadata()}
+    return person, features, query_sets, stats
+
+
+def main():
+    parser = argparse.ArgumentParser(description="CLIP-ReID + shared Subject localization + Partial SetMatch")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
-    parser.add_argument(
-        "--preflight-only",
-        action="store_true",
-        help=(
-            "Validate CLIP-ReID import/config/checkpoint/forward and report whether "
-            "the Grounding DINO detection cache will be reused, without running "
-            "detection, feature extraction, scoring, or evaluation."
-        ),
-    )
-    parser.add_argument(
-        "--require-detection-cache",
-        action="store_true",
-        help=(
-            "Abort instead of launching Grounding DINO when the exact detection "
-            "cache is missing or stale. Useful for safe recovery after an expensive "
-            "detector pass has already completed."
-        ),
-    )
+    parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--require-detection-cache", action="store_true")
+    parser.add_argument("--text-free-diagnostic", action="store_true",
+                        help="Separate diagnostic: use every reference detection; no CLIP selector/text")
     args = parser.parse_args()
-    tracker = PhaseTracker(METHOD_ID, total=1 if args.preflight_only else 6)
-
-    with tracker.phase("Load config, manifests, and prepared artifacts"):
-        config_path = resolve_path(args.config)
-        cfg = load_yaml(config_path)
-        if str(cfg.get("method")) != METHOD_ID:
-            raise ValueError(
-                f"Method id mismatch: config has {cfg.get('method')!r}, expected {METHOD_ID!r}"
-            )
-
-        gallery_manifest = resolve_path(str(cfg["data"]["gallery_manifest"]))
-        query_manifest = resolve_path(str(cfg["data"]["query_manifest"]))
-        gallery = load_jsonl(gallery_manifest)
-        queries = load_jsonl(query_manifest)
-        if not gallery:
-            raise ValueError("Gallery manifest is empty")
-        if not queries:
-            raise ValueError("Query manifest is empty")
-        gallery_index = build_gallery_index(gallery)
-        query_indices = query_gallery_indices(queries, gallery_index)
-
-        gdino_source = ensure_clean_pinned_source(
-            cfg["source"]["groundingdino"], "Grounding DINO"
-        )
-        clipreid_source = ensure_clean_pinned_source(
-            cfg["source"]["clip_reid"], "CLIP-ReID"
-        )
-        detector_config = require_file(
-            gdino_source / str(cfg["detector"]["config"]), "Grounding DINO config"
-        )
-        detector_checkpoint = require_file(
-            resolve_path(str(cfg["detector"]["checkpoint"])),
-            "Grounding DINO checkpoint",
-        )
-        reid_checkpoint = require_file(
-            resolve_path(str(cfg["reid"]["checkpoint"])), "CLIP-ReID checkpoint"
-        )
-        clip_backbone = require_file(
-            resolve_path(str(cfg["reid"]["openai_clip_checkpoint"])),
-            "OpenAI CLIP ViT-B/16 checkpoint",
-        )
-        configure_groundingdino_offline(cfg)
-        device = device_from(str(cfg["runtime"].get("device", "cuda")))
-        if device.type != "cuda":
-            raise RuntimeError(
-                "This S5 adapter requires CUDA because the pinned official CLIP-ReID "
-                "implementation constructs the ViT backbone on CUDA."
-            )
-        gdino_attention_backend = configure_groundingdino_source(gdino_source)
-
-        # Fail fast on CLIP-ReID config/import/checkpoint incompatibilities before
-        # launching the expensive all-gallery Grounding DINO pass. This preflight
-        # costs only model-load time and would have caught the YACS failure before
-        # the 17,000-image detector run.
-        preflight_model = load_clipreid_model(
-            cfg=cfg,
-            source_root=clipreid_source,
-            checkpoint=reid_checkpoint,
-            clip_backbone=clip_backbone,
-            device=device,
-        )
-        preflight_shape = validate_clipreid_forward(
-            model=preflight_model, cfg=cfg, device=device
-        )
-        del preflight_model
-        torch.cuda.empty_cache()
-
-        detection_cache = resolve_path(str(cfg["cache"]["detections"]))
-        detect_meta = detection_fingerprint(
-            cfg=cfg,
-            config_path=config_path,
-            gallery_manifest=gallery_manifest,
-            detector_config=detector_config,
-            detector_checkpoint=detector_checkpoint,
-            attention_backend=gdino_attention_backend,
-        )
-
-        if args.preflight_only:
-            cached = load_detection_cache(detection_cache, detect_meta, len(gallery))
-            if cached is None:
-                tracker.log(
-                    "preflight-only: clipreid_forward=ok "
-                    f"feature_shape={preflight_shape} detection_cache=MISS; "
-                    "a full run would execute Grounding DINO over the gallery"
-                )
-            else:
-                offsets, _boxes, _confidences = cached
-                counts = np.diff(offsets)
-                tracker.log(
-                    "preflight-only: clipreid_forward=ok "
-                    f"feature_shape={preflight_shape} detection_cache=HIT "
-                    f"persons={int(offsets[-1]):,} "
-                    f"images_with_person={int((counts > 0).sum()):,}/{len(gallery):,}"
-                )
-        else:
-            output_dir = resolve_path(str(cfg["output"]["dir"]))
-            output_dir.mkdir(parents=True, exist_ok=True)
-            tracker.log(
-                f"gallery={len(gallery):,} queries={len(queries):,} device={device} "
-                f"gdino_attention={gdino_attention_backend} clipreid_preflight=ok "
-                f"clipreid_feature_shape={preflight_shape} text_used=no"
-            )
-
+    config_path = resolve_path(args.config)
+    cfg = load_yaml(config_path)
+    if cfg.get("method") != METHOD_ID:
+        raise ValueError(f"Expected config method {METHOD_ID}")
+    device = device_from(str(cfg["runtime"]["device"]))
+    if device.type != "cuda":
+        raise RuntimeError("Pinned official CLIP-ReID constructs its backbone on CUDA")
+    gallery_manifest, query_manifest = resolve_path(cfg["data"]["gallery_manifest"]), resolve_path(cfg["data"]["query_manifest"])
+    gallery, queries = load_jsonl(gallery_manifest), load_jsonl(query_manifest)
+    source = ensure_clean_pinned_source(cfg["source"]["clip_reid"], "CLIP-ReID")
+    checkpoint, backbone = resolve_path(cfg["reid"]["checkpoint"]), resolve_path(cfg["reid"]["openai_clip_checkpoint"])
+    model = load_clipreid_model(cfg=cfg, source_root=source, checkpoint=checkpoint, clip_backbone=backbone, device=device)
+    shape = validate_clipreid_forward(model=model, cfg=cfg, device=device)
+    del model
+    torch.cuda.empty_cache()
     if args.preflight_only:
-        tracker.finish()
+        fp = detection_fingerprint(gallery_manifest)
+        cached = load_detections(StageCache("detections", fp), len(gallery))
+        print(f"CLIP-ReID forward={shape}; shared_detection_cache={'HIT' if cached else 'MISS'}")
         return
-
-    with tracker.phase("Detect all persons with Grounding DINO"):
-        cached = load_detection_cache(detection_cache, detect_meta, len(gallery))
-        detection_cache_hit = cached is not None
-        if cached is None and args.require_detection_cache:
-            raise RuntimeError(
-                "Grounding DINO detection cache is missing/stale while "
-                "--require-detection-cache is set; refusing to launch the expensive "
-                "all-gallery detector pass. Run --preflight-only to inspect the cache "
-                "fingerprint first."
-            )
-        if cached is None:
-            offsets, boxes, confidences = compute_detections(
-                cfg=cfg,
-                gallery=gallery,
-                detector_config=detector_config,
-                detector_checkpoint=detector_checkpoint,
-                device=device,
-            )
-            save_detection_cache(
-                detection_cache, detect_meta, offsets, boxes, confidences
-            )
-        else:
-            offsets, boxes, confidences = cached
-        counts = np.diff(offsets)
-        tracker.log(
-            f"detected_persons={int(offsets[-1]):,} "
-            f"images_with_person={int((counts > 0).sum()):,}/{len(gallery):,} "
-            f"max_per_image={int(counts.max(initial=0))} cache={rel(detection_cache)}"
-        )
-
-    with tracker.phase("Encode detected persons with CLIP-ReID"):
-        feature_cache = resolve_path(str(cfg["cache"]["reid_features"]))
-        feat_meta = feature_fingerprint(
-            cfg=cfg,
-            config_path=config_path,
-            detection_cache=detection_cache,
-            reid_checkpoint=reid_checkpoint,
-            clip_backbone=clip_backbone,
-        )
-        expected_shape = (int(offsets[-1]), int(cfg["reid"]["feature_dim"]))
-        features = load_feature_cache(feature_cache, feat_meta, expected_shape)
-        feature_cache_hit = features is not None
-        if features is None:
-            features = compute_reid_features(
-                cfg=cfg,
-                gallery=gallery,
-                offsets=offsets,
-                boxes=boxes,
-                source_root=clipreid_source,
-                checkpoint=reid_checkpoint,
-                clip_backbone=clip_backbone,
-                cache_path=feature_cache,
-                cache_meta=feat_meta,
-                device=device,
-            )
-        tracker.log(
-            f"person_features={features.shape} dtype={features.dtype} cache={rel(feature_cache)}"
-        )
-
-    with tracker.phase("Compute Hungarian + strict-min query-gallery scores"):
-        scores_path = output_dir / "scores.npy"
-        scores = compute_scores(
-            cfg=cfg,
-            queries=queries,
-            query_indices=query_indices,
-            features=features,
-            offsets=offsets,
-            output_path=scores_path,
-        )
-
-    with tracker.phase("Validate full score-matrix contract"):
-        validate_scores(scores, len(queries), len(gallery))
-        query_counts = np.diff(offsets)[query_indices]
-        tracker.log(
-            f"scores={scores.shape} finite=yes query_sets_empty={int((query_counts == 0).sum())} "
-            f"query_sets_multi_person={int((query_counts > 1).sum())}"
-        )
-
-    with tracker.phase("Write reproducibility metadata"):
-        run = {
-            "method": METHOD_ID,
-            "display_name": str(cfg.get("display_name", "Grounding DINO + CLIP-ReID - Set")),
-            "group": str(cfg.get("group", "Simple / Obvious Baselines")),
-            "cpr_supervision": str(cfg.get("cpr_supervision", "No")),
-            "adapter_version": ADAPTER_VERSION,
-            "config": rel(config_path),
-            "sources": {
-                "groundingdino": {
-                    "repository": str(cfg["source"]["groundingdino"]["repository"]),
-                    "commit": str(cfg["source"]["groundingdino"]["commit"]),
-                    "checkout": rel(gdino_source),
-                },
-                "clip_reid": {
-                    "repository": str(cfg["source"]["clip_reid"]["repository"]),
-                    "commit": str(cfg["source"]["clip_reid"]["commit"]),
-                    "checkout": rel(clipreid_source),
-                },
-            },
-            "detector": {
-                **cfg["detector"],
-                "config_path": rel(detector_config),
-                "checkpoint_sha256": sha256_file(detector_checkpoint),
-                "attention_backend": gdino_attention_backend,
-                "source_import_mode": "pinned_checkout_direct",
-            },
-            "reid": {
-                **cfg["reid"],
-                "checkpoint_sha256": sha256_file(reid_checkpoint),
-                "openai_clip_checkpoint_sha256": sha256_file(clip_backbone),
-                "feature_semantics": (
-                    "official CLIP-ReID eval feature: concat pre-BN ViT feature (768) "
-                    "and projected CLIP feature (512), L2-normalized for cosine scoring"
-                ),
-            },
-            "setmatch": cfg["setmatch"],
-            "benchmark_adaptation": {
-                "purpose": (
-                    "Test whether scene-level CPR can be reduced to person detection plus ReID."
-                ),
-                "query_person_construction": (
-                    "All Grounding DINO person detections in the query/reference image."
-                ),
-                "gallery_person_construction": (
-                    "All Grounding DINO person detections in each gallery image."
-                ),
-                "pair_score": "cosine similarity between L2-normalized CLIP-ReID person embeddings",
-                "assignment": "maximum-weight one-to-one Hungarian matching",
-                "aggregation": "strict minimum over assigned pair similarities",
-                "missing_person_behavior": (
-                    f"score={float(cfg['setmatch']['unmatched_score'])} when gallery has fewer "
-                    "detected persons than the query set or the query set is empty"
-                ),
-                "text_used": False,
-                "forbidden_cpr_labels_used": False,
-                "query_image_removed_inside_method": False,
-            },
-            "runtime": cfg["runtime"],
-            "cache": {
-                "detections": rel(detection_cache),
-                "detections_hit": detection_cache_hit,
-                "reid_features": rel(feature_cache),
-                "reid_features_hit": feature_cache_hit,
-            },
-            "detection_statistics": {
-                "total_persons": int(offsets[-1]),
-                "images_with_person": int((counts > 0).sum()),
-                "images_without_person": int((counts == 0).sum()),
-                "mean_persons_per_image": float(counts.mean()),
-                "max_persons_per_image": int(counts.max(initial=0)),
-            },
-            "num_queries": len(queries),
-            "num_gallery": len(gallery),
-            "scores": rel(scores_path),
-            "higher_is_better": True,
-        }
-        run_path = output_dir / "run.json"
-        run_path.write_text(
-            json.dumps(run, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
-        tracker.log(f"scores={rel(scores_path)} run={rel(run_path)}")
-
-    tracker.finish()
+    person, features, query_sets, stats = prepare_person_branch(cfg=cfg, config_path=config_path,
+        gallery_manifest=gallery_manifest, query_manifest=query_manifest, device=device,
+        require_cache=args.require_detection_cache, preflight=False, text_free=args.text_free_diagnostic)
+    method = METHOD_ID
+    output = resolve_path(cfg["output"]["dir"])
+    metadata = person.metadata()
+    if args.text_free_diagnostic:
+        method += "_textfree_diagnostic"
+        output = ROOT / "runs" / method
+        index = build_gallery_index(gallery)
+        query_sets = [features[person.detections.offsets[index[q["image_id"]]]:
+                              person.detections.offsets[index[q["image_id"]]+1]] for q in queries]
+        metadata["query_selection_uses_text"] = False
+        metadata["localization_fingerprint"] = None
+        metadata["diagnostic_only"] = True
+    query_indices = query_gallery_indices(queries, build_gallery_index(gallery))
+    scores = compute_scores(cfg=cfg, queries=queries, query_indices=query_indices, features=features,
+        offsets=person.detections.offsets, output_path=output/"scores.npy", query_features_list=query_sets)
+    validate_scores(scores, len(queries), len(gallery))
+    run = {"method": method, "display_name": cfg["display_name"] if method==METHOD_ID else "CLIP-ReID all-person text-free diagnostic",
+           "group": cfg["group"], "cpr_supervision": cfg["cpr_supervision"], "adapter_version": ADAPTER_VERSION,
+           "sources": cfg["source"], "reid": cfg["reid"], "setmatch": matching_metadata(cfg, score_space="cosine"),
+           "shared_person_protocol": metadata,
+           "benchmark_adaptation": {"text_used_for_localization": method==METHOD_ID,
+                "text_used_for_reid_or_pairwise_scoring": False, "representation": "native CLIP-ReID MSMT17"},
+           "cache": {"person_features": str(resolve_path(cfg["cache"]["reid_features"])), **stats},
+           "num_queries": len(queries), "num_gallery": len(gallery), "scores": str(output/"scores.npy"),
+           "higher_is_better": True, "config": rel(config_path)}
+    if args.text_free_diagnostic:
+        run["data_fingerprint"] = {"gallery_sha256": person.detections.fingerprint["gallery_manifest_sha256"],
+                                   "queries_sha256": sha256_file(query_manifest)}
+    else:
+        run["data_fingerprint"] = manifest_identity(run["shared_person_protocol"])
+    write_meta(output/"run.json", run)
+    print(f"Saved {output/'scores.npy'} shape={scores.shape}")
 
 
 if __name__ == "__main__":

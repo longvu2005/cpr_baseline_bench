@@ -39,13 +39,13 @@ def main() -> None:
 
     tracker = PhaseTracker("s9_prepare", total=2)
     tracker.advance("Prepare S5 artifacts")
-    cmd = [sys.executable, "-u", "methods/simple/05_groundingdino_clipreid_set/download_checkpoint.py"]
+    cmd = [sys.executable, "-u", "methods/simple/05_reid_set/download_checkpoint.py"]
     if args.force:
         cmd.append("--force")
     run_step("S5", cmd)
 
     tracker.advance("Prepare S8 artifacts")
-    cmd = [sys.executable, "-u", "methods/simple/08_qwen_image_edit_clip/download_checkpoint.py"]
+    cmd = [sys.executable, "-u", "methods/simple/08_qwen_edit_clip/download_checkpoint.py"]
     if args.force:
         cmd.append("--force")
     run_step("S8", cmd)

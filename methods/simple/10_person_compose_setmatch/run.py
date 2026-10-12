@@ -18,7 +18,6 @@ import numpy as np
 import torch
 import yaml
 from PIL import Image
-from scipy.optimize import linear_sum_assignment
 
 ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
@@ -26,9 +25,14 @@ if str(ROOT) not in sys.path:
 
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
+from cpr_person.adapter import load_person_context, matching_metadata, manifest_identity
+from cpr_person.cache import feature_config_hash
+from cpr_person.detection import protocol_config
+from cpr_person.matching import score_feature_sets
+from cpr_person.detection import read_rgb
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "per_person_clip_compose_setmatch"
-ADAPTER_VERSION = "2026-10-09-v3-stage2-text-routing"
+ADAPTER_VERSION = "2026-10-12-shared-person-v1"
 PERSON_FEATURE_SCHEMA = 1
 ALPHA_SCHEMA = 1
 
@@ -142,8 +146,9 @@ def person_feature_fingerprint(*, config_path: Path, detection_cache: Path, clip
     return {
         "schema": PERSON_FEATURE_SCHEMA,
         "adapter_version": ADAPTER_VERSION,
-        "config_sha256": sha256_file(config_path),
+        "feature_config_sha256": feature_config_hash(config_path),
         "detection_cache_sha256": sha256_file(detection_cache),
+        "shared_detection_identity": detection_cache.parent.name,
         "clip_checkpoint_sha256": sha256_file(clip_checkpoint),
         "clip_name": clip_name,
     }
@@ -233,12 +238,12 @@ def compute_person_features(*, gallery: Sequence[dict[str, Any]], offsets: np.nd
         if write_cursor != total_persons:
             raise RuntimeError(f"Encoded {write_cursor} persons, expected {total_persons}")
         mmap.flush()
-        del mmap
+        mmap = None
         os.replace(temp, cache_path)
         write_json(meta_path(cache_path), cache_meta)
     except Exception:
         try:
-            del mmap
+            mmap = None
         except Exception:
             pass
         temp.unlink(missing_ok=True)
@@ -255,13 +260,6 @@ def clip_text_features(model, texts: list[str], batch_size: int, device: torch.d
         feat /= feat.norm(dim=1, keepdim=True).clamp_min(1e-12)
         chunks.append(feat.cpu().numpy())
     return np.concatenate(chunks, axis=0).astype(np.float32, copy=False)
-
-
-def hungarian_maximize(similarity: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    try:
-        return linear_sum_assignment(similarity, maximize=True)
-    except TypeError:
-        return linear_sum_assignment(-similarity)
 
 
 def query_compose_text(query: dict[str, Any], subject: dict[str, Any]) -> str:
@@ -281,53 +279,29 @@ def query_compose_text(query: dict[str, Any], subject: dict[str, Any]) -> str:
     raise ValueError(f"Query {query.get('query_id')} has no usable composition text")
 
 
-def prepare_query_data(*, queries: Sequence[dict[str, Any]], query_indices: np.ndarray, person_features: np.ndarray, offsets: np.ndarray, model, device: torch.device, text_batch_size: int) -> list[dict[str, Any]]:
-    prepared: list[dict[str, Any]] = []
-    for qi, query in enumerate(progress_bar(queries, desc="Prepare query person compositions", total=len(queries), unit="query")):
-        subjects = query.get("subjects")
-        if not isinstance(subjects, list) or not subjects:
-            prepared.append({"valid": False, "reason": "no_subjects", "count": 0})
-            continue
-        source_gi = int(query_indices[qi])
-        q_start, q_end = int(offsets[source_gi]), int(offsets[source_gi + 1])
-        query_persons = np.asarray(person_features[q_start:q_end], dtype=np.float32)
-        m = len(subjects)
-        if query_persons.shape[0] < m or m == 0:
-            prepared.append({"valid": False, "reason": "too_few_query_persons", "count": m})
-            continue
-        select_texts = []
-        compose_texts = []
-        try:
-            for si, subject in enumerate(subjects):
-                if not isinstance(subject, dict):
-                    raise TypeError(f"subject {si} is not an object")
-                select_text = str(subject.get("select_text") or "").strip()
-                if not select_text:
-                    raise ValueError(f"subject {si} has empty select_text")
-                select_texts.append(select_text)
-                compose_texts.append(query_compose_text(query, subject))
-        except Exception as error:
-            prepared.append({"valid": False, "reason": f"bad_subject_text:{error}", "count": m})
-            continue
-        selector_feat = clip_text_features(model, select_texts, text_batch_size, device)
-        similarity = selector_feat @ query_persons.T
-        if m == 1:
-            assignment = np.asarray([int(np.argmax(similarity[0]))], dtype=np.int64)
-        else:
-            rows, cols = hungarian_maximize(similarity)
-            if len(rows) != m:
-                prepared.append({"valid": False, "reason": "localization_assignment_failed", "count": m})
-                continue
-            order = np.argsort(rows)
-            assignment = cols[order].astype(np.int64, copy=False)
-        selected_query_features = query_persons[assignment]
-        compose_text_feat = clip_text_features(model, compose_texts, text_batch_size, device)
-        prepared.append({
-            "valid": True,
-            "count": m,
-            "selected_query_features": selected_query_features.astype(np.float32, copy=False),
-            "compose_text_features": compose_text_feat.astype(np.float32, copy=False),
-        })
+def prepare_query_data(*, queries, query_indices, person_features, offsets, model, device,
+                       text_batch_size, person, preprocess):
+    prepared, full_features = [], {}
+    with torch.no_grad():
+        for qi, query in enumerate(queries):
+            gi = int(query_indices[qi])
+            selected, texts = [], []
+            for si, member in person.localization.flat(qi):
+                ref = member["global_person_index"]
+                if ref is None:
+                    if gi not in full_features:
+                        image = read_rgb(image_path(person.gallery[gi], gi))
+                        feature = model.encode_image(preprocess(image).unsqueeze(0).to(device)).float()
+                        feature /= feature.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+                        full_features[gi] = feature[0].cpu().numpy()
+                    selected.append(full_features[gi])
+                else:
+                    selected.append(np.asarray(person_features[ref], dtype=np.float32))
+                texts.append(query_compose_text(query, query["subjects"][si]))
+            composed_text = clip_text_features(model, texts, text_batch_size, device)
+            prepared.append({"valid": True, "count": len(selected),
+                             "selected_query_features": np.stack(selected).astype(np.float32),
+                             "compose_text_features": composed_text.astype(np.float32)})
     return prepared
 
 
@@ -338,39 +312,9 @@ def compose_query_set(selected_query_features: np.ndarray, compose_text_features
     return (composed / norms).astype(np.float32, copy=False)
 
 
-def score_one_query(*, query_features: np.ndarray, all_features: np.ndarray, offsets: np.ndarray, counts: np.ndarray, person_image_index: np.ndarray, unmatched_score: float, feature_chunk_size: int) -> np.ndarray:
-    num_gallery = len(counts)
-    m = int(query_features.shape[0])
-    result = np.full(num_gallery, unmatched_score, dtype=np.float32)
-    if m == 0:
-        return result
-    q = np.asarray(query_features, dtype=np.float32)
-    if m == 1:
-        total_persons = int(offsets[-1])
-        if total_persons == 0:
-            return result
-        person_scores = np.empty(total_persons, dtype=np.float32)
-        query_vector = q[0]
-        for start in range(0, total_persons, feature_chunk_size):
-            end = min(start + feature_chunk_size, total_persons)
-            chunk = np.asarray(all_features[start:end], dtype=np.float32)
-            person_scores[start:end] = chunk @ query_vector
-        image_scores = np.full(num_gallery, -np.inf, dtype=np.float32)
-        np.maximum.at(image_scores, person_image_index, person_scores)
-        nonempty = counts > 0
-        result[nonempty] = image_scores[nonempty]
-        return result
-    eligible = np.flatnonzero(counts >= m)
-    for gi in eligible:
-        start, end = int(offsets[gi]), int(offsets[gi + 1])
-        gallery_features = np.asarray(all_features[start:end], dtype=np.float32)
-        similarity = q @ gallery_features.T
-        rows, cols = hungarian_maximize(similarity)
-        if len(rows) != m:
-            raise RuntimeError(f"Hungarian assignment returned {len(rows)} pairs for query set size {m}")
-        assigned = similarity[rows, cols]
-        result[gi] = float(np.min(assigned))
-    return result
+def score_one_query(*, query_features, all_features, offsets, counts,
+                    person_image_index, unmatched_score, feature_chunk_size):
+    return score_feature_sets(query_features, all_features, offsets, unmatched_score, feature_chunk_size)
 
 
 def compute_scores_for_alpha(*, prepared_queries: list[dict[str, Any]], all_features: np.ndarray, offsets: np.ndarray, unmatched_score: float, feature_chunk_size: int, alpha: float) -> np.ndarray:
@@ -400,6 +344,8 @@ def validate_score_matrix(scores: np.ndarray, shape: tuple[int, int], label: str
 
 
 def ensure_validation_split(main_gallery_manifest: Path, main_query_manifest: Path, val_gallery_manifest: Path, val_query_manifest: Path) -> None:
+    from cpr_person.validation import ensure_separate_queries
+    ensure_separate_queries(main_query_manifest, val_query_manifest)
     for path in (val_gallery_manifest, val_query_manifest):
         if not path.is_file():
             raise FileNotFoundError(f"Missing validation manifest: {rel(path)}. S10 requires a separate validation split for alpha selection.")
@@ -520,46 +466,21 @@ def main() -> None:
             val_queries = load_jsonl(val_query_manifest)
             cpr_supervision = "Val only"
 
-        s5_method_dir = resolve_path(str(cfg["shared_protocol"]["method_dir"]))
-        s5_config_path = resolve_path(str(cfg["shared_protocol"]["config"]))
-        s5_cfg = load_yaml(s5_config_path)
-        s5 = load_module(s5_method_dir, "cpr_s10_source_s5")
-
         main_shape = (len(main_queries), len(main_gallery))
         if alpha_mode == "validation":
             tracker.log(f"main_gallery={len(main_gallery):,} main_queries={len(main_queries):,} val_gallery={len(val_gallery):,} val_queries={len(val_queries):,} alpha_mode=validation")
         else:
             tracker.log(f"main_gallery={len(main_gallery):,} main_queries={len(main_queries):,} alpha_mode=fixed alpha={alpha:.2f}")
 
-    with tracker.phase("Prepare shared/person detections"):
-        device = s5.device_from(str(s5_cfg["runtime"]["device"]))
-        gd_checkout = s5.ensure_clean_pinned_source(s5_cfg["source"]["groundingdino"], "Grounding DINO")
-        detector_config = s5.require_file(gd_checkout / str(s5_cfg["detector"]["config"]), "Grounding DINO config")
-        detector_checkpoint = s5.require_file(resolve_path(str(s5_cfg["detector"]["checkpoint"])), "Grounding DINO checkpoint")
-        s5.configure_groundingdino_offline(s5_cfg)
-        gdino_attention_backend = s5.configure_groundingdino_source(gd_checkout)
-
-        main_det_cache = resolve_path(str(cfg["cache"]["main"]["detections"]))
-        main_det_meta = s5.detection_fingerprint(cfg=s5_cfg, config_path=s5_config_path, gallery_manifest=main_gallery_manifest, detector_config=detector_config, detector_checkpoint=detector_checkpoint, attention_backend=gdino_attention_backend)
-        loaded = s5.load_detection_cache(main_det_cache, main_det_meta, len(main_gallery))
-        if loaded is None:
-            main_offsets, main_boxes, _main_conf = s5.compute_detections(cfg=s5_cfg, gallery=main_gallery, detector_config=detector_config, detector_checkpoint=detector_checkpoint, device=device)
-            s5.save_detection_cache(main_det_cache, main_det_meta, main_offsets, main_boxes, _main_conf)
-        else:
-            main_offsets, main_boxes, _main_conf = loaded
-
-        val_det_cache = None
-        val_offsets = None
-        val_boxes = None
+    with tracker.phase("Consume shared candidates and Subject memberships"):
+        device = device_from(str(cfg["runtime"]["device"]))
+        main_person = load_person_context(main_gallery, main_queries, main_gallery_manifest, main_query_manifest, device)
+        main_det_cache, main_offsets, main_boxes = main_person.detections.path, main_person.detections.offsets, main_person.detections.boxes
+        gdino_attention_backend = protocol_config()["detector"]["attention_backend"]
+        val_person = val_det_cache = val_offsets = val_boxes = None
         if alpha_mode == "validation":
-            val_det_cache = resolve_path(str(cfg["cache"]["validation"]["detections"]))
-            val_det_meta = s5.detection_fingerprint(cfg=s5_cfg, config_path=s5_config_path, gallery_manifest=val_gallery_manifest, detector_config=detector_config, detector_checkpoint=detector_checkpoint, attention_backend=gdino_attention_backend)
-            loaded = s5.load_detection_cache(val_det_cache, val_det_meta, len(val_gallery))
-            if loaded is None:
-                val_offsets, val_boxes, _val_conf = s5.compute_detections(cfg=s5_cfg, gallery=val_gallery, detector_config=detector_config, detector_checkpoint=detector_checkpoint, device=device)
-                s5.save_detection_cache(val_det_cache, val_det_meta, val_offsets, val_boxes, _val_conf)
-            else:
-                val_offsets, val_boxes, _val_conf = loaded
+            val_person = load_person_context(val_gallery, val_queries, val_gallery_manifest, val_query_manifest, device)
+            val_det_cache, val_offsets, val_boxes = val_person.detections.path, val_person.detections.offsets, val_person.detections.boxes
 
     with tracker.phase("Load CLIP ViT-L/14"):
         device = device_from(str(cfg["runtime"]["device"]))
@@ -597,12 +518,12 @@ def main() -> None:
 
     with tracker.phase("Prepare query-localized person compositions"):
         main_query_indices = query_gallery_indices(main_queries, build_gallery_index(main_gallery))
-        main_prepared_queries = prepare_query_data(queries=main_queries, query_indices=main_query_indices, person_features=main_person_features, offsets=main_offsets, model=model, device=device, text_batch_size=int(cfg["runtime"]["clip_text_batch_size"]))
+        main_prepared_queries = prepare_query_data(queries=main_queries, query_indices=main_query_indices, person_features=main_person_features, offsets=main_offsets, model=model, device=device, text_batch_size=int(cfg["runtime"]["clip_text_batch_size"]), person=main_person, preprocess=preprocess)
 
         val_prepared_queries = None
         if alpha_mode == "validation":
             val_query_indices = query_gallery_indices(val_queries, build_gallery_index(val_gallery))
-            val_prepared_queries = prepare_query_data(queries=val_queries, query_indices=val_query_indices, person_features=val_person_features, offsets=val_offsets, model=model, device=device, text_batch_size=int(cfg["runtime"]["clip_text_batch_size"]))
+            val_prepared_queries = prepare_query_data(queries=val_queries, query_indices=val_query_indices, person_features=val_person_features, offsets=val_offsets, model=model, device=device, text_batch_size=int(cfg["runtime"]["clip_text_batch_size"]), person=val_person, preprocess=preprocess)
 
     with tracker.phase("Resolve composition alpha"):
         if alpha_mode == "validation":
@@ -624,6 +545,8 @@ def main() -> None:
         output_dir = resolve_path(str(cfg["output"]["dir"]))
         run_path = output_dir / "run.json"
         payload = {
+            "shared_person_protocol": main_person.metadata(),
+            "setmatch": matching_metadata(cfg, score_space="cosine"),
             "method": cfg["method"],
             "display_name": cfg["display_name"],
             "group": cfg["group"],
@@ -643,6 +566,7 @@ def main() -> None:
             "scores": rel(output_dir / "scores.npy"),
             "higher_is_better": True,
         }
+        payload["data_fingerprint"] = manifest_identity(payload["shared_person_protocol"])
         write_json(run_path, payload)
         tracker.log(f"scores={rel(output_dir / 'scores.npy')} run={rel(run_path)}")
 

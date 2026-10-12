@@ -34,6 +34,8 @@ if str(ROOT) not in sys.path:
 
 from benchmark_progress import PhaseTracker, byte_progress  # noqa: E402
 
+from cpr_person.adapter import prepare_shared
+from cpr_person.detection import protocol_config
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 CLIP_B32_SHA256 = "40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af"
 CLIP_B32_URL = (
@@ -447,7 +449,7 @@ def main() -> None:
 
     config_path = resolve_path(args.config)
     cfg = load_yaml(config_path)
-    tracker = PhaseTracker("instruct_reid_setmatch_prepare", total=5)
+    tracker = PhaseTracker("instruct_reid_setmatch_prepare", total=4)
 
     tracker.advance("Pin official Instruct-ReID source")
     checkout = prepare_source(cfg)
@@ -458,23 +460,11 @@ def main() -> None:
     tracker.advance("Prepare BERT runtime assets required by official constructor")
     bert_meta = prepare_bert_runtime(cfg, checkout, args.force)
 
-    tracker.advance("Prepare predicted-person detector checkpoint")
-    detector_cfg = cfg["localization"]["detector"]
-    download_http(
-        url=str(detector_cfg["checkpoint_url"]),
-        path=resolve_path(str(detector_cfg["checkpoint"])),
-        force=args.force,
-        expected_hash_prefix=DETECTOR_HASH_PREFIX,
-    )
+    tracker.advance("Prepare shared person protocol assets")
+    prepare_shared(args.force)
+    detector_cfg = protocol_config()["detector"]
 
-    tracker.advance("Prepare OpenAI CLIP ViT-B/32 target selector")
-    selector_path = resolve_path(str(cfg["localization"]["query_selector"]["checkpoint"]))
-    download_http(
-        url=CLIP_B32_URL,
-        path=selector_path,
-        force=args.force,
-        expected_sha256=CLIP_B32_SHA256,
-    )
+    selector_path = resolve_path(protocol_config()["selector"]["checkpoint"])
 
     summary = {
         "source_commit": str(cfg["source"]["commit"]),

@@ -25,7 +25,6 @@ import torch
 import torch.nn.functional as F
 import yaml
 from PIL import Image
-from scipy.optimize import linear_sum_assignment
 from torch.utils.data import DataLoader, Dataset
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -33,9 +32,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
+from cpr_person.adapter import load_person_context, matching_metadata, manifest_identity
+from cpr_person.cache import feature_config_hash
+from cpr_person.detection import protocol_config, PROTOCOL_PATH
+from cpr_person.detection import BoxCandidate
+from cpr_person.matching import aggregate_component_scores
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "word4per_setmatch"
-ADAPTER_VERSION = "2026-08-13-v5-predicted-person-setmatch"
+ADAPTER_VERSION = "2026-10-12-shared-person-v1"
 
 
 @dataclass(frozen=True)
@@ -43,13 +47,6 @@ class QueryTarget:
     modify_text: str
     select_text: str
     subject_id: Any = None
-
-
-@dataclass(frozen=True)
-class BoxCandidate:
-    box: tuple[float, float, float, float]
-    score: float
-    fallback: bool = False
 
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -99,6 +96,7 @@ def checkpoint_identity(path: Path) -> dict[str, Any]:
 
 def build_cache_key(
     *,
+    person,
     config_path: Path,
     gallery_path: Path,
     queries_path: Path,
@@ -106,7 +104,10 @@ def build_cache_key(
 ) -> tuple[str, dict[str, Any]]:
     payload = {
         "adapter_version": ADAPTER_VERSION,
-        "config_sha256": sha256_file(config_path),
+        "feature_config_sha256": feature_config_hash(config_path),
+        "shared_protocol_sha256": sha256_file(PROTOCOL_PATH),
+        "detections": person.detections.fingerprint,
+        "memberships": person.localization.fingerprint,
         "gallery_sha256": sha256_file(gallery_path),
         "queries_sha256": sha256_file(queries_path),
         "checkpoints": [checkpoint_identity(path) for path in checkpoint_paths],
@@ -358,258 +359,6 @@ def load_word4per(cfg: dict[str, Any], old_project: Path, device: torch.device):
     )
 
 
-def load_detector(detector_cfg: dict[str, Any], device: torch.device):
-    from torchvision.models.detection import fasterrcnn_resnet50_fpn_v2
-
-    checkpoint = resolve_config_path(str(detector_cfg["checkpoint"]))
-    if not checkpoint.is_file():
-        raise FileNotFoundError(
-            f"Missing detector checkpoint: {rel(checkpoint)}. "
-            "Run download_checkpoint.py first."
-        )
-    model = fasterrcnn_resnet50_fpn_v2(weights=None, weights_backbone=None)
-    state = torch.load(checkpoint, map_location="cpu")
-    model.load_state_dict(state, strict=True)
-    model = model.to(device).eval()
-    return model, rel(checkpoint)
-
-
-@torch.no_grad()
-def detect_candidates(
-    detector,
-    weights,
-    path: Path,
-    detector_cfg: dict[str, Any],
-    device: torch.device,
-) -> list[BoxCandidate]:
-    from torchvision.transforms.functional import pil_to_tensor
-
-    with Image.open(path) as source:
-        image = source.convert("RGB")
-        width, height = image.size
-        tensor = pil_to_tensor(image).float().div_(255.0).to(device)
-
-    output = detector([tensor])[0]
-    labels = output["labels"].detach().cpu().numpy()
-    scores = output["scores"].detach().cpu().numpy()
-    boxes = output["boxes"].detach().cpu().numpy()
-
-    person_label = int(detector_cfg.get("person_label", 1))
-    max_persons = int(detector_cfg.get("max_persons_per_image", 10))
-    result: list[BoxCandidate] = []
-
-    order = np.argsort(-scores)
-    for idx in order:
-        if int(labels[idx]) != person_label:
-            continue
-        x1, y1, x2, y2 = (float(x) for x in boxes[idx])
-        x1 = max(0.0, min(x1, width - 1.0))
-        y1 = max(0.0, min(y1, height - 1.0))
-        x2 = max(x1 + 1.0, min(x2, float(width)))
-        y2 = max(y1 + 1.0, min(y2, float(height)))
-        result.append(BoxCandidate((x1, y1, x2, y2), float(scores[idx])))
-        if len(result) >= max_persons:
-            break
-
-    if not result:
-        result = [
-            BoxCandidate((0.0, 0.0, float(width), float(height)), -1.0, fallback=True)
-        ]
-    return result
-
-
-def choose_person_boxes(
-    candidates: Sequence[BoxCandidate],
-    score_threshold: float,
-    min_required: int,
-) -> list[BoxCandidate]:
-    selected = [c for c in candidates if c.score >= score_threshold]
-    if len(selected) < min_required:
-        used = {c.box for c in selected}
-        for candidate in candidates:
-            if candidate.box in used:
-                continue
-            selected.append(candidate)
-            used.add(candidate.box)
-            if len(selected) >= min_required:
-                break
-    return selected
-
-
-def save_candidate_cache(
-    path: Path,
-    gallery: Sequence[dict[str, Any]],
-    candidates: Sequence[Sequence[BoxCandidate]],
-) -> None:
-    with path.open("w", encoding="utf-8") as f:
-        for row, boxes in zip(gallery, candidates):
-            payload = {
-                "image_id": row["image_id"],
-                "boxes": [
-                    {
-                        "xyxy": list(candidate.box),
-                        "score": candidate.score,
-                        "fallback": candidate.fallback,
-                    }
-                    for candidate in boxes
-                ],
-            }
-            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-
-
-def load_candidate_cache(
-    path: Path, gallery: Sequence[dict[str, Any]]
-) -> list[list[BoxCandidate]] | None:
-    if not path.is_file():
-        return None
-    rows = load_jsonl(path)
-    if len(rows) != len(gallery):
-        return None
-
-    result: list[list[BoxCandidate]] = []
-    for expected, row in zip(gallery, rows):
-        if row.get("image_id") != expected.get("image_id"):
-            return None
-        candidates = []
-        for item in row.get("boxes", []):
-            xyxy = item.get("xyxy")
-            if not isinstance(xyxy, list) or len(xyxy) != 4:
-                return None
-            candidates.append(
-                BoxCandidate(
-                    tuple(float(x) for x in xyxy),
-                    float(item.get("score", -1.0)),
-                    bool(item.get("fallback", False)),
-                )
-            )
-        if not candidates:
-            return None
-        result.append(candidates)
-    return result
-
-
-def get_or_create_detection_cache(
-    gallery: Sequence[dict[str, Any]],
-    cache_path: Path,
-    detector_cfg: dict[str, Any],
-    device: torch.device,
-) -> tuple[list[list[BoxCandidate]], str]:
-    cached = load_candidate_cache(cache_path, gallery)
-    if cached is not None:
-        print(f"[cache] person candidates: {rel(cache_path)}", flush=True)
-        return cached, "cache"
-
-    detector, weights = load_detector(detector_cfg, device)
-    candidates: list[list[BoxCandidate]] = []
-    for i, row in enumerate(
-        progress_bar(
-            gallery, desc="Detect gallery persons", total=len(gallery), unit="image"
-        )
-    ):
-        candidates.append(
-            detect_candidates(detector, weights, image_path(row, i), detector_cfg, device)
-        )
-    save_candidate_cache(cache_path, gallery, candidates)
-    return candidates, str(weights)
-
-
-def load_clip_selector(selector_cfg: dict[str, Any], device: torch.device):
-    import clip  # type: ignore
-
-    checkpoint = resolve_config_path(str(selector_cfg["checkpoint"]))
-    if not checkpoint.is_file():
-        raise FileNotFoundError(
-            f"Missing query-selector CLIP checkpoint: {rel(checkpoint)}. "
-            "Run download_checkpoint.py first."
-        )
-    model, preprocess = clip.load(str(checkpoint), device=device, jit=False)
-    model.eval()
-    return clip, model, preprocess
-
-
-@torch.no_grad()
-def select_query_target_boxes(
-    queries: Sequence[dict[str, Any]],
-    query_targets: Sequence[Sequence[QueryTarget]],
-    gallery: Sequence[dict[str, Any]],
-    gallery_index: dict[Any, int],
-    all_candidates: Sequence[Sequence[BoxCandidate]],
-    localization_cfg: dict[str, Any],
-    device: torch.device,
-) -> tuple[list[list[tuple[float, float, float, float]]], dict[str, Any]]:
-    selector_cfg = localization_cfg["query_selector"]
-    detector_cfg = localization_cfg["detector"]
-    clip_module, clip_model, clip_preprocess = load_clip_selector(selector_cfg, device)
-    threshold = float(detector_cfg.get("score_threshold", 0.55))
-
-    selected_per_query: list[list[tuple[float, float, float, float]]] = []
-    localization_scores: list[float] = []
-    low_candidate_queries = 0
-    full_scene_fallback_slots = 0
-
-    for qi, (query, targets) in enumerate(
-        progress_bar(
-            zip(queries, query_targets),
-            total=len(queries),
-            desc="Select query targets",
-            unit="query",
-        )
-    ):
-        image_id = query.get("image_id")
-        if image_id not in gallery_index:
-            raise ValueError(f"Query {qi}: image_id not found in gallery: {image_id!r}")
-        gi = gallery_index[image_id]
-        boxes = choose_person_boxes(all_candidates[gi], threshold, len(targets))
-        path = image_path(gallery[gi], gi)
-        with Image.open(path) as source:
-            image = source.convert("RGB")
-            if len(boxes) < len(targets):
-                # A detector miss must not abort the entire benchmark. Fill only
-                # missing query-target slots with the full reference scene; this
-                # uses no GT box/identity information and is explicitly logged.
-                low_candidate_queries += 1
-                full_box = (0.0, 0.0, float(image.width), float(image.height))
-                missing = len(targets) - len(boxes)
-                boxes = list(boxes) + [
-                    BoxCandidate(full_box, -1.0, fallback=True) for _ in range(missing)
-                ]
-                full_scene_fallback_slots += missing
-            crop_tensors = [clip_preprocess(image.crop(candidate.box)) for candidate in boxes]
-
-        crop_batch = torch.stack(crop_tensors).to(device)
-        text_tokens = clip_module.tokenize([target.select_text for target in targets]).to(device)
-        image_features = clip_model.encode_image(crop_batch).float()
-        text_features = clip_model.encode_text(text_tokens).float()
-        image_features = F.normalize(image_features, p=2, dim=-1)
-        text_features = F.normalize(text_features, p=2, dim=-1)
-        sim = (text_features @ image_features.T).cpu().numpy()
-
-        rows, cols = linear_sum_assignment(-sim)
-        mapping = {int(r): int(c) for r, c in zip(rows, cols)}
-        if len(mapping) != len(targets):
-            raise RuntimeError(f"Query {qi}: incomplete target-localization assignment")
-
-        chosen = [boxes[mapping[i]].box for i in range(len(targets))]
-        selected_per_query.append(chosen)
-        localization_scores.extend(float(sim[i, mapping[i]]) for i in range(len(targets)))
-
-    stats = {
-        "selector": str(selector_cfg.get("backend", "openai_clip")),
-        "selector_model": str(selector_cfg.get("model", "ViT-B/32")),
-        "assignment": "hungarian",
-        "mean_assigned_clip_similarity": (
-            float(np.mean(localization_scores)) if localization_scores else None
-        ),
-        "min_assigned_clip_similarity": (
-            float(np.min(localization_scores)) if localization_scores else None
-        ),
-        "queries_with_too_few_candidates": low_candidate_queries,
-        "full_scene_fallback_slots": full_scene_fallback_slots,
-        "shortage_policy": "pad missing query-target slots with the full reference scene",
-    }
-    return selected_per_query, stats
-
-
 class GalleryPersonDataset(Dataset):
     def __init__(
         self,
@@ -723,8 +472,9 @@ class QueryTargetDataset(Dataset):
             gi = gallery_index[query["image_id"]]
             if len(query_targets) != len(query_boxes):
                 raise AssertionError(f"Query {qi}: target/box count mismatch")
-            for target, box in zip(query_targets, query_boxes):
-                self.items.append((gi, box, target.modify_text, qi))
+            for target, member_boxes in zip(query_targets, query_boxes, strict=True):
+                for box in member_boxes:
+                    self.items.append((gi, box, target.modify_text, qi))
 
     def __len__(self) -> int:
         return len(self.items)
@@ -862,138 +612,6 @@ def compute_component_person_scores(
     return cache_path
 
 
-def setmatch_image_score(matrix: np.ndarray, unmatched_score: float) -> float:
-    """Maximum-weight one-to-one assignment followed by minimum assigned score."""
-    num_targets, num_persons = matrix.shape
-    if num_targets < 1:
-        raise ValueError("SetMatch requires at least one target")
-
-    if num_persons < num_targets:
-        padding = np.full(
-            (num_targets, num_targets - num_persons),
-            unmatched_score,
-            dtype=np.float32,
-        )
-        matrix = np.concatenate([matrix, padding], axis=1)
-
-    rows, cols = linear_sum_assignment(-matrix)
-    if len(rows) != num_targets:
-        raise RuntimeError("Hungarian assignment did not cover every target")
-    assigned = matrix[rows, cols]
-    return float(np.min(assigned))
-
-
-def build_person_index(offsets: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    counts = np.diff(offsets).astype(np.int64, copy=False)
-    max_persons = int(counts.max(initial=0))
-    if max_persons < 1:
-        raise RuntimeError("Every gallery image must have at least one person crop")
-    index = np.full((len(counts), max_persons), -1, dtype=np.int64)
-    for gi, count in enumerate(counts):
-        if count:
-            index[gi, :count] = np.arange(offsets[gi], offsets[gi + 1])
-    return index, counts
-
-
-def setmatch_two_targets_all_images(
-    target_person_scores: np.ndarray,
-    person_index: np.ndarray,
-    counts: np.ndarray,
-    unmatched_score: float,
-) -> np.ndarray:
-    """Exact two-target specialization of maximum-weight Hungarian SetMatch."""
-    if target_person_scores.shape[0] != 2:
-        raise ValueError("Expected exactly two target rows")
-
-    safe_index = np.where(person_index >= 0, person_index, 0)
-    values = target_person_scores[:, safe_index]
-    values = np.asarray(values, dtype=np.float32)
-    values[:, person_index < 0] = -np.inf
-    out = np.empty(len(counts), dtype=np.float32)
-
-    one = counts == 1
-    if np.any(one):
-        real_idx = safe_index[one, 0]
-        best_real = np.maximum(
-            target_person_scores[0, real_idx], target_person_scores[1, real_idx]
-        )
-        out[one] = np.minimum(best_real, unmatched_score)
-
-    many = counts >= 2
-    if np.any(many):
-        a = values[0, many]
-        b = values[1, many]
-
-        def top2(x: np.ndarray):
-            idx = np.argpartition(-x, kth=1, axis=1)[:, :2]
-            vals = np.take_along_axis(x, idx, axis=1)
-            order = np.argsort(-vals, axis=1)
-            idx = np.take_along_axis(idx, order, axis=1)
-            vals = np.take_along_axis(vals, order, axis=1)
-            return vals[:, 0], idx[:, 0], vals[:, 1], idx[:, 1]
-
-        a1, ai1, a2, _ = top2(a)
-        b1, bi1, b2, _ = top2(b)
-
-        b_excl_a = np.where(bi1 != ai1, b1, b2)
-        a_excl_b = np.where(ai1 != bi1, a1, a2)
-
-        sum_a_first = a1 + b_excl_a
-        sum_b_first = b1 + a_excl_b
-        choose_a = sum_a_first >= sum_b_first
-        out[many] = np.where(
-            choose_a,
-            np.minimum(a1, b_excl_a),
-            np.minimum(b1, a_excl_b),
-        )
-
-    zero = counts == 0
-    if np.any(zero):
-        out[zero] = unmatched_score
-    return out
-
-
-def aggregate_component_scores(
-    component_score_path: Path,
-    query_offsets: np.ndarray,
-    gallery_offsets: np.ndarray,
-    scores_path: Path,
-    unmatched_score: float,
-) -> None:
-    component_scores = np.load(component_score_path, mmap_mode="r")
-    person_index, counts = build_person_index(gallery_offsets)
-    scores = np.lib.format.open_memmap(
-        scores_path,
-        mode="w+",
-        dtype=np.float32,
-        shape=(len(query_offsets) - 1, len(gallery_offsets) - 1),
-    )
-
-    for qi in progress_bar(
-        range(len(query_offsets) - 1),
-        desc="SetMatch aggregation",
-        total=len(query_offsets) - 1,
-        unit="query",
-    ):
-        start, end = int(query_offsets[qi]), int(query_offsets[qi + 1])
-        target_scores = np.asarray(component_scores[start:end], dtype=np.float32)
-        num_targets = end - start
-
-        if num_targets == 1:
-            scores[qi] = np.maximum.reduceat(target_scores[0], gallery_offsets[:-1])
-        elif num_targets == 2:
-            scores[qi] = setmatch_two_targets_all_images(
-                target_scores, person_index, counts, unmatched_score
-            )
-        else:
-            for gi in range(len(gallery_offsets) - 1):
-                p_start, p_end = int(gallery_offsets[gi]), int(gallery_offsets[gi + 1])
-                scores[qi, gi] = setmatch_image_score(
-                    target_scores[:, p_start:p_end], unmatched_score
-                )
-    scores.flush()
-
-
 def score_all_queries(
     query_features: Sequence[np.ndarray],
     gallery_feature_path: Path,
@@ -1058,17 +676,20 @@ def main() -> None:
     if not gallery or not queries:
         raise RuntimeError("Canonical gallery/query manifests must be non-empty")
 
+    device = device_from(str(cfg.get("runtime", {}).get("device", "cuda")))
+    person = load_person_context(gallery, queries, gallery_path, queries_path, device)
     ckpt_cfg = cfg["checkpoint"]
     stage2_ckpt_for_cache = resolve_config_path(str(ckpt_cfg["stage2"]))
     stage2_cfg_for_cache = resolve_config_path(str(ckpt_cfg["stage2_config"]))
     base_clip_for_cache = resolve_config_path(str(ckpt_cfg["base_clip"]))
     selector_for_cache = resolve_config_path(
-        str(cfg["localization"]["query_selector"]["checkpoint"])
+        str(protocol_config()["selector"]["checkpoint"])
     )
     detector_for_cache = resolve_config_path(
-        str(cfg["localization"]["detector"]["checkpoint"])
+        str(protocol_config()["detector"]["checkpoint"])
     )
     cache_key, cache_fingerprint = build_cache_key(
+        person=person,
         config_path=config_path,
         gallery_path=gallery_path,
         queries_path=queries_path,
@@ -1095,42 +716,15 @@ def main() -> None:
         f"detector_device={detector_device} cache={cache_key}"
     )
 
-    tracker.advance("Detect gallery person candidates")
-    localization_cfg = cfg["localization"]
-    detector_cfg = localization_cfg["detector"]
-    candidate_cache_path = cache_dir / "person_candidates.jsonl"
-    all_candidates, detector_weights = get_or_create_detection_cache(
-        gallery, candidate_cache_path, detector_cfg, detector_device
-    )
-    if detector_device.type == "cuda":
-        torch.cuda.empty_cache()
-
-    threshold = float(detector_cfg.get("score_threshold", 0.55))
-    gallery_boxes = [
-        choose_person_boxes(candidates, threshold, min_required=1)
-        for candidates in all_candidates
-    ]
-    tracker.log(
-        f"person candidates ready: {sum(len(x) for x in gallery_boxes):,} crops "
-        f"across {len(gallery_boxes):,} gallery images (source={detector_weights})"
-    )
-
-    tracker.advance("Select query target persons with CLIP + Hungarian")
-    selected_query_boxes, selector_stats = select_query_target_boxes(
-        queries=queries,
-        query_targets=query_targets,
-        gallery=gallery,
-        gallery_index=gallery_index,
-        all_candidates=all_candidates,
-        localization_cfg=localization_cfg,
-        device=device,
-    )
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-    tracker.log(
-        f"query localization ready: mean_clip={selector_stats.get('mean_assigned_clip_similarity')} "
-        f"fallback_slots={selector_stats.get('full_scene_fallback_slots')}"
-    )
+    tracker.advance("Consume shared ordered gallery persons")
+    detector_cfg = protocol_config()["detector"]
+    candidate_cache_path = person.detections.path
+    gallery_boxes = person.detections.candidates()
+    detector_weights = str(resolve_config_path(detector_cfg["checkpoint"]))
+    threshold = float(detector_cfg["score_threshold"])
+    tracker.advance("Consume shared Subject memberships")
+    selected_query_boxes = person.localization.boxes()
+    selector_stats = person.localization.stats
 
     tracker.advance("Load pinned Word4Per Stage-2 model")
     old_project = ensure_official_source(cfg)
@@ -1254,12 +848,8 @@ def main() -> None:
             "candidate_cache": rel(candidate_cache_path),
             **selector_stats,
         },
-        "setmatch": {
-            "assignment": "maximum-weight one-to-one Hungarian",
-            "aggregation": "minimum assigned target score",
-            "unmatched_score": unmatched_score,
-            "no_partial_credit": True,
-        },
+        "setmatch": matching_metadata(cfg, score_space="cosine"),
+        "shared_person_protocol": person.metadata(),
         "data_schema": {
             "gallery": "gallery.jsonl image_id + path; person_ids are not used for scoring/localization",
             "query_reference": "queries.jsonl image_id -> gallery.image_id",
@@ -1296,7 +886,7 @@ def main() -> None:
             "Canonical gallery/query ordering is preserved.",
             "The query image remains in scores.npy; evaluate.py handles exclusion.",
             "Person instances and query-target boxes are predicted; no GT boxes or identity labels are used for localization/scoring.",
-            "Word4Per is applied independently to each target subject and SetMatch enforces one-to-one person coverage.",
+            "Word4Per is applied independently to each predicted Subject member and SetMatch enforces one-to-one person coverage.",
             "No CPR benchmark training, fine-tuning, checkpoint selection, or hyperparameter tuning is performed.",
         ],
     }
@@ -1306,6 +896,7 @@ def main() -> None:
     )
 
     tracker.advance("Write run metadata and final outputs")
+    run["data_fingerprint"] = manifest_identity(run["shared_person_protocol"])
     run_path = output / "run.json"
     with run_path.open("w", encoding="utf-8") as f:
         json.dump(run, f, indent=2, ensure_ascii=False)

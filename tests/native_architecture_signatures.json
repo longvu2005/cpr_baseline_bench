@@ -1,0 +1,44 @@
+{
+  "methods/published/01_word4per_setmatch/run.py": {
+    "load_word4per": "fd96bf1c4a56030ff9455e42b75160b6d5f8d13aa5370077993fd2ef2c236fe2",
+    "encode_query_targets": "d97a292d2ca2b63c440371feddcb61e32ec7ec5c259dac9cf4f1979cde9da163",
+    "compute_component_person_scores": "4e92b5123068671ba94eaaba5e80d0c498c48562f2075d06a4e09793d2486981"
+  },
+  "methods/published/02_fafa_setmatch/run.py": {
+    "load_fafa": "6f52e3957cfc6e5b010c11d7cdf8d194963705d5ecba5d59058a6d7dc35b417c",
+    "compute_component_person_scores": "a28b9fcfb50901007efb73bd9b4d3dce209ecf3f70b4aa29d3383f9e09192eb2",
+    "encode_query_targets": "b9466d58d03a1522c855374cb11e9bf5b3df751ad29295555896b6d501313494"
+  },
+  "methods/published/03_instruct_reid_setmatch/run.py": {
+    "load_official_instruct_model": "8c64e5c33e4a27f020659f818d62c698b43e1d27706da8cda998c981eb3c7e20",
+    "run_instruct_batch": "9e64cac40307e379974b07c8bb847839229b57715fbfb64895b6f361c0d1bfae",
+    "negative_squared_euclidean": "b76835b73b875838580746976bbbf86cc31a9e168a438247f7f2bede2bf03bfb",
+    "modification_instruction": "0760b900544b29a844356ad03351984fb07dcb38d3787446d64e471845ff356d"
+  },
+  "methods/published/08_basic_setmatch/run.py": {
+    "BasicScorer": "fc0db5aec090e258bb20db14483629a9d7821d25ea870d5f356fe75540624079",
+    "official_parity_check": "c52635727aef46b98fe11d4f4a7cb7a3820c801094cebd138cf88aa522ea4988",
+    "verify_and_get_official_preset": "c27fa1dd21bd163da8f3658bee5d26708523477f26d1d10dc44c9139c6bbc474"
+  },
+  "methods/published/09_adafocal_setmatch/run.py": {
+    "load_adafocal": "c17ee75a954c6f9846ca0e7fd9ccc230406e681d1cc30130727c555ea13c75bf",
+    "extract_anchored_query_features": "2cf3d409caf43719eb215812fb91bb85650eea5c004ccd9cd1302f4e30a36e15",
+    "score_query_anchors_against_persons": "0f46258857da92dd0cfe50e8be9421e1bc06d02f13b9c290e4d8c7ec66d67952",
+    "query_compose_text": "1d7c665b3773355443024d3fd610d35976ddd7980a16218a21e66e2a0c64c3e0"
+  },
+  "methods/simple/05_reid_set/run.py": {
+    "load_clipreid_model": "e8873836a4ef8502ec73920401d59150ce6b291dce14ed2d41979d5b344c61f5",
+    "reid_transform": "3b4f7a94ed03c3af73c934794681477ab5fe376a10ddb5b881f6ee0871b02ae1"
+  },
+  "methods/simple/06_reid_set_text/run.py": {
+    "fuse_scores": "c6d720657ece0435fcb8d4c7995b238b154e92827051c14ea7ac67a274ed323a",
+    "compute_clip_text_scores": "ae471d1d0ec568f4e6398b1a56b9ad6eec2d852bf4266a693a48f89ef2a25c4d"
+  },
+  "methods/simple/09_reid_qwen_proxy/run.py": {
+    "build_validation_proxy_scores": "d74699289e212ee11841fbb33b8f76418eb5bb63ee843757f2199e998ea13711"
+  },
+  "methods/simple/10_person_compose_setmatch/run.py": {
+    "compose_query_set": "11f9135f7f7636ea0cf172ae6c92ca41c60906d53911d4661bd93f69831dba3a",
+    "query_compose_text": "086fcfccb795ea06bddaa7e99d2bef9c9cadda935bf178c01e7990b2f2bb8b19"
+  }
+}

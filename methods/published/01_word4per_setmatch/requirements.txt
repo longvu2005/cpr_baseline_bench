@@ -1,3 +1,4 @@
+-r ../../../cpr_person/requirements.txt
 numpy>=1.24
 Pillow>=9.5
 PyYAML>=6.0

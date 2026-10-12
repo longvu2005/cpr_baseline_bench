@@ -4,11 +4,9 @@
 from __future__ import annotations
 
 import argparse
-import gc
 import hashlib
 import importlib
 import json
-import math
 import os
 import pickle
 import shutil
@@ -21,14 +19,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Sequence
 
-import clip
 import numpy as np
 import torch
 import yaml
 from PIL import Image
-from scipy.optimize import linear_sum_assignment
-from torchvision.models.detection import fasterrcnn_resnet50_fpn_v2
-from torchvision.transforms import functional as TVF
 
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 sys.dont_write_bytecode = True
@@ -39,9 +33,17 @@ if str(ROOT) not in sys.path:
 
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
+from cpr_person.adapter import load_person_context, matching_metadata, manifest_identity
+from cpr_person.cache import feature_config_hash
+from cpr_person.detection import protocol_config, PROTOCOL_PATH
+from cpr_person.matching import aggregate_people
+from cpr_person.adapter import expand_targets
+from cpr_person.detection import crop_person as crop_box
+from cpr_person.matching import build_person_index as padded_person_indices
+from cpr_person.penalties import basic_unmatched_bound
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "basic_setmatch"
-ADAPTER_VERSION = "2026-08-17-v1-official-basic-score-setmatch"
+ADAPTER_VERSION = "2026-10-12-shared-person-v1"
 CACHE_SCHEMA = 1
 
 
@@ -367,6 +369,7 @@ def parse_query_targets(query: dict[str, Any], qi: int) -> list[QueryTarget]:
 
 def build_cache_key(
     *,
+    person,
     config_path: Path,
     gallery_path: Path,
     queries_path: Path,
@@ -375,153 +378,15 @@ def build_cache_key(
     payload = {
         "schema": CACHE_SCHEMA,
         "adapter_version": ADAPTER_VERSION,
-        "config_sha256": sha256_file(config_path),
+        "feature_config_sha256": feature_config_hash(config_path),
+        "shared_protocol_sha256": sha256_file(PROTOCOL_PATH),
+        "detections": person.detections.fingerprint,
+        "memberships": person.localization.fingerprint,
         "gallery_sha256": sha256_file(gallery_path),
         "queries_sha256": sha256_file(queries_path),
         "prepared_marker_sha256": sha256_file(prepared_marker_path),
     }
     return canonical_hash(payload)[:20], payload
-
-
-def crop_box(image: Image.Image, box: np.ndarray) -> Image.Image:
-    left = max(0, int(math.floor(float(box[0]))))
-    top = max(0, int(math.floor(float(box[1]))))
-    right = min(image.width, int(math.ceil(float(box[2]))))
-    bottom = min(image.height, int(math.ceil(float(box[3]))))
-    if right <= left or bottom <= top:
-        raise RuntimeError(f"Invalid xyxy crop: {box.tolist()}")
-    return image.crop((left, top, right, bottom))
-
-
-def validate_detection_arrays(
-    offsets: np.ndarray,
-    boxes: np.ndarray,
-    confidences: np.ndarray,
-    fallback: np.ndarray,
-    num_images: int,
-) -> None:
-    if offsets.shape != (num_images + 1,):
-        raise ValueError("Detection offsets shape mismatch")
-    if int(offsets[0]) != 0 or np.any(np.diff(offsets) <= 0):
-        raise ValueError(
-            "Every gallery scene must have >=1 candidate and offsets must be strictly increasing"
-        )
-    total = int(offsets[-1])
-    if boxes.shape != (total, 4):
-        raise ValueError("Detection boxes shape mismatch")
-    if confidences.shape != (total,) or fallback.shape != (total,):
-        raise ValueError("Detection metadata shape mismatch")
-    if not np.isfinite(boxes).all() or not np.isfinite(confidences).all():
-        raise ValueError("Detection cache contains NaN/Inf")
-    if len(boxes) and np.any((boxes[:, 2] <= boxes[:, 0]) | (boxes[:, 3] <= boxes[:, 1])):
-        raise ValueError("Detection cache contains invalid boxes")
-
-
-def load_detection_cache(
-    path: Path, num_images: int
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
-    if not path.is_file():
-        return None
-    try:
-        with np.load(path, allow_pickle=False) as data:
-            offsets = np.asarray(data["offsets"], dtype=np.int64)
-            boxes = np.asarray(data["boxes"], dtype=np.float32)
-            confidences = np.asarray(data["confidences"], dtype=np.float32)
-            fallback = np.asarray(data["fallback"], dtype=bool)
-        validate_detection_arrays(offsets, boxes, confidences, fallback, num_images)
-    except Exception as error:
-        print(f"Ignoring invalid detection cache {rel(path)}: {error}", flush=True)
-        return None
-    print(f"Using person-detection cache: {rel(path)}", flush=True)
-    return offsets, boxes, confidences, fallback
-
-
-@torch.no_grad()
-def compute_detections(
-    cfg: dict[str, Any],
-    gallery: Sequence[dict[str, Any]],
-    detector_checkpoint: Path,
-    device: torch.device,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    detector_cfg = cfg["localization"]["detector"]
-    model = fasterrcnn_resnet50_fpn_v2(weights=None, weights_backbone=None)
-    try:
-        state = torch.load(detector_checkpoint, map_location="cpu", weights_only=True)
-    except TypeError:
-        state = torch.load(detector_checkpoint, map_location="cpu")
-    model.load_state_dict(state, strict=True)
-    model.to(device).eval()
-
-    threshold = float(detector_cfg["score_threshold"])
-    max_persons = int(detector_cfg["max_persons_per_image"])
-    person_label = int(detector_cfg["person_label"])
-
-    offsets = np.zeros(len(gallery) + 1, dtype=np.int64)
-    all_boxes: list[np.ndarray] = []
-    all_conf: list[np.ndarray] = []
-    all_fallback: list[np.ndarray] = []
-    total = 0
-
-    for gi, row in enumerate(
-        progress_bar(gallery, total=len(gallery), desc="Detect persons", unit="image")
-    ):
-        path = image_path(row, gi)
-        with Image.open(path) as handle:
-            rgb = handle.convert("RGB")
-            width, height = rgb.size
-            tensor = TVF.to_tensor(rgb).to(device)
-        output = model([tensor])[0]
-        keep = (output["labels"] == person_label) & (output["scores"] >= threshold)
-        boxes_t = output["boxes"][keep]
-        scores_t = output["scores"][keep]
-
-        if len(scores_t):
-            order = torch.argsort(scores_t, descending=True)[:max_persons]
-            boxes_np = boxes_t[order].detach().cpu().numpy().astype(np.float32, copy=False)
-            conf_np = scores_t[order].detach().cpu().numpy().astype(np.float32, copy=False)
-            fallback_np = np.zeros(len(boxes_np), dtype=bool)
-        else:
-            boxes_np = np.asarray([[0.0, 0.0, float(width), float(height)]], dtype=np.float32)
-            conf_np = np.asarray([-1.0], dtype=np.float32)
-            fallback_np = np.asarray([True], dtype=bool)
-
-        all_boxes.append(boxes_np)
-        all_conf.append(conf_np)
-        all_fallback.append(fallback_np)
-        total += len(boxes_np)
-        offsets[gi + 1] = total
-
-    del model
-    gc.collect()
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-
-    boxes = np.concatenate(all_boxes, axis=0)
-    confidences = np.concatenate(all_conf, axis=0)
-    fallback = np.concatenate(all_fallback, axis=0)
-    validate_detection_arrays(offsets, boxes, confidences, fallback, len(gallery))
-    return offsets, boxes, confidences, fallback
-
-
-def save_detection_cache(
-    path: Path,
-    offsets: np.ndarray,
-    boxes: np.ndarray,
-    confidences: np.ndarray,
-    fallback: np.ndarray,
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(path.name + ".part")
-    temp.unlink(missing_ok=True)
-    with temp.open("wb") as handle:
-        np.savez(
-            handle,
-            offsets=offsets,
-            boxes=boxes,
-            confidences=confidences,
-            fallback=fallback,
-        )
-    os.replace(temp, path)
 
 
 def load_feature_cache(
@@ -603,31 +468,6 @@ def save_npy_atomic(path: Path, array: np.ndarray) -> None:
 
 
 @torch.no_grad()
-def encode_selector_texts(
-    model,
-    texts: Sequence[str],
-    device: torch.device,
-    batch_size: int,
-) -> dict[str, np.ndarray]:
-    unique = list(dict.fromkeys(texts))
-    result: dict[str, np.ndarray] = {}
-    for start in progress_bar(
-        range(0, len(unique), batch_size),
-        total=(len(unique) + batch_size - 1) // batch_size,
-        desc="Selector texts",
-        unit="batch",
-    ):
-        batch_texts = unique[start : start + batch_size]
-        tokens = clip.tokenize(batch_texts).to(device)
-        feat = model.encode_text(tokens).float()
-        feat = feat / feat.norm(dim=-1, keepdim=True)
-        array = feat.detach().cpu().numpy().astype(np.float32, copy=False)
-        for text, vector in zip(batch_texts, array):
-            result[text] = vector
-    return result
-
-
-@torch.no_grad()
 def encode_full_scenes(
     *,
     model,
@@ -664,117 +504,6 @@ def encode_full_scenes(
             flush()
     flush()
     return result
-
-
-def hungarian_maximize(similarity: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    try:
-        return linear_sum_assignment(similarity, maximize=True)
-    except TypeError:
-        return linear_sum_assignment(-similarity)
-
-
-def localize_query_targets(
-    *,
-    cfg: dict[str, Any],
-    gallery: Sequence[dict[str, Any]],
-    queries: Sequence[dict[str, Any]],
-    query_targets: Sequence[Sequence[QueryTarget]],
-    query_gallery_idx: np.ndarray,
-    offsets: np.ndarray,
-    selector_person_features: np.ndarray,
-    selector_model,
-    selector_preprocess,
-    device: torch.device,
-) -> tuple[list[list[int | None]], dict[str, Any]]:
-    all_select_texts = [
-        target.select_text for targets in query_targets for target in targets
-    ]
-    text_features = encode_selector_texts(
-        selector_model,
-        all_select_texts,
-        device,
-        int(cfg["runtime"]["selector_batch_size"]),
-    )
-
-    shortage_gallery_indices: list[int] = []
-    for qi, targets in enumerate(query_targets):
-        gi = int(query_gallery_idx[qi])
-        count = int(offsets[gi + 1] - offsets[gi])
-        if count < len(targets):
-            shortage_gallery_indices.append(gi)
-
-    full_scene_selector = encode_full_scenes(
-        model=selector_model,
-        preprocess=selector_preprocess,
-        gallery=gallery,
-        gallery_indices=shortage_gallery_indices,
-        device=device,
-        batch_size=int(cfg["runtime"]["selector_batch_size"]),
-        desc="Selector fallback scenes",
-    )
-
-    selected_all: list[list[int | None]] = []
-    assigned_scores: list[float] = []
-    shortage_queries = 0
-    full_scene_slots = 0
-
-    for qi, targets in enumerate(
-        progress_bar(
-            query_targets,
-            total=len(query_targets),
-            desc="Localize query targets",
-            unit="query",
-        )
-    ):
-        gi = int(query_gallery_idx[qi])
-        start, end = int(offsets[gi]), int(offsets[gi + 1])
-        real_indices = list(range(start, end))
-        candidate_refs: list[int | None] = list(real_indices)
-        candidate_features = [
-            np.asarray(selector_person_features[idx], dtype=np.float32)
-            for idx in real_indices
-        ]
-
-        missing = max(0, len(targets) - len(real_indices))
-        if missing:
-            shortage_queries += 1
-            full_scene_slots += missing
-            full_feat = full_scene_selector[gi]
-            for _ in range(missing):
-                candidate_refs.append(None)
-                candidate_features.append(full_feat)
-
-        image_matrix = np.stack(candidate_features, axis=0)
-        text_matrix = np.stack(
-            [text_features[target.select_text] for target in targets], axis=0
-        )
-        similarity = text_matrix @ image_matrix.T
-        rows, cols = hungarian_maximize(similarity)
-        if len(rows) != len(targets):
-            raise RuntimeError(
-                f"Query {qi}: selector assignment matched {len(rows)}/{len(targets)} targets"
-            )
-
-        selected: list[int | None] = [None] * len(targets)
-        for row, col in zip(rows.tolist(), cols.tolist()):
-            selected[row] = candidate_refs[col]
-            assigned_scores.append(float(similarity[row, col]))
-        selected_all.append(selected)
-
-    stats = {
-        "queries_with_too_few_candidates": int(shortage_queries),
-        "full_scene_fallback_slots": int(full_scene_slots),
-        "mean_assigned_clip_similarity": (
-            float(np.mean(assigned_scores)) if assigned_scores else None
-        ),
-        "min_assigned_clip_similarity": (
-            float(np.min(assigned_scores)) if assigned_scores else None
-        ),
-        "shortage_policy": str(
-            cfg["localization"]["query_selector"]["shortage_policy"]
-        ),
-    }
-    return selected_all, stats
 
 
 def ensure_corpus_features(
@@ -1111,99 +840,8 @@ def official_parity_check(
     )
 
 
-def padded_person_indices(offsets: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    counts = np.diff(offsets).astype(np.int64)
-    max_persons = int(counts.max())
-    sentinel = int(offsets[-1])
-    padded = np.full((len(counts), max_persons), sentinel, dtype=np.int64)
-    for gi, count in enumerate(counts.tolist()):
-        padded[gi, :count] = np.arange(offsets[gi], offsets[gi + 1], dtype=np.int64)
-    return padded, counts
-
-
-def setmatch_one_target(
-    target_scores: np.ndarray,
-    padded: np.ndarray,
-    unmatched_score: float,
-) -> np.ndarray:
-    extended = np.concatenate(
-        [np.asarray(target_scores, dtype=np.float32), np.asarray([unmatched_score], np.float32)]
-    )
-    return extended[padded].max(axis=1).astype(np.float32, copy=False)
-
-
-def setmatch_two_targets(
-    target_scores: np.ndarray,
-    padded: np.ndarray,
-    counts: np.ndarray,
-    unmatched_score: float,
-) -> np.ndarray:
-    if target_scores.shape[0] != 2:
-        raise ValueError("setmatch_two_targets expects exactly two targets")
-    sentinel = target_scores.shape[1]
-    ext0 = np.concatenate(
-        [np.asarray(target_scores[0], np.float32), np.asarray([unmatched_score], np.float32)]
-    )
-    ext1 = np.concatenate(
-        [np.asarray(target_scores[1], np.float32), np.asarray([unmatched_score], np.float32)]
-    )
-    a = ext0[padded]
-    b = ext1[padded]
-    valid = padded != sentinel
-    p = padded.shape[1]
-
-    pair_sum = a[:, :, None] + b[:, None, :]
-    valid_pair = valid[:, :, None] & valid[:, None, :]
-    valid_pair &= ~np.eye(p, dtype=bool)[None, :, :]
-    pair_sum[~valid_pair] = -np.inf
-
-    flat = pair_sum.reshape(pair_sum.shape[0], -1)
-    arg = np.argmax(flat, axis=1)
-    row_choice = arg // p
-    col_choice = arg % p
-    scene_idx = np.arange(len(counts))
-    result = np.minimum(a[scene_idx, row_choice], b[scene_idx, col_choice])
-    result = result.astype(np.float32, copy=False)
-    result[counts < 2] = float(unmatched_score)
-    return result
-
-
-def setmatch_generic(
-    target_scores: np.ndarray,
-    offsets: np.ndarray,
-    unmatched_score: float,
-) -> np.ndarray:
-    num_targets = target_scores.shape[0]
-    result = np.empty(len(offsets) - 1, dtype=np.float32)
-    for gi in range(len(result)):
-        start, end = int(offsets[gi]), int(offsets[gi + 1])
-        num_persons = end - start
-        if num_persons < num_targets:
-            result[gi] = unmatched_score
-            continue
-        matrix = target_scores[:, start:end]
-        rows, cols = hungarian_maximize(matrix)
-        if len(rows) != num_targets:
-            result[gi] = unmatched_score
-            continue
-        result[gi] = float(np.min(matrix[rows, cols]))
-    return result
-
-
-def collapse_setmatch(
-    target_scores: np.ndarray,
-    padded: np.ndarray,
-    counts: np.ndarray,
-    offsets: np.ndarray,
-    unmatched_score: float,
-) -> np.ndarray:
-    if target_scores.ndim != 2:
-        raise ValueError("target_scores must be [num_targets, num_persons]")
-    if target_scores.shape[0] == 1:
-        return setmatch_one_target(target_scores[0], padded, unmatched_score)
-    if target_scores.shape[0] == 2:
-        return setmatch_two_targets(target_scores, padded, counts, unmatched_score)
-    return setmatch_generic(target_scores, offsets, unmatched_score)
+def collapse_setmatch(target_scores, padded, counts, offsets, unmatched_score):
+    return aggregate_people(target_scores, offsets, unmatched_score)
 
 
 def save_run_metadata(
@@ -1220,6 +858,7 @@ def save_run_metadata(
     detector_fallback_scenes: int,
     selector_stats: dict[str, Any],
     parity_checked: bool,
+    shared_person_protocol: dict,
 ) -> None:
     payload = {
         "method": METHOD_ID,
@@ -1230,6 +869,8 @@ def save_run_metadata(
         # BASIC parity is checked with descending=True, so larger scores are better.
         "higher_is_better": True,
         "adapter_version": ADAPTER_VERSION,
+        "setmatch": matching_metadata(cfg, score_space="basic_official_score"),
+        "shared_person_protocol": shared_person_protocol,
         "paper": cfg["paper"],
         "source": {
             "repository": str(cfg["source"]["repository"]),
@@ -1281,6 +922,7 @@ def save_run_metadata(
             "finite_only": True,
         },
     }
+    payload["data_fingerprint"] = manifest_identity(payload["shared_person_protocol"])
     write_json_atomic(path, payload)
 
 
@@ -1291,6 +933,8 @@ def main() -> None:
 
     config_path = resolve_path(args.config)
     cfg = load_yaml(config_path)
+    cfg["runtime_assets"]["detector"]["path"] = protocol_config()["detector"]["checkpoint"]
+    cfg["runtime_assets"]["selector"]["path"] = protocol_config()["selector"]["checkpoint"]
     if str(cfg.get("method")) != METHOD_ID:
         raise RuntimeError(f"config method must be {METHOD_ID!r}")
 
@@ -1309,7 +953,10 @@ def main() -> None:
     max_targets = max(len(x) for x in query_targets)
 
     checkout, prepared_marker, prepared_marker_path = verify_prepared_assets(cfg, config_path)
+    device = device_from(str(cfg["runtime"]["device"]))
+    person = load_person_context(gallery, queries, gallery_path, queries_path, device)
     cache_key, cache_payload = build_cache_key(
+        person=person,
         config_path=config_path,
         gallery_path=gallery_path,
         queries_path=queries_path,
@@ -1326,72 +973,16 @@ def main() -> None:
         f"cache={rel(cache_dir)}"
     )
 
-    tracker.advance("Detect gallery persons")
-    detector_checkpoint = resolve_path(str(cfg["runtime_assets"]["detector"]["path"]))
-    detector_device = device_from(str(cfg["runtime"]["detector_device"]))
-    detection_cache = cache_dir / "person_detections.npz"
-    detection = load_detection_cache(detection_cache, len(gallery))
-    if detection is None:
-        detection = compute_detections(
-            cfg, gallery, detector_checkpoint, detector_device
-        )
-        save_detection_cache(detection_cache, *detection)
-        print(f"Saved person-detection cache: {rel(detection_cache)}", flush=True)
-    offsets, boxes, confidences, detector_fallback = detection
-    tracker.log(
-        f"person_candidates={int(offsets[-1])} "
-        f"full_scene_fallback_scenes={int(detector_fallback.sum())}"
-    )
-
-    tracker.advance("Encode selector crops and localize query subjects")
+    tracker.advance("Consume shared gallery detections")
     device = device_from(str(cfg["runtime"]["device"]))
-    selector_checkpoint = resolve_path(str(cfg["runtime_assets"]["selector"]["path"]))
-    selector_model, selector_preprocess = clip.load(
-        str(selector_checkpoint), device=device, jit=False
-    )
-    selector_model.eval()
-
-    selector_cache_path = cache_dir / "selector_person_features.npy"
-    selector_person_features = load_feature_cache(
-        selector_cache_path, int(offsets[-1]), "selector-person"
-    )
-    if selector_person_features is None:
-        selector_array = encode_person_crops(
-            gallery=gallery,
-            offsets=offsets,
-            boxes=boxes,
-            model=selector_model,
-            preprocess=selector_preprocess,
-            device=device,
-            batch_size=int(cfg["runtime"]["selector_batch_size"]),
-            encoder_kind="selector",
-            desc="Encode selector persons",
-        )
-        save_npy_atomic(selector_cache_path, selector_array)
-        selector_person_features = np.load(
-            selector_cache_path, mmap_mode="r", allow_pickle=False
-        )
-
-    selected_refs, selector_stats = localize_query_targets(
-        cfg=cfg,
-        gallery=gallery,
-        queries=queries,
-        query_targets=query_targets,
-        query_gallery_idx=query_gallery_idx,
-        offsets=offsets,
-        selector_person_features=selector_person_features,
-        selector_model=selector_model,
-        selector_preprocess=selector_preprocess,
-        device=device,
-    )
-    del selector_model
-    gc.collect()
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-    tracker.log(
-        f"selector_mean={selector_stats['mean_assigned_clip_similarity']} "
-        f"fallback_slots={selector_stats['full_scene_fallback_slots']}"
-    )
+    offsets, boxes = person.detections.offsets, person.detections.boxes
+    detector_fallback = np.array([person.detections.fallback[start:end].any()
+                                  for start, end in zip(offsets[:-1], offsets[1:])])
+    tracker.advance("Consume shared Subject memberships")
+    selected_refs = [[member["global_person_index"] for si, member in person.localization.flat(qi)]
+                     for qi in range(len(queries))]
+    query_targets = expand_targets(query_targets, person.localization)
+    selector_stats = person.localization.stats
 
     tracker.advance("Load official BASIC CLIP and encode person/text features")
     with block_network_model_load():
@@ -1478,6 +1069,10 @@ def main() -> None:
         device=device,
     )
 
+    # Bound the unchanged official score using only released external resources.
+    cfg["setmatch"]["unmatched_score"] = basic_unmatched_bound(
+        float(scorer.mean_img.norm().item()), float(scorer.mean_txt.norm().item()),
+        scorer.sim_img_min, scorer.sim_text_min, float(basic_args.harris_lambda))
     parity_img: list[np.ndarray] = []
     parity_txt: list[np.ndarray] = []
     needed_parity = int(cfg["basic"]["parity_queries"])
@@ -1617,6 +1212,7 @@ def main() -> None:
         detector_fallback_scenes=int(detector_fallback.sum()),
         selector_stats=selector_stats,
         parity_checked=bool(cfg["basic"].get("official_parity_check", True)),
+        shared_person_protocol=person.metadata(),
     )
 
     tracker.log(f"saved {rel(scores_path)}")

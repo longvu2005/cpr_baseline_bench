@@ -27,7 +27,6 @@ import numpy as np
 import torch
 import yaml
 from PIL import Image
-from scipy.optimize import linear_sum_assignment
 from torch.utils.data import DataLoader, Dataset
 
 # The official FAFA checkout is immutable benchmark input. Disable Python bytecode
@@ -42,7 +41,10 @@ if str(ROOT) not in sys.path:
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
-from groundingdino_adapter import preflight as detector_preflight  # noqa: E402
+from cpr_person.adapter import load_person_context, manifest_identity
+from cpr_person.detection import protocol_config
+from cpr_person.detection import BoxCandidate
+from cpr_person.matching import aggregate_component_scores
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "fafa_setmatch"
 ADAPTER_VERSION = "2026-10-12-v5-groundingdino-stage-cache"
@@ -56,13 +58,6 @@ class QueryTarget:
     modify_text: str
     select_text: str
     subject_id: Any = None
-
-
-@dataclass(frozen=True)
-class BoxCandidate:
-    box: tuple[float, float, float, float]
-    score: float
-    fallback: bool = False
 
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -131,53 +126,23 @@ def read_json(path: Path):
         return None
 
 
-def build_stage_caches(
-    cfg: dict[str, Any], gallery_path: Path, queries_path: Path, output: Path,
-    detector_config: Path, detector_checkout: Path,
-) -> tuple[dict[str, Path], dict[str, Any]]:
-    """Separate each stage's input identity from execution/aggregation settings.
-
-    Batch sizes, workers, devices, output paths and SetMatch background scores
-    do not change embeddings/detections and must not rerun those stages.
-    """
-    gallery_hash, query_hash = sha256_file(gallery_path), sha256_file(queries_path)
-    detector = cfg["localization"]["detector"]
-    ckpt = cfg["checkpoint"]
-    keys, fingerprints, directories = {}, {}, {}
-
-    def stage(name: str, payload: dict[str, Any]):
-        raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-        keys[name] = hashlib.sha256(raw).hexdigest()[:16]
+def build_stage_caches(cfg, gallery_path, queries_path, output, person):
+    keys = {"detections": person.detections.path.parent.name,
+            "localization": person.localization.path.parent.name}
+    fingerprints = {"detections": person.detections.fingerprint,
+                    "localization": person.localization.fingerprint}
+    directories = {"detections": person.detections.path.parent,
+                   "localization": person.localization.path.parent}
+    def stage(name, payload):
+        keys[name] = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
         fingerprints[name] = payload
         directories[name] = output / "cache" / name / keys[name]
         directories[name].mkdir(parents=True, exist_ok=True)
-
-    helper = ROOT / "methods/simple/05_reid_set/run.py"
-    stage("detections", {
-        "schema": "groundingdino-batched-v1", "gallery": gallery_hash,
-        "source": detector["source"]["commit"], "config": sha256_file(detector_config),
-        "checkpoint": checkpoint_identity(resolve_config_path(detector["checkpoint"])),
-        "helper_sha256": sha256_file(helper),
-        "worker_sha256": sha256_file(Path(__file__).with_name("groundingdino_adapter.py")),
-        "native_extensions": [checkpoint_identity(p) for p in sorted((detector_checkout / "groundingdino").glob("_C*.so"))],
-        "protocol": {k: detector[k] for k in ("text_prompt", "box_threshold", "text_threshold",
-                    "nms_iou_threshold", "min_box_size_px", "max_persons_per_image")},
-    })
-    selector = cfg["localization"]["query_selector"]
-    stage("localization", {
-        "schema": "clip-anchor-expansion-v1", "detections": keys["detections"], "queries": query_hash,
-        "score_threshold": detector["score_threshold"], "selector": selector,
-        "checkpoint": checkpoint_identity(resolve_config_path(selector["checkpoint"])),
-    })
-    encoder = {
-        "schema": "official-fafa-features-v1", "source": cfg["source"]["commit"],
-        "subdir": cfg["source"].get("subdir", "FAFA_SynCPR"),
-        "checkpoint": checkpoint_identity(resolve_config_path(ckpt["path"])),
-        "model": {k: ckpt[k] for k in ("model_name", "model_type", "fda_k", "fda_alpha",
-                  "fd_margin", "use_soft", "transform", "image_size", "test_resize_hw") if k in ckpt},
-    }
+    ckpt = cfg["checkpoint"]
+    encoder = {"schema": "official-fafa-shared-crops-v1", "source": cfg["source"]["commit"],
+               "checkpoint": checkpoint_identity(resolve_config_path(ckpt["path"])),
+               "model": ckpt}
     stage("gallery_features", {**encoder, "detections": keys["detections"],
-          "score_threshold": detector["score_threshold"],
           "dtype": cfg.get("runtime", {}).get("gallery_feature_dtype", "float16")})
     stage("query_features", {**encoder, "localization": keys["localization"]})
     stage("component_scores", {"schema": "soft-fda-v1", "gallery": keys["gallery_features"],
@@ -481,318 +446,6 @@ def load_fafa(
         "unexpected_keys": list(incompatible.unexpected_keys),
     }
     return model, txt_processors, preprocess, ckpt_path, load_info
-
-
-def choose_person_boxes(
-    candidates: Sequence[BoxCandidate],
-    score_threshold: float,
-    min_required: int,
-) -> list[BoxCandidate]:
-    selected = [c for c in candidates if c.score >= score_threshold]
-    if len(selected) < min_required:
-        used = {c.box for c in selected}
-        for candidate in candidates:
-            if candidate.box in used:
-                continue
-            selected.append(candidate)
-            used.add(candidate.box)
-            if len(selected) >= min_required:
-                break
-    return selected
-
-
-def save_candidate_cache(
-    path: Path,
-    gallery: Sequence[dict[str, Any]],
-    candidates: Sequence[Sequence[BoxCandidate]],
-) -> None:
-    with path.open("w", encoding="utf-8") as f:
-        for row, boxes in zip(gallery, candidates):
-            payload = {
-                "image_id": row["image_id"],
-                "boxes": [
-                    {
-                        "xyxy": list(candidate.box),
-                        "score": candidate.score,
-                        "fallback": candidate.fallback,
-                    }
-                    for candidate in boxes
-                ],
-            }
-            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-
-
-def load_candidate_cache(
-    path: Path, gallery: Sequence[dict[str, Any]]
-) -> list[list[BoxCandidate]] | None:
-    if not path.is_file():
-        return None
-    try:
-        rows = load_jsonl(path)
-    except (OSError, ValueError, TypeError):
-        return None
-    if len(rows) != len(gallery):
-        return None
-
-    result: list[list[BoxCandidate]] = []
-    for expected, row in zip(gallery, rows):
-        if row.get("image_id") != expected.get("image_id"):
-            return None
-        candidates = []
-        for item in row.get("boxes", []):
-            if not isinstance(item, dict):
-                return None
-            xyxy = item.get("xyxy")
-            if not isinstance(xyxy, list) or len(xyxy) != 4:
-                return None
-            try:
-                box = tuple(float(x) for x in xyxy)
-                score = float(item["score"])
-            except (TypeError, ValueError, KeyError):
-                return None
-            if not np.isfinite([*box, score]).all() or box[2] <= box[0] or box[3] <= box[1]:
-                return None
-            candidates.append(BoxCandidate(box, score, bool(item.get("fallback", False))))
-        if not candidates:
-            return None
-        result.append(candidates)
-    return result
-
-
-def get_or_create_detection_cache(
-    gallery: Sequence[dict[str, Any]],
-    cache_path: Path,
-    config_path: Path,
-    detector_cfg: dict[str, Any],
-    device: torch.device,
-) -> tuple[list[list[BoxCandidate]], dict[str, Any]]:
-    cached = load_candidate_cache(cache_path, gallery)
-    if cached is None:
-        # Process isolation both frees detector GPU memory and prevents its BERT
-        # cache constants from redirecting FAFA's later offline model loading.
-        subprocess.run([
-            sys.executable, "-u", str(Path(__file__).with_name("groundingdino_adapter.py")),
-            "--config", str(config_path), "--cache-path", str(cache_path), "--device", str(device),
-        ], cwd=ROOT, check=True)
-        cached = load_candidate_cache(cache_path, gallery)
-        if cached is None:
-            raise RuntimeError("Grounding DINO worker wrote an invalid candidate cache")
-    else:
-        print(f"[cache] Grounding DINO candidates: {rel(cache_path)}", flush=True)
-    info = read_json(cache_path.with_suffix(".meta.json")) or {}
-    info["checkpoint"] = rel(resolve_config_path(detector_cfg["checkpoint"]))
-    return cached, info
-
-
-def load_clip_selector(selector_cfg: dict[str, Any], device: torch.device):
-    import clip  # type: ignore
-
-    checkpoint = resolve_config_path(str(selector_cfg["checkpoint"]))
-    if not checkpoint.is_file():
-        raise FileNotFoundError(
-            f"Missing query-selector CLIP checkpoint: {rel(checkpoint)}. "
-            "Run download_checkpoint.py first."
-        )
-    model, preprocess = clip.load(str(checkpoint), device=device, jit=False)
-    model.eval()
-    return clip, model, preprocess
-
-
-def select_subject_members(
-    similarity: np.ndarray,
-    candidates: Sequence[BoxCandidate],
-    *,
-    threshold: float,
-    margin: float,
-    max_members: int,
-) -> tuple[list[list[int]], list[int]]:
-    """Select disjoint query people without case labels or oracle cardinalities.
-
-    First anchor every textual Subject with a maximum-sum Hungarian assignment,
-    ignoring thresholds. Then expand from unused, non-fallback person crops if
-    their CLIP similarity passes both an absolute threshold and the Subject's
-    assigned *anchor* score minus ``margin``. Resolve contested extras by the
-    highest similarity, breaking ties by Subject order.
-
-    All Subjects follow the same policy, including single-person queries.
-    """
-    if similarity.ndim != 2 or not np.isfinite(similarity).all():
-        raise ValueError("CLIP similarity must be a finite 2D matrix")
-    nsubjects, npeople = similarity.shape
-    if nsubjects < 1 or npeople < nsubjects or len(candidates) != npeople:
-        raise ValueError("Need at least one candidate per Subject")
-    if not np.isfinite([threshold, margin]).all() or margin < 0 or max_members < 1:
-        raise ValueError("Invalid membership threshold, margin, or member cap")
-
-    rows, cols = linear_sum_assignment(-similarity)
-    anchors = [-1] * nsubjects
-    for row, col in zip(rows, cols):
-        anchors[int(row)] = int(col)
-    if any(col < 0 for col in anchors):
-        raise RuntimeError("Hungarian did not assign every Subject an anchor")
-    members = [[col] for col in anchors]
-    used = set(anchors)
-
-    # Stable order ensures deterministic cap behavior when scores tie.
-    for col in np.argsort(-similarity.max(axis=0), kind="stable"):
-        col = int(col)
-        if col in used or candidates[col].fallback:
-            continue
-        eligible = [
-            row for row in range(nsubjects)
-            if len(members[row]) < max_members
-            and similarity[row, col] >= threshold
-            and similarity[row, col] >= similarity[row, anchors[row]] - margin
-        ]
-        if eligible:
-            owner = max(eligible, key=lambda row: (similarity[row, col], -row))
-            members[owner].append(col)
-            used.add(col)
-    return members, anchors
-
-
-@torch.no_grad()
-def select_query_target_boxes(
-    queries: Sequence[dict[str, Any]],
-    query_targets: Sequence[Sequence[QueryTarget]],
-    gallery: Sequence[dict[str, Any]],
-    gallery_index: dict[Any, int],
-    all_candidates: Sequence[Sequence[BoxCandidate]],
-    localization_cfg: dict[str, Any],
-    device: torch.device,
-    cache_path: Path | None = None,
-) -> tuple[list[list[list[tuple[float, float, float, float]]]], dict[str, Any]]:
-    cached = read_json(cache_path) if cache_path is not None else None
-    if isinstance(cached, dict):
-        try:
-            cached_boxes = cached["boxes"]
-            if len(cached_boxes) != len(query_targets):
-                raise ValueError("Query count mismatch")
-            for subjects, targets in zip(cached_boxes, query_targets):
-                if len(subjects) != len(targets):
-                    raise ValueError("Subject count mismatch")
-                for members in subjects:
-                    if not members:
-                        raise ValueError("No predicted members")
-                    for box in members:
-                        if (len(box) != 4 or not np.isfinite(box).all()
-                                or box[2] <= box[0] or box[3] <= box[1]):
-                            raise ValueError("Invalid box")
-            stats = cached["stats"]
-            count = sum(len(members) for subjects in cached_boxes for members in subjects)
-            if not isinstance(stats, dict) or stats.get("predicted_total_query_components") != count:
-                raise ValueError("Invalid localization stats")
-            print(f"[cache] query localization: {rel(cache_path)}", flush=True)
-            return cached_boxes, stats
-        except (KeyError, TypeError, ValueError):
-            pass
-    selector_cfg = localization_cfg["query_selector"]
-    detector_cfg = localization_cfg["detector"]
-    clip_module, clip_model, clip_preprocess = load_clip_selector(selector_cfg, device)
-    threshold = float(detector_cfg["score_threshold"])
-
-    selected_per_query: list[list[list[tuple[float, float, float, float]]]] = []
-    localization_scores: list[float] = []
-    predicted_member_counts: list[int] = []
-    extra_member_count = 0
-    selected_fallback_anchors = 0
-    low_candidate_queries = 0
-    full_scene_fallback_slots = 0
-    membership_threshold = float(selector_cfg["membership_threshold"])
-    membership_margin = float(selector_cfg["membership_margin"])
-    member_cap = int(selector_cfg["max_members_per_subject"])
-    # Several queries may reuse a reference scene or a Subject description.
-    # Keep these small CLIP embeddings until localization finishes.
-    crop_cache = {}
-    text_cache = {}
-
-    for qi, (query, targets) in enumerate(
-        progress_bar(
-            zip(queries, query_targets),
-            total=len(queries),
-            desc="Select query targets",
-            unit="query",
-        )
-    ):
-        image_id = query.get("image_id")
-        if image_id not in gallery_index:
-            raise ValueError(f"Query {qi}: image_id not found in gallery: {image_id!r}")
-        gi = gallery_index[image_id]
-        boxes = choose_person_boxes(all_candidates[gi], threshold, len(targets))
-        missing = max(0, len(targets) - len(boxes))
-        if missing:
-            low_candidate_queries += 1
-            full_scene_fallback_slots += missing
-        crop_key = (gi, len(targets))
-        if crop_key not in crop_cache:
-            path = image_path(gallery[gi], gi)
-            with Image.open(path) as source:
-                image = source.convert("RGB")
-                # A detector miss must not abort the entire benchmark. Fill only
-                # missing query-target slots with the full reference scene; this
-                # uses no GT box/identity information and is explicitly logged.
-                if missing:
-                    full_box = (0.0, 0.0, float(image.width), float(image.height))
-                    boxes = list(boxes) + [
-                        BoxCandidate(full_box, -1.0, fallback=True) for _ in range(missing)
-                    ]
-                crop_tensors = [clip_preprocess(image.crop(candidate.box)) for candidate in boxes]
-            crop_batch = torch.stack(crop_tensors).to(device)
-            image_features = clip_model.encode_image(crop_batch).float()
-            image_features = image_features / image_features.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-            crop_cache[crop_key] = (boxes, image_features)
-        boxes, image_features = crop_cache[crop_key]
-        text_key = tuple(target.select_text for target in targets)
-        if text_key not in text_cache:
-            text_tokens = clip_module.tokenize(list(text_key)).to(device)
-            text_features = clip_model.encode_text(text_tokens).float()
-            text_features = text_features / text_features.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-            text_cache[text_key] = text_features
-        text_features = text_cache[text_key]
-        sim = (text_features @ image_features.T).cpu().numpy()
-
-        memberships, anchors = select_subject_members(
-            sim,
-            boxes,
-            threshold=membership_threshold,
-            margin=membership_margin,
-            max_members=member_cap,
-        )
-        # Keep the Subject dimension: one Subject may map to several person crops.
-        selected_per_query.append(
-            [[boxes[person].box for person in members] for members in memberships]
-        )
-        predicted_member_counts.extend(len(members) for members in memberships)
-        extra_member_count += sum(len(members) - 1 for members in memberships)
-        selected_fallback_anchors += sum(boxes[col].fallback for col in anchors)
-        localization_scores.extend(float(sim[i, col]) for i, col in enumerate(anchors))
-
-    stats = {
-        "selector": str(selector_cfg.get("backend", "openai_clip")),
-        "selector_model": str(selector_cfg.get("model", "ViT-B/32")),
-        "assignment": "hungarian_anchors_then_threshold_expansion",
-        "membership_threshold": membership_threshold,
-        "membership_margin": membership_margin,
-        "max_members_per_subject": member_cap,
-        "membership_policy": "case_agnostic_anchor_first_disjoint_extras",
-        "uses_case_labels_or_identity_counts": False,
-        "predicted_member_count_histogram": dict(sorted(Counter(predicted_member_counts).items())),
-        "predicted_total_query_components": sum(predicted_member_counts),
-        "extra_member_components": extra_member_count,
-        "selected_fallback_anchors": selected_fallback_anchors,
-        "mean_assigned_clip_similarity": (
-            float(np.mean(localization_scores)) if localization_scores else None
-        ),
-        "min_assigned_clip_similarity": (
-            float(np.min(localization_scores)) if localization_scores else None
-        ),
-        "queries_with_too_few_candidates": low_candidate_queries,
-        "full_scene_fallback_slots": full_scene_fallback_slots,
-        "shortage_policy": "pad missing query-target slots with the full reference scene",
-    }
-    if cache_path is not None:
-        atomic_json(cache_path, {"boxes": selected_per_query, "stats": stats})
-    return selected_per_query, stats
 
 
 class PersonCropDataset(Dataset):
@@ -1106,31 +759,6 @@ def compute_component_person_scores(
     return cache_path
 
 
-def setmatch_image_score(
-    matrix: np.ndarray,
-    unmatched_score: float,
-) -> float:
-    """Mean over all query components, including fixed scores for missing people.
-
-    Rectangular Hungarian selects exactly min(K, N) distinct real pairs. Missing
-    scores are a constant for a given K and N, so this assignment also maximizes
-    the final image score. Do not add optional dummy slots when N >= K.
-    """
-    num_targets, num_persons = matrix.shape
-    if num_targets < 1:
-        raise ValueError("SetMatch requires at least one target")
-    if num_persons == 0:
-        return float(unmatched_score)
-
-    rows, cols = linear_sum_assignment(-matrix)
-    num_matched = min(num_targets, num_persons)
-    if len(rows) != num_matched:
-        raise RuntimeError("Hungarian assignment has the wrong number of real pairs")
-    assigned_sum = matrix[rows, cols].sum(dtype=np.float64)
-    missing_sum = (num_targets - num_matched) * unmatched_score
-    return float((assigned_sum + missing_sum) / num_targets)
-
-
 def validate_setmatch_config(setmatch_cfg: dict[str, Any]) -> float:
     """Reject legacy min configs instead of silently using different semantics."""
     if setmatch_cfg.get("enabled", True) is not True:
@@ -1143,164 +771,6 @@ def validate_setmatch_config(setmatch_cfg: dict[str, Any]) -> float:
     if not np.isfinite(unmatched_score):
         raise ValueError("setmatch.unmatched_score must be finite")
     return unmatched_score
-
-
-def build_person_index(offsets: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    if (
-        offsets.ndim != 1
-        or len(offsets) < 2
-        or offsets.dtype.kind not in "iu"
-        or offsets[0] != 0
-        or np.any(offsets[1:] < offsets[:-1])
-    ):
-        raise ValueError("Gallery offsets must be nondecreasing integers starting at zero")
-    counts = np.diff(offsets).astype(np.int64, copy=False)
-    max_persons = int(counts.max(initial=0))
-    index = np.full((len(counts), max_persons), -1, dtype=np.int64)
-    for gi, count in enumerate(counts):
-        if count:
-            index[gi, :count] = np.arange(offsets[gi], offsets[gi + 1])
-    return index, counts
-
-
-def maximum_two_match_sum(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Exact batched two-row assignment to distinct columns (at least two)."""
-    def top2(x: np.ndarray):
-        idx = np.argpartition(-x, kth=1, axis=1)[:, :2]
-        vals = np.take_along_axis(x, idx, axis=1)
-        order = np.argsort(-vals, axis=1)
-        idx = np.take_along_axis(idx, order, axis=1)
-        vals = np.take_along_axis(vals, order, axis=1)
-        return vals[:, 0], idx[:, 0], vals[:, 1]
-
-    a1, ai1, a2 = top2(a)
-    b1, bi1, b2 = top2(b)
-    b_excl_a = np.where(bi1 != ai1, b1, b2)
-    a_excl_b = np.where(ai1 != bi1, a1, a2)
-    # Every optimum includes a row's best column: if neither best is occupied,
-    # that row can improve its score by taking it. Check both possibilities.
-    return np.maximum(a1 + b_excl_a, b1 + a_excl_b)
-
-
-def setmatch_two_targets_all_images(
-    target_person_scores: np.ndarray,
-    person_index: np.ndarray,
-    counts: np.ndarray,
-    unmatched_score: float,
-) -> np.ndarray:
-    """Exact two-component specialization of Partial SetMatch.
-
-    For two rows, the maximum-weight one-to-one assignment can be solved from each
-    row's best/second-best columns, yielding exactly the same assignment
-    objective as Hungarian while avoiding millions of tiny SciPy calls.
-    """
-    if target_person_scores.shape[0] != 2:
-        raise ValueError("Expected exactly two target rows")
-
-    out = np.full(len(counts), unmatched_score, dtype=np.float32)
-    if target_person_scores.shape[1] == 0:
-        return out
-
-    safe_index = np.where(person_index >= 0, person_index, 0)
-    values = target_person_scores[:, safe_index]  # [2, G, max_persons]
-    values = np.asarray(values, dtype=np.float32)
-    values[:, person_index < 0] = -np.inf
-
-    one = counts == 1
-    if np.any(one):
-        real_idx = safe_index[one, 0]
-        best_real = np.maximum(
-            target_person_scores[0, real_idx], target_person_scores[1, real_idx]
-        )
-        # The one real person goes to the better component; the other is missing.
-        out[one] = (best_real + unmatched_score) / 2.0
-
-    many = counts >= 2
-    if np.any(many):
-        a = values[0, many]
-        b = values[1, many]
-
-        out[many] = maximum_two_match_sum(a, b) / 2.0
-    return out
-
-
-def aggregate_component_scores(
-    component_score_path: Path,
-    query_offsets: np.ndarray,
-    gallery_offsets: np.ndarray,
-    scores_path: Path,
-    unmatched_score: float,
-) -> None:
-    component_scores = np.load(component_score_path, mmap_mode="r")
-    person_index, counts = build_person_index(gallery_offsets)
-    if (
-        query_offsets.ndim != 1
-        or len(query_offsets) < 2
-        or query_offsets.dtype.kind not in "iu"
-        or query_offsets[0] != 0
-        or np.any(query_offsets[1:] <= query_offsets[:-1])
-    ):
-        raise ValueError("Query offsets must increase and start at zero")
-    expected_shape = (int(query_offsets[-1]), int(gallery_offsets[-1]))
-    if component_scores.shape != expected_shape:
-        raise ValueError(f"Component score shape must be {expected_shape}, got {component_scores.shape}")
-    if not np.isfinite(unmatched_score):
-        raise ValueError("unmatched_score must be finite")
-    scores = np.lib.format.open_memmap(
-        scores_path.with_name(scores_path.name + ".partial"),
-        mode="w+",
-        dtype=np.float32,
-        shape=(len(query_offsets) - 1, len(gallery_offsets) - 1),
-    )
-
-    for qi in progress_bar(
-        range(len(query_offsets) - 1),
-        desc="Partial SetMatch aggregation",
-        total=len(query_offsets) - 1,
-        unit="query",
-    ):
-        start, end = int(query_offsets[qi]), int(query_offsets[qi + 1])
-        target_scores = np.asarray(component_scores[start:end], dtype=np.float32)
-        num_targets = end - start
-
-        if num_targets == 1:
-            # One-target Hungarian == choose the best predicted person in each
-            # gallery image. Exclude zero-person images from reduceat indices.
-            scores[qi] = unmatched_score
-            nonempty = counts > 0
-            if np.any(nonempty):
-                scores[qi, nonempty] = np.maximum.reduceat(
-                    target_scores[0], gallery_offsets[:-1][nonempty]
-                )
-        elif num_targets == 2:
-            scores[qi] = setmatch_two_targets_all_images(
-                target_scores, person_index, counts, unmatched_score
-            )
-        else:
-            scores[qi] = unmatched_score
-            one = counts == 1
-            if np.any(one):
-                best_real = target_scores[:, person_index[one, 0]].max(axis=0)
-                scores[qi, one] = (
-                    best_real + (num_targets - 1) * unmatched_score
-                ) / num_targets
-            two = counts == 2
-            if np.any(two):
-                # Transpose K x 2 to 2 x K: each gallery person chooses a
-                # different query component. This is the same exact objective.
-                values = target_scores[:, person_index[two, :2]].transpose(1, 2, 0)
-                best_sum = maximum_two_match_sum(values[:, 0], values[:, 1])
-                scores[qi, two] = (
-                    best_sum + (num_targets - 2) * unmatched_score
-                ) / num_targets
-            for gi in np.flatnonzero(counts >= 3):
-                p_start, p_end = int(gallery_offsets[gi]), int(gallery_offsets[gi + 1])
-                scores[qi, gi] = setmatch_image_score(
-                    target_scores[:, p_start:p_end], unmatched_score
-                )
-    scores.flush()
-    del scores
-    os.replace(scores_path.with_name(scores_path.name + ".partial"), scores_path)
 
 
 def score_all_queries(
@@ -1389,11 +859,11 @@ def main() -> None:
     if ckpt_cfg.get("use_soft", True) is not True:
         raise ValueError("This FAFA adapter supports only checkpoint.use_soft: true")
     ckpt_path = resolve_config_path(str(ckpt_cfg["path"]))
-    localization_cfg = cfg["localization"]
-    detector_cfg = localization_cfg["detector"]
-    detector_checkout, detector_config, _ = detector_preflight(detector_cfg)
+    detector_cfg = protocol_config()["detector"]
+    device = device_from(str(cfg.get("runtime", {}).get("device", "cuda")))
+    person = load_person_context(gallery, queries, gallery_path, queries_path, device)
     stage_dirs, cache_fingerprint = build_stage_caches(
-        cfg, gallery_path, queries_path, output, detector_config, detector_checkout,
+        cfg, gallery_path, queries_path, output, person,
     )
     cache_key = cache_fingerprint["keys"]["component_scores"]
     cache_dir = stage_dirs["component_scores"]
@@ -1411,47 +881,14 @@ def main() -> None:
         f"detector_device={detector_device} cache={cache_key}"
     )
 
-    tracker.advance("Detect gallery person candidates")
-    candidate_cache_path = stage_dirs["detections"] / "person_candidates.jsonl"
-    all_candidates, detector_info = get_or_create_detection_cache(
-        gallery,
-        candidate_cache_path,
-        config_path,
-        detector_cfg,
-        detector_device,
-    )
-    if detector_device.type == "cuda":
-        torch.cuda.empty_cache()
-
+    tracker.advance("Consume shared ordered gallery persons")
+    candidate_cache_path = person.detections.path
+    detector_info = {"checkpoint": str(resolve_config_path(detector_cfg["checkpoint"])),
+                     "attention_backend": detector_cfg["attention_backend"]}
     threshold = float(detector_cfg["score_threshold"])
-    gallery_boxes = [
-        choose_person_boxes(candidates, threshold, min_required=1)
-        for candidates in all_candidates
-    ]
-    tracker.log(
-        f"person candidates ready: {sum(len(x) for x in gallery_boxes):,} crops "
-        f"across {len(gallery_boxes):,} gallery images (attention={detector_info.get('attention_backend')})"
-    )
-
-    tracker.advance("Select query members: Hungarian anchors + CLIP thresholds")
-    selected_query_boxes, selector_stats = select_query_target_boxes(
-        queries=queries,
-        query_targets=query_targets,
-        gallery=gallery,
-        gallery_index=gallery_index,
-        all_candidates=all_candidates,
-        localization_cfg=localization_cfg,
-        device=device,
-        cache_path=stage_dirs["localization"] / "query_localization.json",
-    )
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-    tracker.log(
-        f"query localization ready: mean_clip={selector_stats.get('mean_assigned_clip_similarity')} "
-        f"components={selector_stats['predicted_total_query_components']} "
-        f"extras={selector_stats['extra_member_components']} "
-        f"fallback_slots={selector_stats.get('full_scene_fallback_slots')}"
-    )
+    gallery_boxes = person.detections.candidates()
+    tracker.advance("Consume shared Subject memberships")
+    selected_query_boxes, selector_stats = person.localization.boxes(), person.localization.stats
 
     tracker.advance("Load FAFA only if feature extraction is needed")
     gallery_dataset = GalleryPersonDataset(gallery, gallery_boxes, preprocess=None)
@@ -1570,6 +1007,7 @@ def main() -> None:
             "target_token_count": token_dim[0],
             "embedding_dim": token_dim[1],
         },
+        "shared_person_protocol": person.metadata(),
         "localization": {
             "uses_gt_target_boxes": False,
             "uses_target_ids_for_box_selection": False,
@@ -1661,6 +1099,7 @@ def main() -> None:
     )
 
     tracker.advance("Write run metadata and final outputs")
+    run["data_fingerprint"] = manifest_identity(run["shared_person_protocol"])
     run_path = output / "run.json"
     with run_path.open("w", encoding="utf-8") as f:
         json.dump(run, f, indent=2, ensure_ascii=False)

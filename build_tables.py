@@ -6,7 +6,9 @@ from pathlib import Path
 
 from benchmark_data import manifest_fingerprint
 from prepare_data import CASE_TYPES
-from cpr_benchmark.protocol import compatible, PERSON_METHODS, TEXT_PERSON_METHODS
+from cpr_person import PROTOCOL_VERSION
+from cpr_person.adapter import PERSON_METHODS
+from cpr_person.cache import canonical_hash
 
 ROOT = Path(__file__).resolve().parent
 OUTPUTS_DIR = ROOT / "outputs"
@@ -58,6 +60,9 @@ def collect_results():
     for method_dir in sorted(OUTPUTS_DIR.iterdir()):
         if not method_dir.is_dir():
             continue
+        if method_dir.name == "groundingdino_clipreid_set_textfree_diagnostic":
+            print("Skipping separate text-free diagnostic from the primary comparison.")
+            continue
 
         metrics_path = method_dir / "metrics.json"
         run_path = method_dir / "run.json"
@@ -76,7 +81,8 @@ def collect_results():
                 f"expected {run_path.relative_to(ROOT)}"
             )
         run = load_json(run_path)
-        if not compatible(run) or metrics.get("benchmark_protocol") != run.get("benchmark_protocol"):
+        if (method_dir.name in PERSON_METHODS
+                and run.get("shared_person_protocol", {}).get("version") != PROTOCOL_VERSION):
             print(f"Skipping legacy/different-protocol result: {method_dir.name}; rerun this baseline.")
             continue
 
@@ -95,23 +101,28 @@ def collect_results():
             )
 
         method_id = run_method
-        images = run["benchmark_protocol"].get("image_fingerprint")
+        provenance = run.get("shared_person_protocol", {})
+        if method_id in PERSON_METHODS:
+            if (provenance.get("detections_fingerprint", {}).get("gallery_manifest_sha256") != current_data["gallery_sha256"]
+                    or provenance.get("localization_fingerprint", {}).get("queries_manifest_sha256") != current_data["queries_sha256"]):
+                raise RuntimeError(f"Shared adapter provenance does not match the evaluated manifests: {method_id}")
+        images = provenance.get("detections_fingerprint", {}).get("gallery_image_content_sha256")
         if images:
             if image_signature is not None and images != image_signature:
                 raise RuntimeError("Runs use different gallery image bytes; rerun them on the same image files before comparing.")
             image_signature = images
         if method_id in PERSON_METHODS:
-            provenance = run["benchmark_protocol"]
-            signature = (provenance["detections"], provenance["detection_array_sha256"])
+            signature = (canonical_hash(provenance["detections_fingerprint"]), provenance["detection_array_sha256"])
             if person_detection_signature is not None and signature != person_detection_signature:
                 raise RuntimeError("Person runs use different actual detector boxes. Rerun them with the same shared cache before comparing.")
             person_detection_signature = signature
-            if method_id in TEXT_PERSON_METHODS:
-                selection = (provenance.get("localization"), provenance.get("localization_components_sha256"))
-                if not all(selection): raise RuntimeError(f"Missing shared membership provenance: {method_id}")
-                if person_localization_signature is not None and selection != person_localization_signature:
-                    raise RuntimeError("Text-person runs use different selected people. Rerun them with the same shared localization cache.")
-                person_localization_signature = selection
+            selection = (canonical_hash(provenance.get("localization_fingerprint")),
+                         provenance.get("localization_components_sha256"))
+            if not all(selection):
+                raise RuntimeError(f"Missing shared membership provenance: {method_id}")
+            if person_localization_signature is not None and selection != person_localization_signature:
+                raise RuntimeError("Person runs use different selected people. Rerun them with the same shared localization cache.")
+            person_localization_signature = selection
 
         method = (
             run.get("display_name")

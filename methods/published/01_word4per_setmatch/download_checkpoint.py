@@ -30,6 +30,7 @@ if str(ROOT) not in sys.path:
 
 from benchmark_progress import PhaseTracker, byte_progress  # noqa: E402
 METHOD_DIR = Path(__file__).resolve().parent
+from cpr_person.adapter import prepare_shared
 DEFAULT_CONFIG = METHOD_DIR / "config.yaml"
 
 CLIP_ASSETS = {
@@ -43,11 +44,7 @@ CLIP_ASSETS = {
     ),
 }
 CLIP_BASE_URL = "https://openaipublic.azureedge.net/clip/models"
-DETECTOR_URL = (
-    "https://download.pytorch.org/models/"
-    "fasterrcnn_resnet50_fpn_v2_coco-dd69338a.pth"
-)
-DETECTOR_HASH_PREFIX = "dd69338a"
+
 
 STAGE2_CHECKPOINT_ENV = "WORD4PER_STAGE2_CHECKPOINT"
 STAGE2_CONFIG_ENV = "WORD4PER_STAGE2_CONFIG"
@@ -592,7 +589,7 @@ def validate_reproduced_stage2(
 
 
 def prepare(config_path: Path, force: bool) -> None:
-    tracker = PhaseTracker("word4per_prepare", total=5)
+    tracker = PhaseTracker("word4per_prepare", total=4)
 
     tracker.advance("Validate reproduced Word4Per Stage-2 artifacts")
     cfg = load_yaml(config_path)
@@ -605,18 +602,8 @@ def prepare(config_path: Path, force: bool) -> None:
     ckpt = cfg["checkpoint"]
     prepare_clip(str(ckpt["base_clip_model"]), resolve_path(str(ckpt["base_clip"])), force)
 
-    tracker.advance("Prepare CLIP query-selector checkpoint")
-    selector = cfg["localization"]["query_selector"]
-    prepare_clip(str(selector["model"]), resolve_path(str(selector["checkpoint"])), force)
-
-    tracker.advance("Prepare person-detector checkpoint")
-    detector = cfg["localization"]["detector"]
-    download_with_sha256(
-        url=DETECTOR_URL,
-        path=resolve_path(str(detector["checkpoint"])),
-        expected_hash_prefix=DETECTOR_HASH_PREFIX,
-        force=force,
-    )
+    tracker.advance("Prepare shared person protocol assets")
+    prepare_shared(force)
     print("[status] Word4Per inference artifacts are ready", flush=True)
     tracker.finish()
 

@@ -1,4 +1,4 @@
--r ../05_reid_set/requirements.txt
+-r ../../../cpr_person/requirements.txt
 
 # OpenAI CLIP used for target-person localization and per-person composition.
 git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33
