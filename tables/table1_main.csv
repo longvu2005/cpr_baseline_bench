@@ -3,5 +3,6 @@ CLIP ViT-L/14 - Image-only,Native scene v1,No,34.62,77.64,90.37,93.53,6.96,2.39,
 CLIP ViT-L/14 - Text-only,Native scene v1,No,8.63,19.18,38.76,47.88,13.12,8.63,20.78,27.40
 CLIP ViT-L/14 - Early Fusion,Native scene v1,No,35.58,76.73,90.72,93.78,11.64,4.85,19.32,29.81
 CLIP ViT-L/14 - Late Fusion,Native scene v1,No,31.78,70.24,87.17,91.81,15.95,8.26,26.61,37.16
+CLIP-ReID Subject Set + Global CLIP Text,Shared person v1,No,23.76,61.89,78.33,83.34,12.73,7.56,20.83,28.00
 Pic2Word,Native scene v1,No,17.19,42.52,66.88,75.18,22.56,16.38,35.28,44.10
 MagicLens Large,Native scene v1,No,11.38,33.50,56.27,65.65,23.32,18.02,34.68,43.54

@@ -1,0 +1,405 @@
+{
+  "adapter_version": "2026-08-14-v2-fixed-or-val-fusion",
+  "benchmark_adaptation": {
+    "evaluation_labels_used_for_alpha_selection": false,
+    "purpose": "Strong conventional baseline: CLIP-ReID answers WHO at person-set level; global CLIP text similarity answers WHAT at scene level.",
+    "query_image_removed_inside_method": false,
+    "score_direction": "higher_is_better",
+    "validation_labels_used_only_for_alpha_selection": false
+  },
+  "cache": {
+    "alpha_selection_hit": false,
+    "main_clip_gallery_hit": false,
+    "main_clip_scores_hit": false,
+    "main_s5": {
+      "detections_hit": false,
+      "features_hit": false,
+      "num_detected_persons": 124636,
+      "scores_hit": false,
+      "shared_person_protocol": {
+        "adapted_inference": true,
+        "detection_array_sha256": "22d002710ead9ac4c3f9fbba41be28f5f86a59b62de69d8d7568f197920280b9",
+        "detections_cache": "/kaggle/working/cpr_baseline_bench/cache/shared/detections/1dd349d0b50d5b9a9594a025535d752fe94571f1a6da2eba488293d25dffc69b/persons.npz",
+        "detections_cache_hit": false,
+        "detections_fingerprint": {
+          "adapter_version": "2026-10-12-person-v1",
+          "checkpoint_sha256": "3b3ca2563c77c69f651d7bd133e97139c186df06231157a64c507099c52bc799",
+          "config_sha256": "172e80017f9395668a9cb5d1b8bd9d061c0e360471c6ed673c83b69bb14399f1",
+          "gallery_image_content_sha256": "7f4a322b61333127b620b1834b52912f77b1cf411bec74e36960f9b337b17d85",
+          "gallery_manifest_sha256": "4517f6a39a93b5e3fdd7c68696a772f936c75b79c438e3e6c77bef1c5c1e96c2",
+          "image": {
+            "crop": "clipped_floor_left_top_ceil_right_bottom",
+            "mode": "RGB",
+            "orientation": "stored_pixels_no_exif_transpose"
+          },
+          "protocol": {
+            "attention_backend": "official_pytorch_fallback",
+            "backend": "groundingdino_swint_ogc",
+            "batch_size": 2,
+            "box_threshold": 0.35,
+            "max_padding_ratio": 1.3,
+            "max_persons_per_image": 10,
+            "min_box_size_px": 4,
+            "nms_iou_threshold": 0.5,
+            "text_prompt": "person",
+            "text_threshold": 0.25
+          },
+          "source_commit": "856dde20aee659246248e20734ef9ba5214f5e44"
+        },
+        "detector": {
+          "attention_backend": "official_pytorch_fallback",
+          "backend": "groundingdino_swint_ogc",
+          "batch_size": 2,
+          "box_threshold": 0.35,
+          "checkpoint": "checkpoints/groundingdino/groundingdino_swint_ogc.pth",
+          "checkpoint_url": "https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth",
+          "config": "groundingdino/config/GroundingDINO_SwinT_OGC.py",
+          "config_sha256": "172e80017f9395668a9cb5d1b8bd9d061c0e360471c6ed673c83b69bb14399f1",
+          "max_padding_ratio": 1.3,
+          "max_persons_per_image": 10,
+          "min_box_size_px": 4,
+          "nms_iou_threshold": 0.5,
+          "runtime_assets_marker": "checkpoints/groundingdino/runtime_assets_ready.json",
+          "runtime_cache": "checkpoints/groundingdino/runtime_cache",
+          "score_threshold": 0.35,
+          "source": {
+            "auto_clone": true,
+            "commit": "856dde20aee659246248e20734ef9ba5214f5e44",
+            "local_checkout": "runs/groundingdino_clipreid_set/official_source/GroundingDINO",
+            "repository": "https://github.com/IDEA-Research/GroundingDINO.git"
+          },
+          "text_prompt": "person",
+          "text_threshold": 0.25
+        },
+        "gt_localization_used": false,
+        "image": {
+          "crop": "clipped_floor_left_top_ceil_right_bottom",
+          "mode": "RGB",
+          "orientation": "stored_pixels_no_exif_transpose"
+        },
+        "localization_cache": "/kaggle/working/cpr_baseline_bench/cache/shared/query_localization/f6b315f7617e56a45c16d2e81ba55ebe615238e15a65b12cdad0b4ed7cc8fac6/members.json",
+        "localization_cache_hit": false,
+        "localization_components_sha256": "e5d6d9dfff982af01e08e4b3618d61c3da7d195f2e94aa6985aa5b3336697eb7",
+        "localization_fingerprint": {
+          "adapter_version": "2026-10-12-person-v1",
+          "detection_array_sha256": "22d002710ead9ac4c3f9fbba41be28f5f86a59b62de69d8d7568f197920280b9",
+          "detections": {
+            "adapter_version": "2026-10-12-person-v1",
+            "checkpoint_sha256": "3b3ca2563c77c69f651d7bd133e97139c186df06231157a64c507099c52bc799",
+            "config_sha256": "172e80017f9395668a9cb5d1b8bd9d061c0e360471c6ed673c83b69bb14399f1",
+            "gallery_image_content_sha256": "7f4a322b61333127b620b1834b52912f77b1cf411bec74e36960f9b337b17d85",
+            "gallery_manifest_sha256": "4517f6a39a93b5e3fdd7c68696a772f936c75b79c438e3e6c77bef1c5c1e96c2",
+            "image": {
+              "crop": "clipped_floor_left_top_ceil_right_bottom",
+              "mode": "RGB",
+              "orientation": "stored_pixels_no_exif_transpose"
+            },
+            "protocol": {
+              "attention_backend": "official_pytorch_fallback",
+              "backend": "groundingdino_swint_ogc",
+              "batch_size": 2,
+              "box_threshold": 0.35,
+              "max_padding_ratio": 1.3,
+              "max_persons_per_image": 10,
+              "min_box_size_px": 4,
+              "nms_iou_threshold": 0.5,
+              "text_prompt": "person",
+              "text_threshold": 0.25
+            },
+            "source_commit": "856dde20aee659246248e20734ef9ba5214f5e44"
+          },
+          "image": {
+            "crop": "clipped_floor_left_top_ceil_right_bottom",
+            "mode": "RGB",
+            "orientation": "stored_pixels_no_exif_transpose"
+          },
+          "queries_manifest_sha256": "758f7b08047995c8f3833d9a6d45fdd3412456627ffa4608f26d52ae0db47d07",
+          "selector": {
+            "backend": "openai_clip",
+            "checkpoint_sha256": "40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af",
+            "max_members_per_subject": 5,
+            "membership_margin": 0.03,
+            "membership_threshold": 0.2,
+            "model": "ViT-B/32",
+            "source_commit": "a1d071733d7111c9c014f024669f959182114e33",
+            "tokenize_truncate": true,
+            "tokenizer_packages": {
+              "ftfy": "5.8",
+              "wcwidth": "0.2.13"
+            }
+          },
+          "selector_checkpoint_sha256": "40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af"
+        },
+        "localization_statistics": {
+          "assignment": "hungarian_anchors_then_threshold_expansion",
+          "extra_member_components": 2896,
+          "full_scene_fallback_slots": 20,
+          "max_members_per_subject": 5,
+          "mean_assigned_clip_similarity": 0.3005290175291399,
+          "membership_margin": 0.03,
+          "membership_policy": "case_agnostic_anchor_first_disjoint_extras",
+          "membership_threshold": 0.2,
+          "min_assigned_clip_similarity": 0.1664188951253891,
+          "predicted_member_count_histogram": {
+            "1": 3017,
+            "2": 1081,
+            "3": 424,
+            "4": 145,
+            "5": 133
+          },
+          "predicted_total_query_components": 7696,
+          "queries_with_too_few_candidates": 20,
+          "selected_fallback_anchors": 26,
+          "selector": "openai_clip",
+          "selector_model": "ViT-B/32",
+          "shortage_policy": "pad_missing_slots_with_full_reference_image",
+          "uses_case_labels_or_identity_counts": false
+        },
+        "query_selection_uses_text": true,
+        "selector": {
+          "backend": "openai_clip",
+          "checkpoint": "checkpoints/clip/ViT-B-32.pt",
+          "checkpoint_sha256": "40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af",
+          "checkpoint_url": "https://openaipublic.azureedge.net/clip/models/40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af/ViT-B-32.pt",
+          "max_members_per_subject": 5,
+          "membership_margin": 0.03,
+          "membership_threshold": 0.2,
+          "model": "ViT-B/32",
+          "source_commit": "a1d071733d7111c9c014f024669f959182114e33",
+          "tokenize_truncate": true,
+          "tokenizer_packages": {
+            "ftfy": "5.8",
+            "wcwidth": "0.2.13"
+          },
+          "tokenizer_runtime_dir": "checkpoints/clip/selector_tokenizer"
+        },
+        "setmatch": "maximum-sum min(K,N) real pairs; (sum+(K-min(K,N))*b)/K",
+        "version": "2026-10-12-person-v1"
+      }
+    },
+    "validation_clip_gallery_hit": null,
+    "validation_clip_scores_hit": null,
+    "validation_s5": null
+  },
+  "components": {
+    "clip_text": {
+      "checkpoint": "checkpoints/clip/ViT-L-14.pt",
+      "checkpoint_sha256": "b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836",
+      "gallery_representation": "global full-scene CLIP image embedding",
+      "model": "ViT-L/14",
+      "text_field": "text"
+    },
+    "reid_set": {
+      "aggregation": "mean over all predicted query components",
+      "assignment": "maximum-weight Hungarian",
+      "config": "methods/simple/05_reid_set/config.yaml",
+      "detector": "Grounding DINO Swin-T",
+      "method": "groundingdino_clipreid_set",
+      "reid": "CLIP-ReID ViT-B/16 (MSMT17)"
+    }
+  },
+  "config": "methods/simple/06_reid_set_text/config.yaml",
+  "cpr_supervision": "No",
+  "data_fingerprint": {
+    "gallery_sha256": "4517f6a39a93b5e3fdd7c68696a772f936c75b79c438e3e6c77bef1c5c1e96c2",
+    "queries_sha256": "758f7b08047995c8f3833d9a6d45fdd3412456627ffa4608f26d52ae0db47d07"
+  },
+  "display_name": "CLIP-ReID Subject Set + Global CLIP Text",
+  "fusion": {
+    "fixed_alpha": 0.5,
+    "formula": "alpha * ReID-Set + (1-alpha) * CLIP-text",
+    "grid": null,
+    "score_normalization": "none",
+    "selected_alpha": 0.5,
+    "selection_metric": null,
+    "selection_mode": "fixed",
+    "selection_result": null,
+    "selection_split": null,
+    "validation_full_map": null
+  },
+  "group": "Simple / Obvious Baselines",
+  "higher_is_better": true,
+  "method": "groundingdino_clipreid_set_text",
+  "num_gallery": 30552,
+  "num_queries": 4311,
+  "runtime": {
+    "clip_image_batch_size": 64,
+    "clip_score_batch_size": 256,
+    "clip_text_batch_size": 256,
+    "device": "cuda",
+    "num_workers": 4
+  },
+  "scores": "runs/groundingdino_clipreid_set_text/scores.npy",
+  "setmatch": {
+    "aggregation": "mean",
+    "allows_optional_unmatching": false,
+    "assignment": "rectangular_hungarian_maximum_sum",
+    "calibration_provenance": null,
+    "definition": "(sum(S[M])+(K-min(K,N))*b)/K",
+    "no_partial_credit": false,
+    "pairwise_metric": "cosine",
+    "real_pair_count": "min(K,N)",
+    "unmatched_score": -1.0,
+    "unmatched_score_source": "analytic_lower_bound_of_normalized_cosine_or_token_cosine"
+  },
+  "shared_person_protocol": {
+    "adapted_inference": true,
+    "detection_array_sha256": "22d002710ead9ac4c3f9fbba41be28f5f86a59b62de69d8d7568f197920280b9",
+    "detections_cache": "/kaggle/working/cpr_baseline_bench/cache/shared/detections/1dd349d0b50d5b9a9594a025535d752fe94571f1a6da2eba488293d25dffc69b/persons.npz",
+    "detections_cache_hit": false,
+    "detections_fingerprint": {
+      "adapter_version": "2026-10-12-person-v1",
+      "checkpoint_sha256": "3b3ca2563c77c69f651d7bd133e97139c186df06231157a64c507099c52bc799",
+      "config_sha256": "172e80017f9395668a9cb5d1b8bd9d061c0e360471c6ed673c83b69bb14399f1",
+      "gallery_image_content_sha256": "7f4a322b61333127b620b1834b52912f77b1cf411bec74e36960f9b337b17d85",
+      "gallery_manifest_sha256": "4517f6a39a93b5e3fdd7c68696a772f936c75b79c438e3e6c77bef1c5c1e96c2",
+      "image": {
+        "crop": "clipped_floor_left_top_ceil_right_bottom",
+        "mode": "RGB",
+        "orientation": "stored_pixels_no_exif_transpose"
+      },
+      "protocol": {
+        "attention_backend": "official_pytorch_fallback",
+        "backend": "groundingdino_swint_ogc",
+        "batch_size": 2,
+        "box_threshold": 0.35,
+        "max_padding_ratio": 1.3,
+        "max_persons_per_image": 10,
+        "min_box_size_px": 4,
+        "nms_iou_threshold": 0.5,
+        "text_prompt": "person",
+        "text_threshold": 0.25
+      },
+      "source_commit": "856dde20aee659246248e20734ef9ba5214f5e44"
+    },
+    "detector": {
+      "attention_backend": "official_pytorch_fallback",
+      "backend": "groundingdino_swint_ogc",
+      "batch_size": 2,
+      "box_threshold": 0.35,
+      "checkpoint": "checkpoints/groundingdino/groundingdino_swint_ogc.pth",
+      "checkpoint_url": "https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth",
+      "config": "groundingdino/config/GroundingDINO_SwinT_OGC.py",
+      "config_sha256": "172e80017f9395668a9cb5d1b8bd9d061c0e360471c6ed673c83b69bb14399f1",
+      "max_padding_ratio": 1.3,
+      "max_persons_per_image": 10,
+      "min_box_size_px": 4,
+      "nms_iou_threshold": 0.5,
+      "runtime_assets_marker": "checkpoints/groundingdino/runtime_assets_ready.json",
+      "runtime_cache": "checkpoints/groundingdino/runtime_cache",
+      "score_threshold": 0.35,
+      "source": {
+        "auto_clone": true,
+        "commit": "856dde20aee659246248e20734ef9ba5214f5e44",
+        "local_checkout": "runs/groundingdino_clipreid_set/official_source/GroundingDINO",
+        "repository": "https://github.com/IDEA-Research/GroundingDINO.git"
+      },
+      "text_prompt": "person",
+      "text_threshold": 0.25
+    },
+    "gt_localization_used": false,
+    "image": {
+      "crop": "clipped_floor_left_top_ceil_right_bottom",
+      "mode": "RGB",
+      "orientation": "stored_pixels_no_exif_transpose"
+    },
+    "localization_cache": "/kaggle/working/cpr_baseline_bench/cache/shared/query_localization/f6b315f7617e56a45c16d2e81ba55ebe615238e15a65b12cdad0b4ed7cc8fac6/members.json",
+    "localization_cache_hit": false,
+    "localization_components_sha256": "e5d6d9dfff982af01e08e4b3618d61c3da7d195f2e94aa6985aa5b3336697eb7",
+    "localization_fingerprint": {
+      "adapter_version": "2026-10-12-person-v1",
+      "detection_array_sha256": "22d002710ead9ac4c3f9fbba41be28f5f86a59b62de69d8d7568f197920280b9",
+      "detections": {
+        "adapter_version": "2026-10-12-person-v1",
+        "checkpoint_sha256": "3b3ca2563c77c69f651d7bd133e97139c186df06231157a64c507099c52bc799",
+        "config_sha256": "172e80017f9395668a9cb5d1b8bd9d061c0e360471c6ed673c83b69bb14399f1",
+        "gallery_image_content_sha256": "7f4a322b61333127b620b1834b52912f77b1cf411bec74e36960f9b337b17d85",
+        "gallery_manifest_sha256": "4517f6a39a93b5e3fdd7c68696a772f936c75b79c438e3e6c77bef1c5c1e96c2",
+        "image": {
+          "crop": "clipped_floor_left_top_ceil_right_bottom",
+          "mode": "RGB",
+          "orientation": "stored_pixels_no_exif_transpose"
+        },
+        "protocol": {
+          "attention_backend": "official_pytorch_fallback",
+          "backend": "groundingdino_swint_ogc",
+          "batch_size": 2,
+          "box_threshold": 0.35,
+          "max_padding_ratio": 1.3,
+          "max_persons_per_image": 10,
+          "min_box_size_px": 4,
+          "nms_iou_threshold": 0.5,
+          "text_prompt": "person",
+          "text_threshold": 0.25
+        },
+        "source_commit": "856dde20aee659246248e20734ef9ba5214f5e44"
+      },
+      "image": {
+        "crop": "clipped_floor_left_top_ceil_right_bottom",
+        "mode": "RGB",
+        "orientation": "stored_pixels_no_exif_transpose"
+      },
+      "queries_manifest_sha256": "758f7b08047995c8f3833d9a6d45fdd3412456627ffa4608f26d52ae0db47d07",
+      "selector": {
+        "backend": "openai_clip",
+        "checkpoint_sha256": "40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af",
+        "max_members_per_subject": 5,
+        "membership_margin": 0.03,
+        "membership_threshold": 0.2,
+        "model": "ViT-B/32",
+        "source_commit": "a1d071733d7111c9c014f024669f959182114e33",
+        "tokenize_truncate": true,
+        "tokenizer_packages": {
+          "ftfy": "5.8",
+          "wcwidth": "0.2.13"
+        }
+      },
+      "selector_checkpoint_sha256": "40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af"
+    },
+    "localization_statistics": {
+      "assignment": "hungarian_anchors_then_threshold_expansion",
+      "extra_member_components": 2896,
+      "full_scene_fallback_slots": 20,
+      "max_members_per_subject": 5,
+      "mean_assigned_clip_similarity": 0.3005290175291399,
+      "membership_margin": 0.03,
+      "membership_policy": "case_agnostic_anchor_first_disjoint_extras",
+      "membership_threshold": 0.2,
+      "min_assigned_clip_similarity": 0.1664188951253891,
+      "predicted_member_count_histogram": {
+        "1": 3017,
+        "2": 1081,
+        "3": 424,
+        "4": 145,
+        "5": 133
+      },
+      "predicted_total_query_components": 7696,
+      "queries_with_too_few_candidates": 20,
+      "selected_fallback_anchors": 26,
+      "selector": "openai_clip",
+      "selector_model": "ViT-B/32",
+      "shortage_policy": "pad_missing_slots_with_full_reference_image",
+      "uses_case_labels_or_identity_counts": false
+    },
+    "query_selection_uses_text": true,
+    "selector": {
+      "backend": "openai_clip",
+      "checkpoint": "checkpoints/clip/ViT-B-32.pt",
+      "checkpoint_sha256": "40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af",
+      "checkpoint_url": "https://openaipublic.azureedge.net/clip/models/40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af/ViT-B-32.pt",
+      "max_members_per_subject": 5,
+      "membership_margin": 0.03,
+      "membership_threshold": 0.2,
+      "model": "ViT-B/32",
+      "source_commit": "a1d071733d7111c9c014f024669f959182114e33",
+      "tokenize_truncate": true,
+      "tokenizer_packages": {
+        "ftfy": "5.8",
+        "wcwidth": "0.2.13"
+      },
+      "tokenizer_runtime_dir": "checkpoints/clip/selector_tokenizer"
+    },
+    "setmatch": "maximum-sum min(K,N) real pairs; (sum+(K-min(K,N))*b)/K",
+    "version": "2026-10-12-person-v1"
+  }
+}
