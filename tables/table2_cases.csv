@@ -5,5 +5,6 @@ CLIP ViT-L/14 - Early Fusion,Native scene v1,11.19,4.77,14.35,5.19,14.38,4.64,13
 CLIP ViT-L/14 - Late Fusion,Native scene v1,15.78,8.25,16.90,6.82,18.25,9.27,15.89,9.94
 CLIP-ReID + CLIP Subject Localization + Partial SetMatch,Shared person v1,5.06,2.26,9.06,3.90,10.38,3.97,6.14,2.21
 CLIP-ReID Subject Set + Global CLIP Text,Shared person v1,12.57,7.55,13.96,6.82,18.59,12.58,9.03,4.97
+SigLIP2 Compose,Native scene v1,9.44,3.38,10.16,3.25,12.43,1.99,11.45,4.97
 Pic2Word,Native scene v1,23.67,17.35,15.86,9.74,21.91,17.88,11.87,6.63
 MagicLens Large,Native scene v1,25.60,20.16,6.42,1.95,19.86,15.23,8.72,4.42
