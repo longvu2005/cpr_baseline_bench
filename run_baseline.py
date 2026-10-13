@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from benchmark_progress import format_duration
+from baseline_environment import prepare_method_python
 from benchmark_data import describe_gallery_link, ensure_gallery_layout, manifest_fingerprint
 
 ROOT = Path(__file__).resolve().parent
@@ -152,11 +153,12 @@ def format_command(command: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in command)
 
 
-def run_step(index: int, total: int, title: str, command: list[str]) -> None:
+def run_step(index: int, total: int, title: str, command: list[str], *,
+             child_env: dict[str, str] | None = None) -> None:
     print(flush=True)
     print(f"[{index}/{total}] {title}", flush=True)
     print(f"$ {format_command(command)}", flush=True)
-    env = os.environ.copy()
+    env = (child_env if child_env is not None else os.environ).copy()
     env["PYTHONUNBUFFERED"] = "1"
     started = perf_counter()
     try:
@@ -173,12 +175,13 @@ def run_step(index: int, total: int, title: str, command: list[str]) -> None:
     )
 
 
-def run_checkpoint_step(index: int, total: int, title: str, command: list[str]) -> bool:
+def run_checkpoint_step(index: int, total: int, title: str, command: list[str], *,
+                        child_env: dict[str, str] | None = None) -> bool:
     """Run checkpoint preparation and distinguish unavailable external artifacts."""
     print(flush=True)
     print(f"[{index}/{total}] {title}", flush=True)
     print(f"$ {format_command(command)}", flush=True)
-    env = os.environ.copy()
+    env = (child_env if child_env is not None else os.environ).copy()
     env["PYTHONUNBUFFERED"] = "1"
     started = perf_counter()
     completed = subprocess.run(command, cwd=ROOT, check=False, env=env)
@@ -230,34 +233,19 @@ def run_pipeline(
         subprocess.run(shared_command, cwd=ROOT, check=True)
     print(f"[1/{total}] done in {format_duration(perf_counter() - started)}: Validate gallery data", flush=True)
 
-    if skip_install:
-        print_skip(
-            2,
-            total,
-            "Install requirements",
-            "requested by --skip-install; using the current environment as-is.",
-        )
-    else:
-        run_step(
-            2,
-            total,
-            "Install requirements",
-            [
-                sys.executable,
-                "-u",
-                "-m",
-                "pip",
-                "install",
-                "-r",
-                str(method.requirements_path.relative_to(ROOT)),
-            ],
-        )
+    print(flush=True)
+    print(f"[2/{total}] Prepare isolated method environment", flush=True)
+    method_python, method_env = prepare_method_python(
+        root=ROOT, method_id=method.method_id,
+        requirements_path=method.requirements_path, skip_install=skip_install,
+    )
+    print(f"[2/{total}] environment ready: {method_python}", flush=True)
 
     if method.checkpoint_path.is_file():
-        command = [sys.executable, "-u", str(method.checkpoint_path.relative_to(ROOT))]
+        command = [method_python, "-u", str(method.checkpoint_path.relative_to(ROOT))]
         if force_checkpoint:
             command.append("--force")
-        if not run_checkpoint_step(3, total, "Prepare checkpoint", command):
+        if not run_checkpoint_step(3, total, "Prepare checkpoint", command, child_env=method_env):
             print()
             print("Not runnable yet")
             print("----------------")
@@ -277,7 +265,8 @@ def run_pipeline(
         4,
         total,
         "Inference",
-        [sys.executable, "-u", str(method.run_path.relative_to(ROOT))],
+        [method_python, "-u", str(method.run_path.relative_to(ROOT))],
+        child_env=method_env,
     )
     if manifest_fingerprint(ROOT) != data_fingerprint:
         raise RuntimeError("Manifests changed during inference; rerun this baseline.")
@@ -346,8 +335,8 @@ def parse_args() -> argparse.Namespace:
         "--skip-install",
         action="store_true",
         help=(
-            "Skip the default `python -m pip install -r <method>/requirements.txt` "
-            "step. Use only when the active environment is already prepared."
+            "Use a previously prepared isolated method environment without "
+            "installing dependencies. Fails if missing or stale."
         ),
     )
     parser.add_argument(

@@ -571,3 +571,31 @@ validate/repair gallery and validate manifests
 ```
 
 Individual stages may still be executed manually for debugging, but the end-to-end runner is the benchmark's normal execution path.
+
+
+### Baseline Python environments (Kaggle)
+
+`python run_baseline.py <method>` automatically creates or reuses
+`.baseline_venvs/<method_id>/`. Dependencies are installed only into that
+method's environment and are rechecked when requirements files change. The
+checkpoint preparation and inference steps use **the same** method interpreter.
+The host interpreter is kept for data validation, official evaluation, and
+benchmark tables. Torch/CUDA from the host remains visible using
+`--system-site-packages`, but conflicting pip packages are installed locally
+inside the method's virtual environment. PyTorch-only subprocesses also disable
+Transformers' optional Flax/JAX and TensorFlow backend discovery.
+
+Run normally (without `--skip-install`) at least once for each method:
+
+```bash
+python run_baseline.py 10_person_compose_setmatch
+```
+
+`--skip-install` only reuses an **already prepared**, up-to-date method
+environment and fails early with an actionable message if one is missing.
+A successful install is recorded under `.baseline_venvs/` and reused on
+later runs; the existing `checkpoints/` and `runs/` data are not cleared.
+
+To refresh an environment, remove only `.baseline_venvs/<method_id>/` and
+run the normal command again. This does not delete model checkpoints or feature
+caches.
