@@ -90,6 +90,10 @@ class SentenceEncoder:
             show_progress_bar=False, convert_to_numpy=True, normalize_embeddings=True)
 
 
+class CaptionLengthExceeded(ValueError):
+    """Qwen hit its fixed generation budget without an EOS token."""
+
+
 class QwenGenerator:
     def __init__(self, cfg, device):
         import torch
@@ -117,12 +121,16 @@ class QwenGenerator:
         # Greedy decoding, one request at a time, and a fixed pixel budget are
         # identical for reference and gallery. No GT-dependent retry or prompt.
         with self.torch.inference_mode():
-            output = self.model.generate(**inputs, do_sample=False, num_beams=1, max_new_tokens=budget)
+            # temperature=1.0 neutralizes a sampling-only checkpoint default;
+            # greedy decoding remains deterministic and does not sample.
+            output = self.model.generate(**inputs, do_sample=False, num_beams=1,
+                                         temperature=1.0, max_new_tokens=budget)
         generated = output[0, inputs.input_ids.shape[1]:]
         eos = self.model.generation_config.eos_token_id
         eos = eos if isinstance(eos, list) else [eos]
         if len(generated) >= budget and int(generated[-1]) not in eos:
-            raise ValueError("Qwen output reached max_new_tokens; increase the fixed budget and rerun")
+            raise CaptionLengthExceeded(
+                f"Qwen caption exceeded max_new_tokens={budget} without EOS")
         return self.processor.decode(generated, skip_special_tokens=True).strip()
 
 

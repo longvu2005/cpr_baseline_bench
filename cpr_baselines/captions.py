@@ -11,6 +11,7 @@ from benchmark_progress import progress_bar
 from cpr_person.cache import StageCache, canonical_hash, read_json
 from cpr_person.detection import crop_person, image_path, read_rgb
 from . import VERSION
+from .backends import CaptionLengthExceeded
 from .common import query_text
 
 FIELDS = ("appearance", "clothing", "action", "objects")
@@ -54,11 +55,29 @@ def pixels_hash(image):
                            "sha256": hashlib.sha256(image.tobytes()).hexdigest()})
 
 
+def shorter_caption_prompt(original, *, structured):
+    """Retry with a label-free fixed constraint, never a truncated partial answer."""
+    if structured:
+        instruction = (
+            "Output one compact JSON object only, with exactly the keys "
+            "appearance, clothing, action, objects. Each value must be a string "
+            "of at most 8 English words (use an empty string if unknown). "
+            "No markdown or additional text."
+        )
+    else:
+        instruction = (
+            "Output only a concise English scene description of at most 40 words. "
+            "Keep the important people, distinguishing attributes, actions and relations. "
+            "No lists, introduction, explanations, or editing narration."
+        )
+    return original + "\n\nIMPORTANT OUTPUT-LENGTH CONSTRAINT: " + instruction
+
+
 class CaptionStore:
     def __init__(self, cfg, asset_identity, generator_factory):
         self.cfg, self.asset_identity = cfg, asset_identity
         self.generator_factory, self.generator = generator_factory, None
-        self.hits = self.generated = self.repairs = 0
+        self.hits = self.generated = self.repairs = self.length_repairs = 0
 
     def request(self, prompt, image=None, *, structured=False):
         parser = parse_structure if structured else parse_caption
@@ -76,30 +95,56 @@ class CaptionStore:
             return record["value"]
         if self.generator is None:
             self.generator = self.generator_factory()
+
+        generation = self.cfg["generation"]
+        format_budget = int(generation["format_retries"])
+        length_budget = int(generation.get("length_retries", 1))
+        if format_budget < 0 or length_budget < 0:
+            raise ValueError("Caption retry budgets must be non-negative")
+        format_used = length_used = 0
         attempts = []
         retry_prompt = prompt
-        for attempt in range(1 + int(self.cfg["generation"]["format_retries"])):
-            raw = self.generator.generate(retry_prompt, image)
+        while True:
+            try:
+                raw = self.generator.generate(retry_prompt, image)
+            except CaptionLengthExceeded as error:
+                if length_used >= length_budget:
+                    raise ValueError(
+                        f"Qwen exceeded the generation token limit on "
+                        f"{length_used + 1} attempts; no incomplete caption was cached"
+                    ) from error
+                length_used += 1
+                self.length_repairs += 1
+                retry_prompt = shorter_caption_prompt(prompt, structured=structured)
+                continue
+
             attempts.append(raw)
             try:
                 value = parser(raw)
             except (ValueError, TypeError) as error:
-                if attempt >= int(self.cfg["generation"]["format_retries"]):
-                    raise ValueError(f"Qwen returned an invalid caption after fixed format retries: {error}") from error
+                if format_used >= format_budget:
+                    raise ValueError(
+                        f"Qwen returned an invalid caption after "
+                        f"{format_used + 1} formatting attempts: {error}"
+                    ) from error
+                format_used += 1
                 self.repairs += 1
                 retry_prompt = (prompt + "\nYour previous answer did not follow the required format. "
                                 "Return only the requested output, without markdown or explanations.\n"
                                 "Previous answer:\n" + raw)
                 continue
-            cache.write_json("response.json", {"raw": raw, "value": value, "attempts": attempts})
+
+            cache.write_json("response.json", {
+                "raw": raw, "value": value, "attempts": attempts,
+                "length_retries_used": length_used, "format_retries_used": format_used,
+            })
             self.generated += 1
             return value
-        raise AssertionError("Caption generation did not finish")
 
     def metadata(self):
         return {"cache_hits": self.hits, "generated_records": self.generated,
-                "format_repairs": self.repairs, "greedy_decoding": True,
-                "label_conditioned_generation": False,
+                "format_repairs": self.repairs, "length_repairs": self.length_repairs,
+                "greedy_decoding": True, "label_conditioned_generation": False,
                 "schema_fields": list(FIELDS) if self.cfg["backend"] == "structured_caption" else None}
 
     def release(self):
@@ -113,14 +158,24 @@ class CaptionStore:
 
 def scene_captions(cfg, gallery, queries, gallery_index, store):
     descriptions = []
-    for row in progress_bar(gallery, desc="Caption gallery", unit="image"):
-        image = read_rgb(image_path(row))
-        descriptions.append(store.request(cfg["prompts"]["gallery"], image))
+    for gi, row in enumerate(progress_bar(gallery, desc="Caption gallery", unit="image")):
+        try:
+            image = read_rgb(image_path(row))
+            descriptions.append(store.request(cfg["prompts"]["gallery"], image))
+        except Exception as error:
+            raise RuntimeError(
+                f"Gallery caption failed at index={gi}, image_id={row['image_id']}"
+            ) from error
     targets = []
-    for query in progress_bar(queries, desc="Compose target captions", unit="query"):
-        reference = descriptions[gallery_index[query["image_id"]]]
-        prompt = cfg["prompts"]["target"].format(reference=reference, instruction=query_text(query))
-        targets.append(store.request(prompt))
+    for qi, query in enumerate(progress_bar(queries, desc="Compose target captions", unit="query")):
+        try:
+            reference = descriptions[gallery_index[query["image_id"]]]
+            prompt = cfg["prompts"]["target"].format(reference=reference, instruction=query_text(query))
+            targets.append(store.request(prompt))
+        except Exception as error:
+            raise RuntimeError(
+                f"Target caption failed at index={qi}, query_id={query['query_id']}"
+            ) from error
     return descriptions, targets
 
 

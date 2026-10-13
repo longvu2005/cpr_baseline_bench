@@ -37,8 +37,9 @@ generation:
     Never invent names or identity labels.
   min_pixels: 50176
   max_pixels: 301056
-  max_new_tokens: 256
+  max_new_tokens: 384
   format_retries: 1
+  length_retries: 1
   decoding: greedy_single_request
 text_encoding:
   dtype: fp32
@@ -46,14 +47,14 @@ text_encoding:
   normalize: true
   pooling: official_sentence_transformers
 prompts:
-  gallery: Describe this image in at most 80 English words. Describe the visible people,
+  gallery: Describe this image in at most 65 English words. Describe the visible people,
     their physical appearance, clothing, actions, held objects and the setting. Do
     not guess names, identity numbers or facts that are not visible. Return only a
     concise scene description.
   target: 'Rewrite the reference scene description into a description of the desired
     target image. Use the retrieval instruction to identify the selected subjects,
     preserve their visible physical appearance unless explicitly changed, and replace
-    attributes/actions/relations as requested. Describe the target in at most 80 English
+    attributes/actions/relations as requested. Describe the target in at most 65 English
     words; avoid describing discarded reference attributes or narrating the editing
     process. Return only the target scene description.
 
