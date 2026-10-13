@@ -1,0 +1,3 @@
+-r ../../../cpr_baselines/requirements.txt
+sentence-transformers==4.1.0
+qwen-vl-utils==0.0.10

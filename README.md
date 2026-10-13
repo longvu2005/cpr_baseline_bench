@@ -1,5 +1,9 @@
 # CPR Baseline Benchmark
 
+Seven additional methods are available: SigLIP2 Compose, SEARLE-XL,
+Context-I2W, FTI4CIR, Qwen Caption-to-Caption, Structured Caption Retrieval,
+and GME-Qwen2-VL-2B. See [setup, protocol and limitations](docs/additional_baselines.md).
+
 Person-level baselines now use the shared predicted-person protocol in `cpr_person/`:
 Grounding DINO, CLIP Subject membership and Partial SetMatch. Native scene-level
 methods retain their inference paths. See [protocol, method coverage, caches and run commands](docs/baselines.md).

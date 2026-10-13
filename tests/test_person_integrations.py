@@ -186,6 +186,17 @@ def test_all_configs_and_execution_paths_are_integrated():
         p,cfg=discovered[method]
         assert cfg["person_protocol"]=="cpr_person/protocol.yaml"
         source=p.with_name("run.py").read_text()
+        if method == "structured_caption_retrieval":
+            # Thin method wrapper dispatches to the common, label-free runner.
+            assert "cpr_baselines.runner" in source
+            source += (ROOT/"cpr_baselines/runner.py").read_text()
+            source += (ROOT/"cpr_baselines/person_cache.py").read_text()
+            # require_shared_context uses this allowlisted shared loader and
+            # disables both detector and selector forwards in caption runtime.
+            assert "require_shared_context(" in source and "require_cache=True" in source
+            assert "load_person_context" in source and "score_feature_sets(" in source
+            assert "shared_person_protocol" in source
+            continue
         if method not in {"groundingdino_clipreid_set_text","reid_set_qwen_edit_proxy"}:
             assert "load_person_context(" in source
             assert "aggregate_people(" in source or "score_feature_sets(" in source or "aggregate_component_scores(" in source

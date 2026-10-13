@@ -1,0 +1,74 @@
+method: structured_caption_retrieval
+display_name: Structured Caption Retrieval + Partial SetMatch
+group: Simple / Obvious Baselines
+cpr_supervision: 'No'
+backend: structured_caption
+assets:
+  captioner:
+    kind: hf
+    repo_id: Qwen/Qwen2.5-VL-3B-Instruct
+    revision: 66285546d2b821cf421d4f5eb2576359d3770cd3
+    path: checkpoints/additional/qwen2.5-vl-3b
+  text_encoder:
+    kind: hf
+    repo_id: sentence-transformers/all-mpnet-base-v2
+    revision: e8c3b32edf5434bc2275fc9bab85f82640a19130
+    path: checkpoints/additional/all-mpnet-base-v2
+prepared_marker: checkpoints/structured_caption_retrieval/prepared.json
+composition:
+  text_field: text
+  score: cosine_structured_person_captions_then_shared_partial_setmatch
+runtime:
+  device: auto
+  dtype: fp16
+  seed: 0
+  image_batch_size: 16
+  query_batch_size: 8
+  text_batch_size: 64
+  score_query_batch_size: 64
+  score_gallery_batch_size: 4096
+data:
+  gallery_manifest: data/gallery.jsonl
+  query_manifest: data/queries.jsonl
+output:
+  dir: runs/structured_caption_retrieval
+generation:
+  system_prompt: You describe visible evidence and follow retrieval instructions precisely.
+    Never invent names or identity labels.
+  min_pixels: 50176
+  max_pixels: 301056
+  max_new_tokens: 256
+  format_retries: 1
+  decoding: greedy_single_request
+text_encoding:
+  dtype: fp32
+  max_length: 384
+  normalize: true
+  pooling: official_sentence_transformers
+prompts:
+  gallery: 'Describe the most prominent person in this crop using exactly one JSON
+    object with four string fields: appearance, clothing, action, objects. appearance
+    describes only visible physical traits; clothing describes worn items; action
+    describes pose/activity; objects describes held or nearby relevant objects. Use
+    empty strings for missing evidence. Do not guess names, IDs or unseen traits.
+    Return only the JSON object, without markdown.'
+  target: 'Update the selected person description to satisfy the retrieval instruction.
+    Preserve visible physical appearance unless explicitly modified. Replace requested
+    clothing/action/object attributes; do not keep both old and new values. Return
+    exactly one JSON object with four string fields: appearance, clothing, action,
+    objects. Use empty strings for unknown attributes. Do not add names, IDs or explanations.
+
+    Reference person JSON: {reference}
+
+    Public subject number: {subject_id}
+
+    Selection description: {selection}
+
+    Target condition: {modification}
+
+    Complete public instruction (for relational context): {instruction}'
+person_protocol: cpr_person/protocol.yaml
+setmatch:
+  unmatched_score: -1.0
+  unmatched_score_source: analytic_cosine_lower_bound
+  pairwise_metric: cosine

@@ -221,6 +221,13 @@ def run_pipeline(
     )
     print(f"Gallery: {describe_gallery_link(ROOT)}", flush=True)
     print(f"Files  : validated canonical gallery at {gallery_root}", flush=True)
+    shared_preparer = method.directory / "prepare_person_cache.py"
+    if shared_preparer.is_file():
+        print("[shared preprocessing] Verify/build the canonical person cache before installing captioner dependencies.", flush=True)
+        shared_command = [sys.executable, "-u", str(shared_preparer)]
+        if skip_install:
+            shared_command.append("--check-only")
+        subprocess.run(shared_command, cwd=ROOT, check=True)
     print(f"[1/{total}] done in {format_duration(perf_counter() - started)}: Validate gallery data", flush=True)
 
     if skip_install:

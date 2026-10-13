@@ -106,7 +106,8 @@ def collect_results():
             if (provenance.get("detections_fingerprint", {}).get("gallery_manifest_sha256") != current_data["gallery_sha256"]
                     or provenance.get("localization_fingerprint", {}).get("queries_manifest_sha256") != current_data["queries_sha256"]):
                 raise RuntimeError(f"Shared adapter provenance does not match the evaluated manifests: {method_id}")
-        images = provenance.get("detections_fingerprint", {}).get("gallery_image_content_sha256")
+        images = (provenance.get("detections_fingerprint", {}).get("gallery_image_content_sha256")
+                  or run.get("image_provenance", {}).get("gallery_image_content_sha256"))
         if images:
             if image_signature is not None and images != image_signature:
                 raise RuntimeError("Runs use different gallery image bytes; rerun them on the same image files before comparing.")

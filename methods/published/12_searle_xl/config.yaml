@@ -1,0 +1,47 @@
+method: searle_xl
+display_name: SEARLE-XL
+group: Published / SOTA Baselines
+cpr_supervision: 'No'
+backend: searle
+assets:
+  clip:
+    kind: url
+    path: checkpoints/clip/ViT-L-14.pt
+    url: https://openaipublic.azureedge.net/clip/models/b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836/ViT-L-14.pt
+    sha256: b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836
+  checkpoint:
+    kind: url
+    path: checkpoints/searle_xl/SEARLE_ViT-L14.pt
+    url: https://github.com/miccunifi/SEARLE/releases/download/weights/SEARLE_ViT-L14.pt
+    sha256: 0ce31fb8eecaad95cdf60287dbad2ac9f968d79b74559f11b462701ce4693b95
+    size_bytes: 56652823
+  clip_code:
+    kind: git
+    repository: https://github.com/openai/CLIP.git
+    revision: a1d071733d7111c9c014f024669f959182114e33
+    path: checkpoints/additional/openai_clip_source
+prepared_marker: checkpoints/searle_xl/prepared.json
+composition:
+  text_field: text
+  prompt_template: a photo of $ that {text}
+  max_text_tokens: 77
+  raw_image_features_into_phi: true
+  targetpad_ratio: 1.25
+runtime:
+  device: auto
+  dtype: fp32
+  seed: 0
+  image_batch_size: 16
+  query_batch_size: 8
+  text_batch_size: 64
+  score_query_batch_size: 64
+  score_gallery_batch_size: 4096
+data:
+  gallery_manifest: data/gallery.jsonl
+  query_manifest: data/queries.jsonl
+output:
+  dir: runs/searle_xl
+source:
+  repository: https://github.com/miccunifi/SEARLE.git
+  commit: a9c314ba4b6e6e14be5a9c3fdf6b66e6a0c23e37
+  local_checkout: runs/searle_xl/official_source

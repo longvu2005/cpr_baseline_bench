@@ -1,0 +1,6 @@
+-r ../../../cpr_baselines/requirements.txt
+ftfy==6.3.1
+regex>=2024.11.6
+einops==0.8.1
+einops-exts==0.0.4
+gdown==5.2.0

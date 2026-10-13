@@ -1,0 +1,35 @@
+method: gme_qwen2_vl_2b
+display_name: GME-Qwen2-VL-2B
+group: Simple / Obvious Baselines
+cpr_supervision: 'No'
+backend: gme
+assets:
+  encoder:
+    kind: hf
+    repo_id: Alibaba-NLP/gme-Qwen2-VL-2B-Instruct
+    revision: 9cfa6413f704a7c1cf5064d240748e10c876b286
+    path: checkpoints/additional/gme-qwen2-vl-2b
+prepared_marker: checkpoints/gme_qwen2_vl_2b/prepared.json
+composition:
+  text_field: text
+  min_image_tokens: 256
+  max_image_tokens: 1280
+  max_length: 1800
+  instruction: Find a target image that preserves the selected people in the reference
+    image and satisfies the retrieval instruction.
+  gallery_instruction: You are a helpful assistant.
+  official_fused_inference: true
+runtime:
+  device: auto
+  dtype: fp16
+  seed: 0
+  image_batch_size: 2
+  query_batch_size: 2
+  text_batch_size: 64
+  score_query_batch_size: 64
+  score_gallery_batch_size: 4096
+data:
+  gallery_manifest: data/gallery.jsonl
+  query_manifest: data/queries.jsonl
+output:
+  dir: runs/gme_qwen2_vl_2b

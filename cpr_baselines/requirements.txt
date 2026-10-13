@@ -1,0 +1,13 @@
+# Minimal inference dependencies, shared by the seven new adapters.
+numpy>=1.24,<2
+Pillow>=9.5
+PyYAML>=6
+scipy>=1.10
+tqdm>=4.65
+torch>=2.2,<3
+torchvision>=0.17,<1
+huggingface_hub>=0.30,<1
+transformers==4.51.3
+accelerate>=0.26,<2
+safetensors>=0.4.3
+sentencepiece>=0.2

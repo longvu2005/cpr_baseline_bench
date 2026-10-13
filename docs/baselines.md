@@ -1,5 +1,8 @@
 # CPR baseline protocol
 
+The seven new CIR adapters and their native/shared-person choices are
+documented in [additional baselines](additional_baselines.md).
+
 The person adapter lives in `cpr_person/`. The official model, checkpoint,
 composition function and pairwise score remain in each method directory.
 This is a CPR benchmark adaptation, not a claim that the published method used

@@ -1,0 +1,62 @@
+method: qwen_caption_to_caption
+display_name: Qwen Caption-to-Caption
+group: Simple / Obvious Baselines
+cpr_supervision: 'No'
+backend: caption_to_caption
+assets:
+  captioner:
+    kind: hf
+    repo_id: Qwen/Qwen2.5-VL-3B-Instruct
+    revision: 66285546d2b821cf421d4f5eb2576359d3770cd3
+    path: checkpoints/additional/qwen2.5-vl-3b
+  text_encoder:
+    kind: hf
+    repo_id: sentence-transformers/all-mpnet-base-v2
+    revision: e8c3b32edf5434bc2275fc9bab85f82640a19130
+    path: checkpoints/additional/all-mpnet-base-v2
+prepared_marker: checkpoints/qwen_caption_to_caption/prepared.json
+composition:
+  text_field: text
+  score: cosine_target_caption_vs_gallery_caption
+runtime:
+  device: auto
+  dtype: fp16
+  seed: 0
+  image_batch_size: 16
+  query_batch_size: 8
+  text_batch_size: 64
+  score_query_batch_size: 64
+  score_gallery_batch_size: 4096
+data:
+  gallery_manifest: data/gallery.jsonl
+  query_manifest: data/queries.jsonl
+output:
+  dir: runs/qwen_caption_to_caption
+generation:
+  system_prompt: You describe visible evidence and follow retrieval instructions precisely.
+    Never invent names or identity labels.
+  min_pixels: 50176
+  max_pixels: 301056
+  max_new_tokens: 256
+  format_retries: 1
+  decoding: greedy_single_request
+text_encoding:
+  dtype: fp32
+  max_length: 384
+  normalize: true
+  pooling: official_sentence_transformers
+prompts:
+  gallery: Describe this image in at most 80 English words. Describe the visible people,
+    their physical appearance, clothing, actions, held objects and the setting. Do
+    not guess names, identity numbers or facts that are not visible. Return only a
+    concise scene description.
+  target: 'Rewrite the reference scene description into a description of the desired
+    target image. Use the retrieval instruction to identify the selected subjects,
+    preserve their visible physical appearance unless explicitly changed, and replace
+    attributes/actions/relations as requested. Describe the target in at most 80 English
+    words; avoid describing discarded reference attributes or narrating the editing
+    process. Return only the target scene description.
+
+    Reference description: {reference}
+
+    Retrieval instruction: {instruction}'

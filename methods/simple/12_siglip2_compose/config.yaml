@@ -1,0 +1,32 @@
+method: siglip2_compose
+display_name: SigLIP2 Compose
+group: Simple / Obvious Baselines
+cpr_supervision: 'No'
+backend: siglip2
+assets:
+  encoder:
+    kind: hf
+    repo_id: google/siglip2-so400m-patch14-384
+    revision: e8e487298228002f3d8a82e0cd5c8ea9c567f57f
+    path: checkpoints/additional/siglip2-so400m-patch14-384
+prepared_marker: checkpoints/siglip2_compose/prepared.json
+composition:
+  text_field: text
+  alpha: 0.5
+  alpha_selection: fixed_no_benchmark_labels
+  formula: normalize(alpha*normalize(image)+(1-alpha)*normalize(text))
+  max_text_tokens: 64
+runtime:
+  device: auto
+  dtype: fp16
+  seed: 0
+  image_batch_size: 16
+  query_batch_size: 8
+  text_batch_size: 64
+  score_query_batch_size: 64
+  score_gallery_batch_size: 4096
+data:
+  gallery_manifest: data/gallery.jsonl
+  query_manifest: data/queries.jsonl
+output:
+  dir: runs/siglip2_compose

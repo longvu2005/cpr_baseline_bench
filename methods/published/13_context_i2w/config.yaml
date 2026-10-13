@@ -1,0 +1,40 @@
+method: context_i2w
+display_name: Context-I2W
+group: Published / SOTA Baselines
+cpr_supervision: 'No'
+backend: context_i2w
+assets:
+  clip:
+    kind: url
+    path: checkpoints/clip/ViT-L-14.pt
+    url: https://openaipublic.azureedge.net/clip/models/b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836/ViT-L-14.pt
+    sha256: b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836
+  checkpoint:
+    kind: gdrive
+    path: checkpoints/context_i2w/context_i2w.pt
+    file_id: 1yHv9SgY1-2KrAvd2MmFqH40x4P3gLotQ
+    sha256: null
+prepared_marker: checkpoints/context_i2w/prepared.json
+composition:
+  text_field: text
+  prompt_template: a photo of <|replace|> , {text}
+  max_text_tokens: 77
+  tokenizer: official_context_i2w_custom_vocabulary
+runtime:
+  device: auto
+  dtype: fp32
+  seed: 0
+  image_batch_size: 16
+  query_batch_size: 8
+  text_batch_size: 64
+  score_query_batch_size: 64
+  score_gallery_batch_size: 4096
+data:
+  gallery_manifest: data/gallery.jsonl
+  query_manifest: data/queries.jsonl
+output:
+  dir: runs/context_i2w
+source:
+  repository: https://github.com/Pter61/context-i2w.git
+  commit: c524d5b9f1551ef14e26791b2bb21654319d0493
+  local_checkout: runs/context_i2w/official_source

@@ -1,0 +1,48 @@
+method: fti4cir
+display_name: FTI4CIR
+group: Published / SOTA Baselines
+cpr_supervision: 'No'
+backend: fti4cir
+assets:
+  clip:
+    kind: url
+    path: checkpoints/clip/ViT-L-14.pt
+    url: https://openaipublic.azureedge.net/clip/models/b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836/ViT-L-14.pt
+    sha256: b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836
+  checkpoint:
+    kind: hf_file
+    path: checkpoints/fti4cir/FTI4CIR_model.pth
+    repo_id: iLearn-Lab/SIGIR24-FTI4CIR
+    revision: 27eb6223124cf8a73e05647ef9932bb1042b30ed
+    filename: FTI4CIR_model.pth
+    sha256: aa1acd03fba4e70f77b6afbf296f849e58dddcb899f05e613bf677435ff1a967
+    size_bytes: 217342186
+  clip_code:
+    kind: git
+    repository: https://github.com/openai/CLIP.git
+    revision: a1d071733d7111c9c014f024669f959182114e33
+    path: checkpoints/additional/openai_clip_source
+prepared_marker: checkpoints/fti4cir/prepared.json
+composition:
+  text_field: text
+  max_text_tokens: 77
+  targetpad_ratio: 1.25
+  native_subject_and_attribute_tokens: true
+runtime:
+  device: auto
+  dtype: fp32
+  seed: 0
+  image_batch_size: 16
+  query_batch_size: 8
+  text_batch_size: 64
+  score_query_batch_size: 64
+  score_gallery_batch_size: 4096
+data:
+  gallery_manifest: data/gallery.jsonl
+  query_manifest: data/queries.jsonl
+output:
+  dir: runs/fti4cir
+source:
+  repository: https://github.com/iLearn-Lab/SIGIR24-FTI4CIR.git
+  commit: 70159e6ee1fa7e84256f365f4e93a93d4942a4ce
+  local_checkout: runs/fti4cir/official_source
