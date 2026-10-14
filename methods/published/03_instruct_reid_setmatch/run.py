@@ -17,9 +17,10 @@ import os
 import re
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Sequence
+from typing import Any
 
 import numpy as np
 import torch
@@ -36,12 +37,12 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
-
-from cpr_person.adapter import load_person_context, matching_metadata, manifest_identity
-from cpr_person.matching import score_feature_sets
-from cpr_person.detection import crop_person as crop_box
+from benchmark_progress import PhaseTracker, progress_bar
+from cpr_person.adapter import load_person_context, manifest_identity, matching_metadata
 from cpr_person.calibration import apply_instruct_calibration
+from cpr_person.detection import crop_person as crop_box
+from cpr_person.matching import score_feature_sets
+
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "instruct_reid_setmatch"
 ADAPTER_VERSION = "2026-10-12-shared-person-v1"
@@ -279,9 +280,9 @@ def load_official_instruct_model(
     if checkout_text not in sys.path:
         sys.path.insert(0, checkout_text)
 
-    from reid import models  # type: ignore
     import reid.models.pass_transformer_joint as joint  # type: ignore
     import reid.models.tokenization_bert as official_tokenization  # type: ignore
+    from reid import models  # type: ignore
     from reid.utils.serialization import copy_state_dict  # type: ignore
 
     # The released source contains literal '<your project root> ...' placeholders.
@@ -671,7 +672,7 @@ def validate_scores(scores: np.ndarray, shape: tuple[int, int]) -> None:
 
 
 def main() -> None:
-    tracker = PhaseTracker(METHOD_ID, total=9)
+    tracker = PhaseTracker(METHOD_ID, total=8)
 
     with tracker.phase("Load config, manifests, and prepared artifacts"):
         parser = argparse.ArgumentParser()
