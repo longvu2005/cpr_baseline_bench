@@ -143,29 +143,65 @@ def _candidate_model_dirs(roots: list[Path]) -> list[Path]:
 
 
 def discover_external_large_assets(cfg: dict[str, Any], *, fail_if_missing: bool) -> dict[str, Any]:
+    """Find the exact mounted checkpoints, including nested Kaggle dataset layouts.
+
+    Explicit environment overrides are authoritative. A model of the wrong
+    architecture/size must NOT be accepted as a fallback.
+    """
     storage = cfg["asset_storage"]
     roots = [Path(str(x)).resolve() for x in storage.get("external_search_roots", [])]
-    candidates = _candidate_model_dirs(roots)
+    automatic_candidates: list[Path] | None = None  # Lazy; no full /kaggle/input scan for explicit paths.
     found: dict[str, Any] = {}
     missing: list[str] = []
     specs = (
         ("captioner", str(storage["captioner_env"]), cfg["captioner"]),
         ("layout_llm", str(storage["layout_llm_env"]), cfg["layout_llm"]),
     )
+
     for kind, env_name, model_cfg in specs:
         selected: Path | None = None
-        source = None
-        explicit = os.environ.get(env_name, "").strip()
-        search = [Path(explicit).resolve()] if explicit else candidates
+        source: str | None = None
         diagnostics: list[str] = []
+        explicit = os.environ.get(env_name, "").strip()
+        if explicit:
+            base = Path(explicit).expanduser().resolve()
+            if not base.exists():
+                diagnostics.append(f"{env_name}={explicit!r}: path does not exist")
+                search: list[Path] = []
+            elif not base.is_dir():
+                diagnostics.append(f"{env_name}={explicit!r}: not a directory")
+                search = []
+            else:
+                # Fast path: direct model directory. Only scan children on mismatch.
+                ok, detail = _validate_large_model(kind, base)
+                if ok:
+                    search = [base]
+                else:
+                    diagnostics.append(f"{base}: {detail}")
+                    search = [p for p in _candidate_model_dirs([base]) if p != base]
+                    if not search:
+                        diagnostics.append(
+                            f"No nested config.json found under {base}; check the Kaggle Input mount."
+                        )
+        else:
+            if automatic_candidates is None:
+                automatic_candidates = _candidate_model_dirs(roots)
+            search = automatic_candidates
+            if not search:
+                diagnostics.append(
+                    "No directories containing config.json were found under "
+                    + ", ".join(str(p) for p in roots)
+                )
+
         for candidate in search:
             ok, detail = _validate_large_model(kind, candidate)
             if ok:
                 selected = candidate
                 source = f"env:{env_name}" if explicit else "auto:/kaggle/input"
                 break
-            if explicit:
+            if explicit and len(diagnostics) < 12:
                 diagnostics.append(f"{candidate}: {detail}")
+
         if selected is None:
             missing.append(kind)
             found[kind] = {
@@ -174,6 +210,9 @@ def discover_external_large_assets(cfg: dict[str, Any], *, fail_if_missing: bool
                 "env_override": env_name,
                 "diagnostics": diagnostics,
             }
+            print(f"[missing] {kind} ({model_cfg['repo_id']}):", flush=True)
+            for diagnostic in diagnostics:
+                print(f"  - {diagnostic}", flush=True)
         else:
             found[kind] = {
                 "found": True,
@@ -187,18 +226,22 @@ def discover_external_large_assets(cfg: dict[str, Any], *, fail_if_missing: bool
             print(f"[mount] {kind}: {selected}", flush=True)
 
     if missing and fail_if_missing:
-        names = ", ".join(missing)
+        details = []
+        for kind in missing:
+            entry = found[kind]
+            details.append(f"  {kind} ({entry['expected_repo_id']}):")
+            details.extend(f"    - {item}" for item in entry["diagnostics"])
+            if not entry["diagnostics"]:
+                details.append("    - No checkpoint matching the required architecture/weights was found")
         raise RuntimeError(
-            "Missing paper-faithful large model input(s): " + names + ".\n"
-            "On Kaggle, do NOT download these into /kaggle/working. Add the exact "
-            "Hugging Face models as Notebook Inputs / Kaggle Models, then rerun.\n"
-            "Required: Salesforce/blip2-opt-6.7b-coco and "
-            "Qwen/Qwen1.5-32B-Chat-GPTQ-Int4.\n"
-            "If Kaggle mounts them under unusual paths, set IPCIR_BLIP2_DIR and/or "
-            "IPCIR_QWEN32_DIR to the model directory containing config.json and model shards."
+            "Missing paper-faithful large model input(s): " + ", ".join(missing) + ".\n"
+            + "\n".join(details)
+            + "\nMount the exact Salesforce/blip2-opt-6.7b-coco and "
+            "Qwen/Qwen1.5-32B-Chat-GPTQ-Int4 checkpoints under /kaggle/input. "
+            "Set IPCIR_BLIP2_DIR and IPCIR_QWEN32_DIR to their model directories "
+            "or a parent directory containing the model. Run --check-inputs first."
         )
     return found
-
 
 def ensure_local_free_disk(cfg: dict[str, Any], external: dict[str, Any]) -> dict[str, float | bool]:
     usage = shutil.disk_usage(ROOT)
