@@ -15,7 +15,6 @@ import argparse
 import hashlib
 import importlib.util
 import json
-import math
 import os
 import re
 import shutil
@@ -38,6 +37,7 @@ from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 from cpr_person.adapter import load_person_context, matching_metadata, manifest_identity
 from cpr_person.cache import feature_config_hash
+from cpr_person.detection import crop_person as crop_box
 from cpr_person.detection import protocol_config
 from cpr_person.matching import aggregate_people
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
@@ -932,15 +932,7 @@ def compute_target_person_features(
             with Image.open(image_path(row, gi)) as opened:
                 image = opened.convert("RGB")
                 for box in boxes[start:end]:
-                    left = max(0, int(math.floor(float(box[0]))))
-                    top = max(0, int(math.floor(float(box[1]))))
-                    right = min(image.width, int(math.ceil(float(box[2]))))
-                    bottom = min(image.height, int(math.ceil(float(box[3]))))
-                    if right <= left or bottom <= top:
-                        raise RuntimeError(
-                            f"Invalid shared detector crop for gallery row {gi}: {box.tolist()}"
-                        )
-                    pending.append(preprocess(image.crop((left, top, right, bottom))))
+                    pending.append(preprocess(crop_box(image, box)))
                     if len(pending) >= batch_size:
                         flush()
         flush()

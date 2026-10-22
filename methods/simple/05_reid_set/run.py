@@ -10,7 +10,6 @@ import argparse
 import hashlib
 import importlib
 import json
-import math
 import os
 import subprocess
 import sys
@@ -32,6 +31,7 @@ from benchmark_progress import progress_bar
 
 from cpr_person.adapter import load_person_context, matching_metadata, PersonContext, manifest_identity
 from cpr_person.cache import feature_config_hash
+from cpr_person.detection import crop_person as crop_box
 from cpr_person.matching import score_feature_sets
 from cpr_person.detection import detection_fingerprint, load_detections, get_detections
 from cpr_person.localization import Localization
@@ -597,15 +597,7 @@ def compute_reid_features(
             with Image.open(path) as image_handle:
                 image = image_handle.convert("RGB")
                 for box in boxes[start:end]:
-                    left = max(0, int(math.floor(float(box[0]))))
-                    top = max(0, int(math.floor(float(box[1]))))
-                    right = min(image.width, int(math.ceil(float(box[2]))))
-                    bottom = min(image.height, int(math.ceil(float(box[3]))))
-                    if right <= left or bottom <= top:
-                        raise RuntimeError(
-                            f"Invalid cached crop for gallery row {gi}: {box.tolist()}"
-                        )
-                    pending.append(transform(image.crop((left, top, right, bottom))))
+                    pending.append(transform(crop_box(image, box)))
                     if len(pending) >= active_batch_size:
                         flush_batch()
         flush_batch()

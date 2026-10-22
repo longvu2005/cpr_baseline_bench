@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 from dataclasses import dataclass
 
 from . import PROTOCOL_VERSION
@@ -11,10 +10,9 @@ from .cache import ROOT, resolve
 from .detection import get_detections, protocol_config, detection_array_sha256
 from .localization import get_localization
 
-PERSON_METHODS = frozenset({"word4per_setmatch", "fafa_setmatch", "instruct_reid_setmatch",
-                           "basic_setmatch", "adafocal_setmatch", "groundingdino_clipreid_set",
-                           "groundingdino_clipreid_set_text", "reid_set_qwen_edit_proxy",
-                           "per_person_clip_compose_setmatch", "structured_caption_retrieval"})
+from . import protocol
+
+PERSON_METHODS = protocol.PERSON_METHODS
 
 
 @dataclass
@@ -83,10 +81,12 @@ def expand_targets(targets, localization):
 
 
 def prepare_shared(force=False):
-    command = [sys.executable, "-m", "cpr_person.prepare"]
+    from .runtime import detector_python, detector_env
+    python = detector_python()
+    command = [python, "-m", "cpr_person.prepare"]
     if force:
         command.append("--force")
-    subprocess.run(command, cwd=ROOT, check=True)
+    subprocess.run(command, cwd=ROOT, env=detector_env(python), check=True)
 
 
 def require_person_branch(run, gallery_manifest, query_manifest):

@@ -65,7 +65,7 @@ def shared_provenance(root):
     detection = {"adapter_version": PROTOCOL_VERSION,
                  "gallery_manifest_sha256": fingerprint["gallery_sha256"],
                  "gallery_image_content_sha256": "a" * 64,
-                 "protocol": {"box_threshold": 0.35}}
+                 "protocol": {"backend": "huggingface_grounding_dino", "threshold": 0.30, "text_threshold": 0.25}}
     boxes = "b" * 64
     return {"version": PROTOCOL_VERSION, "detections_fingerprint": detection,
             "detection_array_sha256": boxes, "localization_components_sha256": "c" * 64,
@@ -161,7 +161,7 @@ def test_scene_and_same_protocol_person_runs_share_a_table(reporting_repo):
         write_result(reporting_repo, method, shared_provenance(reporting_repo))
     results = build_tables.collect_results()
     assert len(results) == 3
-    assert sum(result["protocol"] == "Shared person v1" for result in results) == 2
+    assert sum(result["protocol"] == "Shared person HF v2" for result in results) == 2
 
 
 @pytest.mark.parametrize("provenance", [None, {}, {"version": "legacy"}])
@@ -269,3 +269,95 @@ def test_old_manifest_results_do_not_overwrite_existing_tables(reporting_repo):
     assert completed.returncode != 0
     assert "No evaluated results match" in completed.stderr
     assert old.read_text() == "previous table\n"
+
+
+@pytest.mark.parametrize('field,value,error', [
+    ('detection_array_sha256', 'b'*63, 'detector boxes checksum'),
+    ('localization_components_sha256', 'z'*64, 'selected membership checksum'),
+    ('localization_components_sha256', 123, 'selected membership checksum'),
+])
+def test_person_checksums_must_identify_actual_arrays(reporting_repo, field, value, error):
+    provenance = shared_provenance(reporting_repo)
+    provenance[field] = value
+    write_result(reporting_repo, 'fafa_setmatch', provenance)
+    with pytest.raises(RuntimeError, match=error):
+        build_tables.collect_results()
+
+
+def test_current_person_result_requires_selector_provenance(reporting_repo):
+    provenance = shared_provenance(reporting_repo)
+    provenance['localization_fingerprint']['selector'] = None
+    write_result(reporting_repo, 'fafa_setmatch', provenance)
+    with pytest.raises(RuntimeError, match='Missing shared selector fingerprint'):
+        build_tables.collect_results()
+
+
+def test_single_method_checks_reporting_before_pipeline(monkeypatch):
+    events = []
+    monkeypatch.setattr(sys, 'argv', ['run_baseline.py', 'fafa_setmatch', '--skip-install'])
+    monkeypatch.setattr(run_baseline, 'check_table_builder', lambda: events.append('check'))
+    monkeypatch.setattr(run_baseline, 'run_pipeline', lambda *a: events.append('pipeline'))
+    run_baseline.main()
+    assert events == ['check', 'pipeline']
+
+
+@pytest.mark.parametrize('arguments', [
+    ('--tables-only', '--all'), ('--tables-only', '--list'),
+    ('fafa_setmatch', '--tables-only'),
+])
+def test_tables_only_cannot_start_methods(reporting_repo, arguments):
+    completed = cli(reporting_repo, 'run_baseline.py', *arguments)
+    assert completed.returncode != 0
+    assert not (reporting_repo/'tables').exists()
+    assert not (reporting_repo/'runs').exists()
+    assert not (reporting_repo/'checkpoints').exists()
+
+
+def test_invalid_case_metric_preserves_both_existing_tables(reporting_repo, monkeypatch):
+    output = write_result(reporting_repo)
+    path = output/'metrics.json'
+    metrics = json.loads(path.read_text())
+    metrics['cases']['GROUP']['Full-mAP'] = 'invalid metric'
+    path.write_text(json.dumps(metrics))
+    tables = reporting_repo/'tables';tables.mkdir()
+    for name in ('table1_main.csv', 'table2_cases.csv'):
+        (tables/name).write_text('previous table\n')
+    monkeypatch.setattr(sys, 'argv', ['build_tables.py'])
+    with pytest.raises(ValueError):
+        build_tables.main()
+    assert all((tables/name).read_text() == 'previous table\n'
+               for name in ('table1_main.csv', 'table2_cases.csv'))
+
+
+def test_interrupted_csv_write_preserves_completed_file(tmp_path, monkeypatch):
+    path = tmp_path/'table.csv';path.write_text('previous table\n')
+    class InterruptedWriter:
+        def __init__(self, handle, **kwargs):
+            self.handle = handle
+        def writeheader(self):
+            self.handle.write('partial header\n')
+        def writerows(self, rows):
+            raise OSError('interrupted')
+    monkeypatch.setattr(build_tables.csv, 'DictWriter', InterruptedWriter)
+    with pytest.raises(OSError, match='interrupted'):
+        build_tables.write_csv(path, ['Method'], [{'Method':'test'}])
+    assert path.read_text() == 'previous table\n'
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_stale_results_do_not_create_tables_directory(reporting_repo):
+    write_result(reporting_repo)
+    (reporting_repo/'data/queries.jsonl').write_text('{"changed":true}\n')
+    completed = cli(reporting_repo, 'build_tables.py')
+    assert completed.returncode != 0
+    assert 'No evaluated results match' in completed.stderr
+    assert not (reporting_repo/'tables').exists()
+
+
+def test_legacy_person_metadata_does_not_block_current_scene_tables(reporting_repo):
+    write_result(reporting_repo)
+    output = write_result(reporting_repo, 'fafa_setmatch', {'version':'legacy'})
+    path = output/'run.json'
+    run = json.loads(path.read_text());run['data_fingerprint'] = {}
+    path.write_text(json.dumps(run))
+    assert [row['method_id'] for row in build_tables.collect_results()] == ['lincir']

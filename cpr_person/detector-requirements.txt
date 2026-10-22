@@ -1,0 +1,10 @@
+# Install only in .baseline_venvs/shared_person_detector (or CPR_DETECTOR_PYTHON).
+-r requirements.txt
+torch==2.5.1
+torchvision==0.20.1
+transformers==4.56.2
+tokenizers==0.22.1
+huggingface-hub==0.35.3
+safetensors==0.6.2
+numpy==1.26.4
+Pillow==11.3.0

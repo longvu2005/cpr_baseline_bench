@@ -14,6 +14,7 @@ PERSON_METHODS = frozenset({
     "groundingdino_clipreid_set_text",
     "reid_set_qwen_edit_proxy",
     "per_person_clip_compose_setmatch",
+    "structured_caption_retrieval",
 })
 
 TEXTFREE_DIAGNOSTIC_METHOD = "groundingdino_clipreid_set_textfree_diagnostic"

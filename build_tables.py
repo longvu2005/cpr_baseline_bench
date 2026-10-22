@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 
+import argparse
 import csv
 import json
+import re
 from pathlib import Path
 
 from benchmark_data import manifest_fingerprint
 from prepare_data import CASE_TYPES
 from cpr_person import PROTOCOL_VERSION
-from cpr_person.adapter import PERSON_METHODS
-from cpr_person.cache import canonical_hash
+from cpr_person.protocol import PERSON_METHODS, TEXTFREE_DIAGNOSTIC_METHOD
+from cpr_person.cache import atomic_file, canonical_hash
 
 ROOT = Path(__file__).resolve().parent
 OUTPUTS_DIR = ROOT / "outputs"
@@ -46,6 +48,32 @@ def format_metric(value):
     return f"{100.0 * float(value):.2f}"
 
 
+def validate_person_provenance(provenance, current_data, method_id):
+    detection = provenance.get("detections_fingerprint")
+    localization = provenance.get("localization_fingerprint")
+    if (not isinstance(detection, dict) or not detection
+            or not isinstance(localization, dict) or not localization):
+        raise RuntimeError(f"Missing shared detector/localization fingerprints: {method_id}")
+    if (detection.get("adapter_version") != PROTOCOL_VERSION
+            or localization.get("adapter_version") != PROTOCOL_VERSION):
+        raise RuntimeError(f"Shared fingerprint version mismatch: {method_id}")
+    if (detection.get("gallery_manifest_sha256") != current_data["gallery_sha256"]
+            or localization.get("queries_manifest_sha256") != current_data["queries_sha256"]):
+        raise RuntimeError(f"Shared adapter provenance does not match the evaluated manifests: {method_id}")
+    for value, label in [
+        (detection.get("gallery_image_content_sha256"), "gallery image bytes checksum"),
+        (provenance.get("detection_array_sha256"), "detector boxes checksum"),
+        (provenance.get("localization_components_sha256"), "selected membership checksum"),
+    ]:
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise RuntimeError(f"Missing/invalid {label}: {method_id}")
+    if (localization.get("detections") != detection
+            or localization.get("detection_array_sha256") != provenance["detection_array_sha256"]):
+        raise RuntimeError(f"Shared localization refers to different detector boxes: {method_id}")
+    if not isinstance(localization.get("selector"), dict) or not localization["selector"]:
+        raise RuntimeError(f"Missing shared selector fingerprint: {method_id}")
+
+
 def collect_results():
     results = []
     person_detection_signature = None
@@ -60,7 +88,7 @@ def collect_results():
     for method_dir in sorted(OUTPUTS_DIR.iterdir()):
         if not method_dir.is_dir():
             continue
-        if method_dir.name == "groundingdino_clipreid_set_textfree_diagnostic":
+        if method_dir.name == TEXTFREE_DIAGNOSTIC_METHOD:
             print("Skipping separate text-free diagnostic from the primary comparison.")
             continue
 
@@ -81,11 +109,11 @@ def collect_results():
                 f"expected {run_path.relative_to(ROOT)}"
             )
         run = load_json(run_path)
-        if (method_dir.name in PERSON_METHODS
-                and run.get("shared_person_protocol", {}).get("version") != PROTOCOL_VERSION):
+        provenance = run.get("shared_person_protocol", {})
+        if method_dir.name in PERSON_METHODS and (
+                not isinstance(provenance, dict) or provenance.get("version") != PROTOCOL_VERSION):
             print(f"Skipping legacy/different-protocol result: {method_dir.name}; rerun this baseline.")
             continue
-
         metric_method = metrics.get("method")
         run_method = run.get("method")
         if not isinstance(run_method, str) or not run_method:
@@ -99,15 +127,15 @@ def collect_results():
             raise ValueError(
                 f"Output directory/method mismatch: {method_dir.name!r} vs {run_method!r}"
             )
+        if "data_fingerprint" in run and run["data_fingerprint"] != metrics["data_fingerprint"]:
+            raise RuntimeError(f"Run metadata does not match the evaluated manifests: {run_method}")
 
         method_id = run_method
-        provenance = run.get("shared_person_protocol", {})
         if method_id in PERSON_METHODS:
-            if (provenance.get("detections_fingerprint", {}).get("gallery_manifest_sha256") != current_data["gallery_sha256"]
-                    or provenance.get("localization_fingerprint", {}).get("queries_manifest_sha256") != current_data["queries_sha256"]):
-                raise RuntimeError(f"Shared adapter provenance does not match the evaluated manifests: {method_id}")
-        images = (provenance.get("detections_fingerprint", {}).get("gallery_image_content_sha256")
-                  or run.get("image_provenance", {}).get("gallery_image_content_sha256"))
+            validate_person_provenance(provenance, current_data, method_id)
+        images = (provenance["detections_fingerprint"]["gallery_image_content_sha256"]
+                  if method_id in PERSON_METHODS
+                  else run.get("image_provenance", {}).get("gallery_image_content_sha256"))
         if images:
             if image_signature is not None and images != image_signature:
                 raise RuntimeError("Runs use different gallery image bytes; rerun them on the same image files before comparing.")
@@ -117,10 +145,8 @@ def collect_results():
             if person_detection_signature is not None and signature != person_detection_signature:
                 raise RuntimeError("Person runs use different actual detector boxes. Rerun them with the same shared cache before comparing.")
             person_detection_signature = signature
-            selection = (canonical_hash(provenance.get("localization_fingerprint")),
-                         provenance.get("localization_components_sha256"))
-            if not all(selection):
-                raise RuntimeError(f"Missing shared membership provenance: {method_id}")
+            selection = (canonical_hash(provenance["localization_fingerprint"]),
+                         provenance["localization_components_sha256"])
             if person_localization_signature is not None and selection != person_localization_signature:
                 raise RuntimeError("Person runs use different selected people. Rerun them with the same shared localization cache.")
             person_localization_signature = selection
@@ -149,7 +175,7 @@ def collect_results():
                 "method": method,
                 "group": group,
                 "supervision": supervision,
-                "protocol": "Shared person v1" if method_id in PERSON_METHODS else "Native scene v1",
+                "protocol": "Shared person HF v2" if method_id in PERSON_METHODS else "Native scene v1",
                 "metrics": metrics,
             }
         )
@@ -215,11 +241,8 @@ def build_case_table(results):
 
 
 def write_csv(path, columns, rows):
-    with path.open(
-        "w",
-        encoding="utf-8",
-        newline="",
-    ) as f:
+    with atomic_file(path, "w") as f:
+        f.reconfigure(encoding="utf-8", newline="")
         writer = csv.DictWriter(
             f,
             fieldnames=columns,
@@ -288,10 +311,11 @@ def print_table(title, columns, rows):
 
 
 def main():
-    TABLES_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    parser = argparse.ArgumentParser(description="Build tables from evaluated benchmark results.")
+    parser.add_argument("--check", action="store_true", help="Check reporting imports without reading manifests or results.")
+    if parser.parse_args().check:
+        print("Table builder imports OK")
+        return
 
     results = collect_results()
 
@@ -339,6 +363,7 @@ def main():
     main_rows = build_main_table(results)
     case_rows = build_case_table(results)
 
+    TABLES_DIR.mkdir(parents=True, exist_ok=True)
     main_path = TABLES_DIR / "table1_main.csv"
     case_path = TABLES_DIR / "table2_cases.csv"
 

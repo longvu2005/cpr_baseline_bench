@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import os
-from importlib.metadata import version
 
 from cpr_person.adapter import load_person_context
 from cpr_person.cache import ROOT, resolve
@@ -19,8 +18,8 @@ def require_shared_context(cfg, device, loader=load_person_context):
     except (RuntimeError, FileNotFoundError) as error:
         raise RuntimeError(
             "Structured Caption Retrieval requires the same verified grounding/localization cache as existing person methods. "
-            "Prepare it once with the original detector requirements: "
-            "python -m pip install -r cpr_person/requirements.txt; "
+            "Prepare it once in the shared detector runtime: "
+            "python -m cpr_person.runtime; "
             "python -m cpr_person.prepare; python -m cpr_baselines.person_cache. "
             "Then run this method through run_baseline.py. " + str(error)) from error
     finally:
@@ -34,8 +33,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default="auto")
     args = parser.parse_args()
-    if version("transformers") != "4.39.3":
-        raise SystemExit("Build shared grounding with cpr_person/requirements.txt (Transformers 4.39.3), then install the captioner requirements.")
     device = seed_runtime({"seed": 0, "device": args.device})
     gm, qm = ROOT / "data/gallery.jsonl", ROOT / "data/queries.jsonl"
     context = load_person_context(load_jsonl(gm), load_jsonl(qm), gm, qm, str(device))

@@ -28,10 +28,5 @@ prettytable
 webdataset
 pycocoevalcap
 
-# Official Grounding DINO is imported from the pinned S5 source checkout.
-# No Transformers upgrade or Grounding DINO pip wheel is required.
-supervision==0.22.0
-addict
-yapf==0.40.1
+# Used by native LAVIS COCO utilities, independently of person detection.
 pycocotools
-ninja

@@ -685,9 +685,6 @@ def main() -> None:
     selector_for_cache = resolve_config_path(
         str(protocol_config()["selector"]["checkpoint"])
     )
-    detector_for_cache = resolve_config_path(
-        str(protocol_config()["detector"]["checkpoint"])
-    )
     cache_key, cache_fingerprint = build_cache_key(
         person=person,
         config_path=config_path,
@@ -698,7 +695,6 @@ def main() -> None:
             stage2_cfg_for_cache,
             base_clip_for_cache,
             selector_for_cache,
-            detector_for_cache,
         ],
     )
     cache_dir = output / "cache" / cache_key
@@ -721,7 +717,7 @@ def main() -> None:
     candidate_cache_path = person.detections.path
     gallery_boxes = person.detections.candidates()
     detector_weights = str(resolve_config_path(detector_cfg["checkpoint"]))
-    threshold = float(detector_cfg["score_threshold"])
+    threshold = float(detector_cfg["threshold"])
     tracker.advance("Consume shared Subject memberships")
     selected_query_boxes = person.localization.boxes()
     selector_stats = person.localization.stats

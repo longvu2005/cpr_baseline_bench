@@ -4,6 +4,10 @@ Seven additional methods are available: SigLIP2 Compose, SEARLE-XL,
 Context-I2W, FTI4CIR, Qwen Caption-to-Caption, Structured Caption Retrieval,
 and GME-Qwen2-VL-2B. See [setup, protocol and limitations](docs/additional_baselines.md).
 
+Shared person detection now uses **Hugging Face Grounding DINO Tiny** in an
+isolated runtime (Transformers 4.56.2). Native FAFA keeps Transformers 4.39.3 and
+128-token text. [Migration, cache regeneration and commands](docs/hf_person_detector.md).
+
 Person-level baselines now use the shared predicted-person protocol in `cpr_person/`:
 Grounding DINO, CLIP Subject membership and Partial SetMatch. Native scene-level
 methods retain their inference paths. See [protocol, method coverage, caches and run commands](docs/baselines.md).
@@ -130,24 +134,34 @@ From the repository root, pass only the method name:
 python run_baseline.py clip_image
 ```
 
-The default runner performs the complete method pipeline in this order:
+Before model work, the runner checks reporting imports with `build_tables.py --check`.
+It then performs the complete method pipeline in this order:
 
 ```text
 1. validate/repair the canonical gallery image layout, then validate manifest semantics
-2. install methods/<group>/<method>/requirements.txt
+2. prepare isolated detector/person and method runtimes, then install method requirements
 3. prepare/validate the method checkpoint when download_checkpoint.py exists
 4. run inference
 5. run the official evaluator
 6. rebuild benchmark tables
 ```
 
-**Gallery validation runs before dependency installation.** The dependency step uses the same Python interpreter as the runner:
+**Gallery validation runs before dependency installation.** Requirements are installed
+into each method's isolated environment; person detection uses its separate
+shared environment. The parent notebook's packages are not replaced. See
+[detector setup](docs/hf_person_detector.md) and
+[Benchmark Gallery Protocol](#benchmark-gallery-protocol).
 
-```text
-python -m pip install -r methods/<group>/<method>/requirements.txt
+To rebuild tables from existing evaluated outputs:
+
+```bash
+python run_baseline.py --tables-only
 ```
 
-This prevents checkpoint or inference scripts from silently depending on packages that have not been installed yet. Gallery validation can fail early if the manifest or image mount is incomplete. See [Benchmark Gallery Protocol](#benchmark-gallery-protocol) before attempting GPU runs.
+This reads `outputs/<method>/metrics.json` and adjacent `run.json`; it does not
+install packages, load a model, repair gallery links or rerun evaluation.
+`python -S build_tables.py --check` checks reporting imports without needing
+manifests or outputs. See [reporting and provenance checks](docs/reporting.md).
 
 All Python subprocesses launched by the root runner are unbuffered, so phase messages and progress bars appear immediately instead of being held until a process exits. Each `run.py` should use the shared `benchmark_progress.py` helpers for phase-level status and batch-level progress:
 

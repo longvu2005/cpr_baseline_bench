@@ -933,7 +933,8 @@ def main() -> None:
 
     config_path = resolve_path(args.config)
     cfg = load_yaml(config_path)
-    cfg["runtime_assets"]["detector"]["path"] = protocol_config()["detector"]["checkpoint"]
+    cfg["localization"]["detector"] = protocol_config()["detector"]
+    cfg["runtime_assets"]["detector"]["path"] = cfg["localization"]["detector"]["checkpoint"]
     cfg["runtime_assets"]["selector"]["path"] = protocol_config()["selector"]["checkpoint"]
     if str(cfg.get("method")) != METHOD_ID:
         raise RuntimeError(f"config method must be {METHOD_ID!r}")

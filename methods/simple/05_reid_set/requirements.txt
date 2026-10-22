@@ -15,14 +15,5 @@ regex
 scikit-image
 ninja
 
-# Keep the Grounding DINO runtime reproducible and compatible with its pinned source.
-transformers==4.39.3
-supervision==0.22.0
-addict
-yapf==0.40.1
+# Native image utilities; the detector has a separate interpreter.
 opencv-python==4.10.0.84
-pycocotools
-
-# Grounding DINO itself is NOT installed as a wheel here.
-# download_checkpoint.py clones the exact pinned official commit and run.py imports
-# that checkout directly. This avoids fragile CUDA/C++ wheel builds on Python 3.12.

@@ -20,3 +20,7 @@ The unchanged evaluator handles reference-image exclusion and official positives
 Read [the shared protocol and complete method table](../../../docs/baselines.md)
 for exact thresholds, unmatched references, Kaggle cache inspection/reuse,
 installation, validation, dependencies, calibration and optional native smoke tests.
+
+Shared detection uses the isolated HF Grounding DINO Tiny runtime. See
+[shared detector setup and cache migration](../../../docs/hf_person_detector.md).
+Run through `run_baseline.py` to prepare its interpreter before method assets.

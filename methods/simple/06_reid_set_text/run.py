@@ -785,7 +785,7 @@ def main() -> None:
                 "reid_set": {
                     "method": str(cfg["base_set"]["method"]),
                     "config": rel(s5_cfg_path),
-                    "detector": "Grounding DINO Swin-T",
+                    "detector": "Hugging Face Grounding DINO Tiny",
                     "reid": "CLIP-ReID ViT-B/16 (MSMT17)",
                     "assignment": "maximum-weight Hungarian",
                     "aggregation": "mean over all predicted query components",

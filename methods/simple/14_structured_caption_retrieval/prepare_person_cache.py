@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Warm canonical grounding once before upgrading to Qwen dependencies."""
+"""Warm canonical grounding in the shared runtime before loading Qwen."""
 from pathlib import Path
 import argparse
 import subprocess
@@ -23,17 +23,11 @@ def main():
         pass
     if args.check_only:
         raise SystemExit("Shared grounding cache is missing. Prepare it first or run without --skip-install.")
-    # Separate subprocesses avoid stale Transformers imports in a notebook.
-    # Modern setuptools removed pkg_resources used by the pinned CLIP setup.py;
-    # use a compatible builder without creating another model environment.
-    commands = [
-        [sys.executable, "-m", "pip", "install", "setuptools>=65,<81", "wheel"],
-        [sys.executable, "-m", "pip", "install", "--no-build-isolation", "-r", "cpr_person/requirements.txt"],
-        [sys.executable, "-m", "cpr_person.prepare"],
-        [sys.executable, "-m", "cpr_baselines.person_cache"],
-    ]
-    for command in commands:
-        subprocess.run(command, cwd=ROOT, check=True)
+    from cpr_person.runtime import detector_python, detector_env
+    python = detector_python()
+    for module in ("cpr_person.prepare", "cpr_baselines.person_cache"):
+        subprocess.run([python, "-m", module], cwd=ROOT, env=detector_env(python), check=True)
+
 
 
 if __name__ == "__main__":

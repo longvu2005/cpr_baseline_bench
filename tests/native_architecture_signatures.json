@@ -5,12 +5,12 @@
     "compute_component_person_scores": "4e92b5123068671ba94eaaba5e80d0c498c48562f2075d06a4e09793d2486981"
   },
   "methods/published/02_fafa_setmatch/run.py": {
-    "load_fafa": "6f52e3957cfc6e5b010c11d7cdf8d194963705d5ecba5d59058a6d7dc35b417c",
+    "load_fafa": "2939e219a9b048f90b824b5f10e2836e75e7ddefd1bafd492adcd82b7c0d7595",
     "compute_component_person_scores": "a28b9fcfb50901007efb73bd9b4d3dce209ecf3f70b4aa29d3383f9e09192eb2",
     "encode_query_targets": "b9466d58d03a1522c855374cb11e9bf5b3df751ad29295555896b6d501313494"
   },
   "methods/published/03_instruct_reid_setmatch/run.py": {
-    "load_official_instruct_model": "8c64e5c33e4a27f020659f818d62c698b43e1d27706da8cda998c981eb3c7e20",
+    "load_official_instruct_model": "c2a450e042b0f6563b70bcea053910e58ed0cfee782f4deabda985780093a64f",
     "run_instruct_batch": "9e64cac40307e379974b07c8bb847839229b57715fbfb64895b6f361c0d1bfae",
     "negative_squared_euclidean": "b76835b73b875838580746976bbbf86cc31a9e168a438247f7f2bede2bf03bfb",
     "modification_instruction": "0760b900544b29a844356ad03351984fb07dcb38d3787446d64e471845ff356d"

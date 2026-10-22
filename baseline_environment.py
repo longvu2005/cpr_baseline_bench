@@ -141,7 +141,9 @@ def _smoke_test(executable: Path, requirements: str, env: dict[str, str]) -> Non
     imports = ["import numpy", "import torch"]
     if "github.com/openai/CLIP" in requirements or "git+https://github.com/openai/CLIP" in requirements:
         imports.append("import clip")
-    if "transformers" in requirements:
+    if "transformers==4.56.2" in requirements:
+        imports.append("from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection")
+    elif "transformers" in requirements:
         imports.append("from transformers import AutoTokenizer, BertModel")
     try:
         subprocess.run([str(executable), "-c", "; ".join(imports)], check=True, env=env)
@@ -192,7 +194,14 @@ def prepare_method_python(*, root: Path, method_id: str, requirements_path: Path
         marker.unlink(missing_ok=True)
         pip_cmd = _pip_command(executable, env)
         print(f"[environment] Installing requirements into {directory}", flush=True)
-        subprocess.run(pip_cmd + ["install", "-r", str(requirements_path)],
+        options = []
+        if "github.com/openai/CLIP" in requirements:
+            # Pinned OpenAI CLIP's setup.py imports pkg_resources, removed in
+            # setuptools 81. Build it with this venv's compatible builder.
+            subprocess.run(pip_cmd + ["install", "setuptools>=65,<81", "wheel"],
+                           check=True, cwd=root, env=env)
+            options.append("--no-build-isolation")
+        subprocess.run(pip_cmd + ["install", *options, "-r", str(requirements_path)],
                        check=True, cwd=root, env=env)
         _smoke_test(executable, requirements, env)
         marker.write_text(json.dumps(expected, indent=2) + "\n", encoding="utf-8")

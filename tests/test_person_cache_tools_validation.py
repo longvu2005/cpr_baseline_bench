@@ -64,11 +64,11 @@ def test_worker_recovers_only_checksummed_ordered_prefix(tmp_path):
     row={"image_id":"a","size":[10,10],"boxes":[[0,0,10,10]],"scores":[-1],"fallback":[True]}
     encoded=json.dumps({**row,"sha256":canonical_hash(row)})+"\n"
     journal=tmp_path/"partial.jsonl";journal.write_text(encoded+'{"truncated"')
-    assert env["recover_prefix"](journal,[{"image_id":"a"},{"image_id":"b"}])==[row]
+    assert env["recover_prefix"](journal,[{"image_id":"a"},{"image_id":"b"}], {"protocol": {"backend": "huggingface_grounding_dino", "threshold": .3}})==[row]
     assert journal.read_text()==encoded
     broken={**row,"scores":[.4]}
     journal.write_text(json.dumps({**broken,"sha256":canonical_hash(broken)})+"\n")
-    assert env["recover_prefix"](journal,[{"image_id":"a"}])==[]
+    assert env["recover_prefix"](journal,[{"image_id":"a"}], {"protocol": {"backend": "huggingface_grounding_dino", "threshold": .3}})==[]
 
 
 def test_external_unmatched_calibration_is_fixed_and_checkpoint_bound(toy_protocol,tmp_path):

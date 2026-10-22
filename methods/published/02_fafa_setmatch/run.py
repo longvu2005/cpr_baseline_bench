@@ -888,7 +888,7 @@ def main() -> None:
     candidate_cache_path = person.detections.path
     detector_info = {"checkpoint": str(resolve_config_path(detector_cfg["checkpoint"])),
                      "attention_backend": detector_cfg["attention_backend"]}
-    threshold = float(detector_cfg["score_threshold"])
+    threshold = float(detector_cfg["threshold"])
     gallery_boxes = person.detections.candidates()
     tracker.advance("Consume shared Subject memberships")
     selected_query_boxes, selector_stats = person.localization.boxes(), person.localization.stats
@@ -1018,9 +1018,10 @@ def main() -> None:
             "uses_positive_labels_for_scoring": False,
             "person_detector": detector_cfg.get("backend"),
             "detector_weights": detector_info["checkpoint"],
-            "detector_source_commit": detector_cfg["source"]["commit"],
+            "detector_model": detector_cfg["model"],
+            "detector_revision": detector_cfg["revision"],
             "attention_backend": detector_info.get("attention_backend"),
-            "detector_protocol": {k: detector_cfg[k] for k in ("text_prompt", "box_threshold", "text_threshold", "nms_iou_threshold", "min_box_size_px", "max_persons_per_image")},
+            "detector_protocol": {k: detector_cfg[k] for k in ("text_prompt", "threshold", "text_threshold", "processor_revision")},
             "score_threshold": threshold,
             "candidate_cache": rel(candidate_cache_path),
             **selector_stats,

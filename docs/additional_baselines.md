@@ -11,11 +11,13 @@ an eighth method has not been invented. Base repository commit:
 | `context_i2w` | `methods/published/13_context_i2w` | Official context mapper, patch tokens and custom tokenizer | Whole scene |
 | `fti4cir` | `methods/published/14_fti4cir` | Official IMG2TEXT, subject/attribute pseudo-tokens | Whole scene |
 | `qwen_caption_to_caption` | `methods/simple/13_qwen_caption_to_caption` | Qwen scene captions, target rewrite, MPNet cosine | Whole scene |
-| `structured_caption_retrieval` | `methods/simple/14_structured_caption_retrieval` | Person captions with shared Partial SetMatch | Shared person v1 |
+| `structured_caption_retrieval` | `methods/simple/14_structured_caption_retrieval` | Person captions with shared Partial SetMatch | Shared HF person v2 |
 | `gme_qwen2_vl_2b` | `methods/simple/15_gme_qwen2_vl_2b` | Official fused image/instruction vs image-only embedding | Whole scene |
 
 Published CIR methods retain their native scene architectures. Structured
-Caption Retrieval is the explicit person adaptation.
+Caption Retrieval is the explicit person adaptation. Its shared detector/selector
+cache is prepared in a separate interpreter, before Qwen dependencies. See
+[HF detector setup](hf_person_detector.md).
 
 ## Apply and run
 

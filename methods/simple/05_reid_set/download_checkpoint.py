@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
 """Prepare every external artifact required by Grounding DINO + CLIP-ReID - Set.
 
-The root runner installs requirements before this script. This preparer then:
-1) pins both official source repositories,
-2) downloads the official Grounding DINO Swin-T checkpoint,
-3) downloads the official MSMT17 CLIP-ReID ViT-B/16 checkpoint,
-4) downloads the exact OpenAI CLIP ViT-B/16 backbone used by CLIP-ReID, and
-5) pre-warms Grounding DINO's bert-base-uncased runtime assets into a
-   repository-local Hugging Face cache.
-
-Inference is intentionally offline and consumes only these prepared artifacts.
+The root runner prepares an isolated HF detector runtime and method runtime.
+This preparer prepares shared HF Grounding DINO Tiny/CLIP selector assets, the
+pinned CLIP-ReID source, its MSMT17 weights, and its OpenAI CLIP backbone.
+Inference consumes only these prepared artifacts.
 """
 
 from __future__ import annotations

@@ -42,36 +42,32 @@ inference paths are otherwise unchanged.
 ## Detection and crop convention
 
 `cpr_person/protocol.yaml` is the authoritative shared configuration. Method
-YAMLs include matching snapshots for visibility; execution reads the shared
-configuration. Change that one file, then rerun every affected baseline.
+configs point to it instead of duplicating detector settings. See the
+[HF migration audit and setup](hf_person_detector.md) for exact revisions,
+runtime pins, dependency coverage and verification commands.
 
-- Grounding DINO Swin-T OGC, official release `groundingdino_swint_ogc.pth`.
-- Source commit `856dde20aee659246248e20734ef9ba5214f5e44`.
-- Prompt `person`, box threshold `0.35`, text threshold `0.25`.
-- Deterministic NMS at IoU `0.50`, minimum raw clipped box width/height `4px`.
-- Maximum `10` persons per scene, ordered by confidence; coordinate order and
-  original index break confidence ties.
-- Load stored image pixels as RGB, without EXIF transpose, consistently with
-  the previous FAFA detector's image loading convention.
-- Clip boxes to the image, perform NMS, then store integer crop boundaries:
-  floor left/top, ceil right/bottom. Every native crop therefore contains the
-  same pixels. Model-specific resizing and normalization remain native.
-- No detection produces one **flagged full-image fallback candidate**.
+- Hugging Face `IDEA-Research/grounding-dino-tiny`, immutable model/processor
+  revision `a2bb814dd30d776dcf7e30523b00659f4f141c71`.
+- Same RCR Proposed call: RGB stored pixels, `text=[["person"]]`, one image per
+  forward, processor defaults, threshold `0.30`, text threshold `0.25`, and
+  `target_sizes=[(height,width)]`.
+- Keep only exact `text_labels == "person"`. Preserve processor float32 pixel
+  `xyxy` boxes, query ordering and original confidence. No NMS, cap, minimum
+  size, clipping or integer rounding.
+- Crops call PIL `image.crop(tuple(box))`, as RCR and FAFA do. PIL rounds each
+  edge to nearest/even and pads pixels beyond the image with zero. Model-specific
+  resizing/normalization remains native.
+- CPR retains one **flagged full-image fallback**, confidence `-1`, when no
+  person is detected. RCR Proposed retains zero people instead. Fallbacks are
+  CPR adaptation records, never Grounding DINO detections.
 
-Forward grouping is fixed at batch size `2` with padding ratio `1.3`. The
-upstream pure-PyTorch deformable-attention implementation is used consistently,
-including on CUDA. This intentionally fixes the attention backend, rather than
-allowing each method/environment to choose a different compiled extension.
-Text threshold is retained in provenance; upstream uses it for phrase decoding,
-while box acceptance uses box threshold.
-
-Detector and selector run in isolated processes. Native FAFA/AdaFocal/Instruct-ReID
-Hugging Face caches do not redirect Grounding DINO runtime assets. The selector
-uses a private pure-Python `ftfy==5.8` / `wcwidth==0.2.13` target prepared once,
-so Word4Per keeps its native `ftfy>=6.1` requirement and Instruct-ReID keeps
-`ftfy==5.8`. Their installed tokenizer packages and native preprocessing are
-not replaced. It journals
-ordered, checksummed rows and replays the incomplete batch on resume.
+The detector runs in an explicitly selected Python environment with
+Transformers `4.56.2`; FAFA stays on `4.39.3` and `max_txt_len=128`. A worker
+loads only prepared local assets. Cache hits do not import the detector model,
+require its interpreter, or require its weights. The selector still uses its
+private `ftfy==5.8` / `wcwidth==0.2.13` target so native tokenizer pins remain
+intact. Detection journals resume at the last checksummed complete image;
+there is no cross-image batching/padding to replay.
 
 ## Subject localization and GROUP
 
@@ -173,8 +169,9 @@ cache/shared/
 ```
 
 Both files have content-checksummed `.meta.json` sidecars. Fingerprints include
-ordered manifest hashes, actual gallery image byte hashes, detector checkpoint
-checksum, pinned source/config, detector/crop/forward protocol, adapter version,
+ordered manifest hashes, actual gallery image byte hashes, immutable HF
+model/processor revisions, pinned processing/runtime versions, detector/crop
+conventions, adapter version,
 selector checksum/source and membership parameters. Localization also includes
 the actual detection array digest. Atomic writes, OS locks, semantic validation
 and ordered worker journals protect interruption/corruption.
@@ -192,8 +189,7 @@ Linux/macOS; OS path separator on Windows):
 ```bash
 export CPR_SHARED_CACHE_ROOT=/kaggle/working/cpr_shared
 export CPR_SHARED_CACHE_READ_ROOTS=/kaggle/input/cpr-shared-person-cache/cache/shared
-# Optional mounted official weights, always checksummed:
-export CPR_GDINO_CHECKPOINT=/absolute/groundingdino_swint_ogc.pth
+# Optional mounted CLIP selector weights, always checksummed:
 export CPR_CLIP_SELECTOR_CHECKPOINT=/absolute/ViT-B-32.pt
 ```
 
@@ -235,7 +231,8 @@ python run_baseline.py word4per_setmatch
 python run_baseline.py groundingdino_clipreid_set
 ```
 
-The runner installs the method requirements, prepares its shared/native assets,
+The runner first prepares the shared detector interpreter for registered person
+methods, then installs the separate method requirements and prepares shared/native assets. It
 runs inference, invokes the **unchanged** evaluator and builds tables. It does
 not fine-tune on the benchmark. Word4Per still needs the independently
 reproduced Stage-2 artifacts described in

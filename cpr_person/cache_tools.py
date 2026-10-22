@@ -12,7 +12,7 @@ from .detection import detection_fingerprint, load_detections
 from .localization import localization_fingerprint, validate_localization
 
 
-ASSET_NAMES = {"groundingdino_swint_ogc.pth", "ViT-B-32.pt", "tuned_recall_at1_step.pt"}
+ASSET_NAMES = {"model.safetensors", "ViT-B-32.pt", "tuned_recall_at1_step.pt"}
 CACHE_NAMES = {"persons.npz", "members.json", "person_candidates.jsonl", "person_detections.npz",
                "query_localization.json", "meta.json", "metadata.json", "run.json"}
 

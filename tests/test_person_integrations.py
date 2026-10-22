@@ -174,7 +174,7 @@ def test_official_evaluator_and_table_builder_accept_adapter_scores(toy_protocol
     assert metrics["overall"]["Full-mAP"]==1.0
     monkeypatch.setattr(build_tables,"ROOT",tmp_path);monkeypatch.setattr(build_tables,"OUTPUTS_DIR",outputs)
     result=build_tables.collect_results()
-    assert len(result)==1 and result[0]["protocol"]=="Shared person v1"
+    assert len(result)==1 and result[0]["protocol"]=="Shared person HF v2"
 
 
 def test_all_configs_and_execution_paths_are_integrated():

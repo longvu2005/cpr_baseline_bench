@@ -27,7 +27,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from benchmark_progress import format_duration
-from baseline_environment import prepare_method_python
 from benchmark_data import describe_gallery_link, ensure_gallery_layout, manifest_fingerprint
 
 ROOT = Path(__file__).resolve().parent
@@ -205,11 +204,19 @@ def print_skip(index: int, total: int, title: str, message: str) -> None:
     print(f"[skip] {message}", flush=True)
 
 
+def check_table_builder() -> None:
+    """Fail on missing reporting modules before gallery repair or model work."""
+    subprocess.run([sys.executable, "-u", str(ROOT / "build_tables.py"), "--check"],
+                   cwd=ROOT, check=True)
+
+
 def run_pipeline(
     method: MethodSpec,
     force_checkpoint: bool,
     skip_install: bool,
 ) -> None:
+    from baseline_environment import prepare_method_python
+
     total = 6
     print(f"Method : {method.method_id}", flush=True)
     print(f"Path   : {method.relative_directory}", flush=True)
@@ -224,6 +231,11 @@ def run_pipeline(
     )
     print(f"Gallery: {describe_gallery_link(ROOT)}", flush=True)
     print(f"Files  : validated canonical gallery at {gallery_root}", flush=True)
+    from cpr_person.protocol import PERSON_METHODS
+    if method.method_id in PERSON_METHODS:
+        from cpr_person.runtime import prepare_runtime
+        detector_python = prepare_runtime(skip_install=skip_install)
+        os.environ["CPR_DETECTOR_PYTHON"] = detector_python
     shared_preparer = method.directory / "prepare_person_cache.py"
     if shared_preparer.is_file():
         print("[shared preprocessing] Verify/build the canonical person cache before installing captioner dependencies.", flush=True)
@@ -325,12 +337,15 @@ def parse_args() -> argparse.Namespace:
         nargs="?",
         help="Method id or method directory name, e.g. clip_image or 01_clip_image.",
     )
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--list",
         action="store_true",
         help="List discovered runnable methods and exit.",
     )
-    parser.add_argument("--all", action="store_true", help="Run all discovered methods in dependency order.")
+    modes.add_argument("--all", action="store_true", help="Run all discovered methods in dependency order.")
+    modes.add_argument("--tables-only", action="store_true",
+                       help="Rebuild tables from evaluated outputs without installing or running methods.")
     parser.add_argument(
         "--skip-install",
         action="store_true",
@@ -349,6 +364,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.method and (args.all or args.tables_only):
+        raise SystemExit("Choose a method, --all, or --tables-only.")
+    if args.tables_only:
+        check_table_builder()
+        run_step(1, 1, "Build benchmark tables", [sys.executable, "-u", str(ROOT / "build_tables.py")])
+        return
     try:
         methods = discover_methods()
     except (RuntimeError, ValueError) as error:
@@ -359,8 +380,7 @@ def main() -> None:
         return
 
     if args.all:
-        if args.method:
-            raise SystemExit("Choose a method or --all.")
+        check_table_builder()
         # The existing simple ordering runs S5/S6/S8 before their dependents.
         # Scene methods retain their own preparation, inference and evaluation.
         failures = []
@@ -382,6 +402,7 @@ def main() -> None:
     except (KeyError, RuntimeError) as error:
         raise SystemExit(str(error)) from error
 
+    check_table_builder()
     run_pipeline(method, args.force_checkpoint, args.skip_install)
 
 
