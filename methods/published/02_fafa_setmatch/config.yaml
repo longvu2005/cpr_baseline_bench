@@ -18,6 +18,8 @@ checkpoint:
   status: OFFICIAL_RELEASED
   model_name: blip2_fafa_cpr
   model_type: pretrain
+  # Match RCR's FAFA query encoder; include special tokenizer tokens.
+  max_txt_len: 128
   fda_k: 6
   fda_alpha: 0.5
   fd_margin: 0.5

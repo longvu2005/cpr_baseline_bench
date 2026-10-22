@@ -44,6 +44,7 @@ from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 from cpr_person.adapter import load_person_context, manifest_identity
 from cpr_person.detection import protocol_config
 from cpr_person.detection import BoxCandidate
+from cpr_person.fafa_text import apply_fafa_text_policy, resolve_fafa_text_policy
 from cpr_person.matching import aggregate_component_scores
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "fafa_setmatch"
@@ -430,6 +431,7 @@ def load_fafa(
         model.fda_alpha = fda_alpha
     if hasattr(model, "use_soft"):
         model.use_soft = bool(ckpt_cfg.get("use_soft", True))
+    text_policy = apply_fafa_text_policy(model, txt_processors, ckpt_cfg)
 
     transform_name = str(ckpt_cfg.get("transform", "squarepad")).lower()
     image_size = int(ckpt_cfg.get("image_size", 224))
@@ -444,6 +446,7 @@ def load_fafa(
     load_info = {
         "missing_keys": list(incompatible.missing_keys),
         "unexpected_keys": list(incompatible.unexpected_keys),
+        "text_policy": text_policy,
     }
     return model, txt_processors, preprocess, ckpt_path, load_info
 
@@ -760,11 +763,11 @@ def compute_component_person_scores(
 
 
 def validate_setmatch_config(setmatch_cfg: dict[str, Any]) -> float:
-    """Reject legacy min configs instead of silently using different semantics."""
+    """Require the exact max-sum Hungarian + mean policy in the YAML."""
     if setmatch_cfg.get("enabled", True) is not True:
         raise ValueError("This adapter requires setmatch.enabled: true")
-    if setmatch_cfg.get("assignment", "hungarian") != "hungarian":
-        raise ValueError("Partial SetMatch requires assignment: hungarian")
+    if setmatch_cfg.get("assignment") != "hungarian_max_sum":
+        raise ValueError("Partial SetMatch requires assignment: hungarian_max_sum")
     if setmatch_cfg.get("aggregation", "mean") != "mean":
         raise ValueError("Partial SetMatch requires aggregation: mean; update config.yaml")
     unmatched_score = float(setmatch_cfg.get("unmatched_score", 0.0))
@@ -1003,6 +1006,7 @@ def main() -> None:
             "fda_k": fda_k,
             "fda_alpha": float(ckpt_cfg.get("fda_alpha", 0.5)),
             "fd_margin": float(ckpt_cfg.get("fd_margin", 0.5)),
+            "text_policy": resolve_fafa_text_policy(ckpt_cfg),
             "definition": "top-k mean similarity between composed query feature and FAFA target feature tokens",
             "target_token_count": token_dim[0],
             "embedding_dim": token_dim[1],
