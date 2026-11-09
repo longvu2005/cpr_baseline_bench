@@ -1,4 +1,4 @@
-# Native CLIP-ReID + Qwen Image Edit; shared detection runs in CPR_DETECTOR_PYTHON.
+# Native CLIP-ReID + Qwen Image Edit; shared boxes are imported from RCR.
 -r ../../../cpr_person/requirements.txt
 numpy>=1.24,<2
 pillow
@@ -10,7 +10,8 @@ scipy>=1.10
 gdown>=5.2,<7
 yacs
 timm==0.9.16
-ftfy
+ftfy==6.3.1
+wcwidth==0.2.13
 regex
 scikit-image
 ninja

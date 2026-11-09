@@ -6,10 +6,15 @@ import json
 import re
 from pathlib import Path
 
-from benchmark_data import manifest_fingerprint
-from prepare_data import CASE_TYPES
+from benchmark_data import CASE_TYPES, DATA_PROTOCOL, verify_manifest
 from cpr_person import PROTOCOL_VERSION
-from cpr_person.protocol import PERSON_METHODS, TEXTFREE_DIAGNOSTIC_METHOD
+from cpr_person.protocol import (
+    PERSON_METHODS,
+    RCR_CLIP_SHA256,
+    RCR_SCENE_CLIP_METHODS,
+    TEXTFREE_DIAGNOSTIC_METHOD,
+    rcr_detection_source,
+)
 from cpr_person.cache import atomic_file, canonical_hash
 
 ROOT = Path(__file__).resolve().parent
@@ -26,13 +31,15 @@ MAIN_COLUMNS = [
     "ID-R@5",
     "ID-R@10",
     "Full-mAP",
+    "Macro-Full-mAP",
     "Full-R@1",
     "Full-R@5",
     "Full-R@10",
 ]
 
+CASE_METRICS = ("ID-mAP", "ID-R@1", "Full-mAP", "Full-R@1")
 CASE_COLUMNS = ["Method", "Protocol"] + [
-    f"{case} {metric}" for case in CASE_TYPES for metric in ("mAP", "R@1")
+    f"{case} {metric}" for case in CASE_TYPES for metric in CASE_METRICS
 ]
 
 
@@ -83,7 +90,7 @@ def collect_results():
     if not OUTPUTS_DIR.is_dir():
         return results
 
-    current_data = manifest_fingerprint(ROOT)
+    current_data = verify_manifest(ROOT, "test")["fingerprint"]
 
     for method_dir in sorted(OUTPUTS_DIR.iterdir()):
         if not method_dir.is_dir():
@@ -99,7 +106,11 @@ def collect_results():
             continue
 
         metrics = load_json(metrics_path)
-        if metrics.get("data_fingerprint") != current_data:
+        if (
+            metrics.get("split") != "test"
+            or metrics.get("data_protocol") != DATA_PROTOCOL
+            or metrics.get("data_fingerprint") != current_data
+        ):
             print(f"Skipping previous-data result: {method_dir.name}; rerun this baseline.")
             continue
 
@@ -110,6 +121,10 @@ def collect_results():
             )
         run = load_json(run_path)
         provenance = run.get("shared_person_protocol", {})
+        if (method_dir.name in RCR_SCENE_CLIP_METHODS
+                and run.get("scene_clip_sha256") != RCR_CLIP_SHA256):
+            print(f"Skipping previous CLIP result: {method_dir.name}; rerun with RCR ViT-B/32.")
+            continue
         if method_dir.name in PERSON_METHODS and (
                 not isinstance(provenance, dict) or provenance.get("version") != PROTOCOL_VERSION):
             print(f"Skipping legacy/different-protocol result: {method_dir.name}; rerun this baseline.")
@@ -127,12 +142,22 @@ def collect_results():
             raise ValueError(
                 f"Output directory/method mismatch: {method_dir.name!r} vs {run_method!r}"
             )
-        if "data_fingerprint" in run and run["data_fingerprint"] != metrics["data_fingerprint"]:
+        if run.get("data_fingerprint") != metrics["data_fingerprint"]:
             raise RuntimeError(f"Run metadata does not match the evaluated manifests: {run_method}")
+
+        if run.get("split") != "test" or run.get("data_protocol") != DATA_PROTOCOL:
+            raise RuntimeError(f"Run is outside the RCR test protocol: {run_method}")
+        validation = run.get("validation_fingerprint")
+        if validation is not None or run.get("cpr_supervision") == "Val only":
+            if validation != verify_manifest(ROOT, "val")["fingerprint"]:
+                print(f"Skipping previous-validation result: {run_method}; rerun selection.")
+                continue
 
         method_id = run_method
         if method_id in PERSON_METHODS:
             validate_person_provenance(provenance, current_data, method_id)
+            if rcr_detection_source(provenance) is None:
+                raise RuntimeError(f"Missing or invalid RCR detection provenance: {method_id}")
         images = (provenance["detections_fingerprint"]["gallery_image_content_sha256"]
                   if method_id in PERSON_METHODS
                   else run.get("image_provenance", {}).get("gallery_image_content_sha256"))
@@ -175,7 +200,7 @@ def collect_results():
                 "method": method,
                 "group": group,
                 "supervision": supervision,
-                "protocol": "Shared person HF v2" if method_id in PERSON_METHODS else "Native scene v1",
+                "protocol": "Shared RCR boxes" if method_id in PERSON_METHODS else "Native scene v1",
                 "metrics": metrics,
             }
         )
@@ -209,6 +234,7 @@ def build_main_table(results):
                 "Full-mAP": format_metric(
                     overall.get("Full-mAP")
                 ),
+                "Macro-Full-mAP": format_metric(overall.get("Macro-Full-mAP")),
                 "Full-R@1": format_metric(
                     overall.get("Full-R@1")
                 ),
@@ -233,8 +259,8 @@ def build_case_table(results):
 
         row = {"Method": result["method"], "Protocol": result["protocol"], "_group": result["group"]}
         for case in CASE_TYPES:
-            for metric in ("mAP", "R@1"):
-                row[f"{case} {metric}"] = format_metric(cases.get(case, {}).get(f"Full-{metric}"))
+            for metric in CASE_METRICS:
+                row[f"{case} {metric}"] = format_metric(cases.get(case, {}).get(metric))
         rows.append(row)
 
     return rows
@@ -380,13 +406,13 @@ def main():
     )
 
     print_table(
-        "Table 1 - Main CPR Retrieval Benchmark",
+        "Table 1 - RCR Test Retrieval",
         MAIN_COLUMNS,
         main_rows,
     )
 
     print_table(
-        "Table 2 - Case-wise Full CPR Retrieval",
+        "Table 2 - RCR Test Retrieval by Case",
         CASE_COLUMNS,
         case_rows,
     )

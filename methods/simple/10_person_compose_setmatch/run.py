@@ -23,18 +23,19 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from evaluate import full_map
+from cpr_person.validation import verify_tuning_manifests
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 from cpr_person.adapter import load_person_context, matching_metadata, manifest_identity
 from cpr_person.cache import feature_config_hash
-from cpr_person.detection import protocol_config
 from cpr_person.matching import score_feature_sets
 from cpr_person.detection import read_rgb
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "per_person_clip_compose_setmatch"
 ADAPTER_VERSION = "2026-10-12-shared-person-v1"
 PERSON_FEATURE_SCHEMA = 1
-ALPHA_SCHEMA = 1
+ALPHA_SCHEMA = 2
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -343,61 +344,21 @@ def validate_score_matrix(scores: np.ndarray, shape: tuple[int, int], label: str
             raise ValueError(f"{label} contains NaN/Inf")
 
 
-def ensure_validation_split(main_gallery_manifest: Path, main_query_manifest: Path, val_gallery_manifest: Path, val_query_manifest: Path) -> None:
-    from cpr_person.validation import ensure_separate_queries
-    ensure_separate_queries(main_query_manifest, val_query_manifest)
-    for path in (val_gallery_manifest, val_query_manifest):
-        if not path.is_file():
-            raise FileNotFoundError(f"Missing validation manifest: {rel(path)}. S10 requires a separate validation split for alpha selection.")
-    if sha256_file(main_query_manifest) == sha256_file(val_query_manifest):
-        raise RuntimeError(
-            "Validation query manifest is byte-identical to the main evaluation "
-            "query manifest. Refusing to tune alpha on evaluation labels."
-        )
-
-
-def measure(scores: np.ndarray, positives: set[int]) -> float:
-    order = np.argsort(-scores)
-    rel_mask = np.isin(order, list(positives))
-    ranks = np.flatnonzero(rel_mask) + 1
-    if len(ranks) == 0:
-        raise ValueError("No positive found for a validation query.")
-    return float(np.mean(np.arange(1, len(ranks) + 1) / ranks))
-
-
-def full_map(scores: np.ndarray, gallery: Sequence[dict[str, Any]], queries: Sequence[dict[str, Any]]) -> float:
-    gallery_index = build_gallery_index(gallery)
-    aps: list[float] = []
-    for qi, query in enumerate(queries):
-        image_id = query.get("image_id")
-        if image_id not in gallery_index:
-            raise ValueError(f"Validation query {query.get('query_id', qi)} image missing from gallery")
-        positives = query.get("full_positive_ids")
-        if not isinstance(positives, list) or not positives:
-            raise ValueError(f"Validation query {query.get('query_id', qi)} has no full_positive_ids")
-        s = np.array(scores[qi], copy=True)
-        self_idx = gallery_index[image_id]
-        s[self_idx] = -np.inf
-        pos = {gallery_index[x] for x in positives if x in gallery_index}
-        pos.discard(self_idx)
-        if not pos:
-            raise ValueError(f"Validation query {query.get('query_id', qi)} has no usable Full positives")
-        aps.append(measure(s, pos))
-    return float(np.mean(aps))
-
-
-def select_alpha(*, cfg: dict[str, Any], config_path: Path, main_gallery_manifest: Path, main_query_manifest: Path, val_gallery_manifest: Path, val_query_manifest: Path, val_gallery: Sequence[dict[str, Any]], val_queries: Sequence[dict[str, Any]], prepared_val_queries: list[dict[str, Any]], val_person_features: np.ndarray, val_offsets: np.ndarray) -> tuple[float, dict[str, Any]]:
+def select_alpha(*, cfg: dict[str, Any], config_path: Path, val_gallery_manifest: Path, val_query_manifest: Path, val_gallery: Sequence[dict[str, Any]], val_queries: Sequence[dict[str, Any]], prepared_val_queries: list[dict[str, Any]], val_person_features: np.ndarray, val_offsets: np.ndarray, val_localization_sha256: str) -> tuple[float, dict[str, Any]]:
     selection = cfg["composition"]["alpha_selection"]
     result_path = resolve_path(str(selection["result"]))
     grid = [float(x) for x in selection["grid"]]
     expected = {
         "schema": ALPHA_SCHEMA,
+        "selection_split": "val",
         "adapter_version": ADAPTER_VERSION,
         "config_sha256": sha256_file(config_path),
-        "main_gallery_manifest_sha256": sha256_file(main_gallery_manifest),
-        "main_query_manifest_sha256": sha256_file(main_query_manifest),
         "val_gallery_manifest_sha256": sha256_file(val_gallery_manifest),
         "val_query_manifest_sha256": sha256_file(val_query_manifest),
+        "val_person_features_sha256": sha256_file(
+            resolve_path(str(cfg["cache"]["validation"]["person_features"]))
+        ),
+        "val_localization_sha256": val_localization_sha256,
         "grid": grid,
         "metric": str(selection["metric"]),
         "tie_break": str(selection["tie_break"]),
@@ -441,7 +402,7 @@ def main() -> None:
         main_queries = load_jsonl(main_query_manifest)
 
         selection_cfg = cfg["composition"]["alpha_selection"]
-        alpha_mode = str(selection_cfg.get("mode", "fixed")).strip().lower()
+        alpha_mode = str(selection_cfg.get("mode", "validation")).strip().lower()
         if alpha_mode not in {"fixed", "validation"}:
             raise ValueError("composition.alpha_selection.mode must be 'fixed' or 'validation'")
 
@@ -458,10 +419,13 @@ def main() -> None:
             if not math.isfinite(alpha) or not 0.0 <= alpha <= 1.0:
                 raise ValueError("composition.alpha_selection.fixed_alpha must be in [0, 1]")
             cpr_supervision = "No"
+            validation_fingerprint = None
         else:
             val_gallery_manifest = resolve_path(str(selection_cfg["validation"]["gallery_manifest"]))
             val_query_manifest = resolve_path(str(selection_cfg["validation"]["query_manifest"]))
-            ensure_validation_split(main_gallery_manifest, main_query_manifest, val_gallery_manifest, val_query_manifest)
+            validation_fingerprint = verify_tuning_manifests(
+                ROOT, main_gallery_manifest, main_query_manifest, val_gallery_manifest, val_query_manifest
+            )
             val_gallery = load_jsonl(val_gallery_manifest)
             val_queries = load_jsonl(val_query_manifest)
             cpr_supervision = "Val only"
@@ -476,7 +440,6 @@ def main() -> None:
         device = device_from(str(cfg["runtime"]["device"]))
         main_person = load_person_context(main_gallery, main_queries, main_gallery_manifest, main_query_manifest, device)
         main_det_cache, main_offsets, main_boxes = main_person.detections.path, main_person.detections.offsets, main_person.detections.boxes
-        gdino_attention_backend = protocol_config()["detector"]["attention_backend"]
         val_person = val_det_cache = val_offsets = val_boxes = None
         if alpha_mode == "validation":
             val_person = load_person_context(val_gallery, val_queries, val_gallery_manifest, val_query_manifest, device)
@@ -527,7 +490,7 @@ def main() -> None:
 
     with tracker.phase("Resolve composition alpha"):
         if alpha_mode == "validation":
-            alpha, alpha_payload = select_alpha(cfg=cfg, config_path=config_path, main_gallery_manifest=main_gallery_manifest, main_query_manifest=main_query_manifest, val_gallery_manifest=val_gallery_manifest, val_query_manifest=val_query_manifest, val_gallery=val_gallery, val_queries=val_queries, prepared_val_queries=val_prepared_queries, val_person_features=val_person_features, val_offsets=val_offsets)
+            alpha, alpha_payload = select_alpha(cfg=cfg, config_path=config_path, val_gallery_manifest=val_gallery_manifest, val_query_manifest=val_query_manifest, val_gallery=val_gallery, val_queries=val_queries, prepared_val_queries=val_prepared_queries, val_person_features=val_person_features, val_offsets=val_offsets, val_localization_sha256=val_person.metadata()["localization_components_sha256"])
             tracker.log(f"selected_alpha={alpha:.2f} best_full_map={alpha_payload.get('best_full_map'):.6f}")
         else:
             alpha_payload = {"selection_mode": "fixed", "selected_alpha": float(alpha), "selected_full_map": None}
@@ -550,6 +513,7 @@ def main() -> None:
             "method": cfg["method"],
             "display_name": cfg["display_name"],
             "group": cfg["group"],
+            "validation_fingerprint": validation_fingerprint,
             "cpr_supervision": cpr_supervision,
             "adapter_version": ADAPTER_VERSION,
             "alpha": float(alpha),
@@ -558,7 +522,6 @@ def main() -> None:
             "alpha_selection": rel(resolve_path(str(selection_cfg["result"]))) if alpha_mode == "validation" else None,
             "alpha_selection_details": alpha_payload,
             "shared_protocol": str(cfg["shared_protocol"]["method"]),
-            "groundingdino_attention_backend": gdino_attention_backend,
             "clip": cfg["clip"],
             "config": rel(config_path),
             "num_queries": len(main_queries),

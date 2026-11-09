@@ -1,5 +1,5 @@
 method: qwen25vl_rewrite_clip
-display_name: Qwen2.5-VL Rewrite + CLIP ViT-L/14
+display_name: Qwen2.5-VL Rewrite + CLIP ViT-B/32
 group: Simple / Obvious Baselines
 cpr_supervision: 'No'
 
@@ -30,9 +30,9 @@ mllm:
     Modification text: {modification}
 
 retriever:
-  name: ViT-L/14
-  checkpoint: checkpoints/clip/ViT-L-14.pt
-  checkpoint_sha256: b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836
+  name: ViT-B/32
+  checkpoint: checkpoints/clip/ViT-B-32.pt
+  checkpoint_sha256: 40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af
 
 runtime:
   device: cuda
@@ -42,19 +42,19 @@ runtime:
   qwen_4bit_quant_type: nf4
   qwen_4bit_compute_dtype: float16
   qwen_4bit_use_double_quant: true
-  clip_image_batch_size: 64
-  clip_text_batch_size: 256
-  clip_score_batch_size: 512
+  clip_image_batch_size: 32
+  clip_text_batch_size: 128
+  clip_score_batch_size: 128
   num_workers: 4
 
 cache:
   rewritten_queries: runs/qwen25vl_rewrite_clip/cache/rewritten_queries.jsonl
   rewritten_text_features: runs/qwen25vl_rewrite_clip/cache/rewritten_text_features.npy
-  gallery_features: runs/clip_image/gallery_features_vit_l14.npy
+  gallery_features: runs/clip_image/gallery_features_vit_b32.npy
 
 data:
-  gallery_manifest: data/gallery.jsonl
-  query_manifest: data/queries.jsonl
+  gallery_manifest: data/test/gallery.jsonl
+  query_manifest: data/test/queries.jsonl
 
 output:
   dir: runs/qwen25vl_rewrite_clip

@@ -35,6 +35,7 @@ from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 from cpr_person.adapter import load_person_context, matching_metadata, manifest_identity
 from cpr_person.cache import feature_config_hash
+from cpr_person.rcr_cache import rcr_index_path
 from cpr_person.detection import protocol_config, PROTOCOL_PATH
 from cpr_person.matching import aggregate_people
 from cpr_person.adapter import expand_targets
@@ -892,7 +893,7 @@ def save_run_metadata(
             "score_adapter_parity_checked": bool(parity_checked),
         },
         "cpr_adapter": {
-            "person_detection": cfg["localization"]["detector"],
+            "person_detection": shared_person_protocol["detector"],
             "query_selector": {
                 **cfg["localization"]["query_selector"],
                 "backend": str(cfg["runtime_assets"]["selector"]["backend"]),
@@ -934,7 +935,12 @@ def main() -> None:
     config_path = resolve_path(args.config)
     cfg = load_yaml(config_path)
     cfg["localization"]["detector"] = protocol_config()["detector"]
-    cfg["runtime_assets"]["detector"]["path"] = cfg["localization"]["detector"]["checkpoint"]
+    index = rcr_index_path()
+    if index is not None:
+        cfg["localization"]["detector"] = {"backend": "rcr_detection_cache"}
+        cfg["runtime_assets"]["detector"]["path"] = str(index)
+    else:
+        cfg["runtime_assets"]["detector"]["path"] = cfg["localization"]["detector"]["checkpoint"]
     cfg["runtime_assets"]["selector"]["path"] = protocol_config()["selector"]["checkpoint"]
     if str(cfg.get("method")) != METHOD_ID:
         raise RuntimeError(f"config method must be {METHOD_ID!r}")

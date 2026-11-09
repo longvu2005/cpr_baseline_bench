@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""S7: frozen Qwen2.5-VL query rewrite followed by OpenAI CLIP ViT-L/14 retrieval.
+"""S7: frozen Qwen2.5-VL query rewrite followed by OpenAI CLIP ViT-B/32 retrieval.
 
 For each canonical query, Qwen sees the complete query/reference scene plus the
 canonical query text and emits one target-image caption using one fixed prompt.
@@ -23,13 +23,14 @@ import clip
 import numpy as np
 import torch
 import yaml
-from PIL import Image
-from torch.utils.data import DataLoader, Dataset
 
 ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from benchmark_data import manifest_file_fingerprint
+from cpr_baselines.scene_clip import gallery_features, gallery_fingerprint as build_clip_gallery_cache_fingerprint
+from cpr_person.clip_model import load_openai_clip, verify_rcr_scene_clip
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
@@ -37,7 +38,6 @@ METHOD_ID = "qwen25vl_rewrite_clip"
 ADAPTER_VERSION = "2026-08-14-v2-qwen-4bit"
 REWRITE_CACHE_SCHEMA = 1
 TEXT_FEATURE_CACHE_SCHEMA = 1
-CLIP_GALLERY_CACHE_SCHEMA = 2  # intentionally identical to existing CLIP baselines
 
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -434,85 +434,6 @@ def generate_rewritten_queries(
     return captions
 
 
-class GalleryDataset(Dataset):
-    def __init__(self, rows: Sequence[dict[str, Any]], preprocess) -> None:
-        self.rows = rows
-        self.preprocess = preprocess
-
-    def __len__(self) -> int:
-        return len(self.rows)
-
-    def __getitem__(self, index: int) -> torch.Tensor:
-        path = gallery_image_path(self.rows[index], index)
-        with Image.open(path) as image:
-            return self.preprocess(image.convert("RGB"))
-
-
-def build_clip_gallery_cache_fingerprint(
-    checkpoint: Path, gallery_manifest: Path, model_name: str
-) -> dict[str, Any]:
-    # Keep byte-for-byte schema compatibility with methods/simple/01_clip_image
-    # and 02_clip_text so all ViT-L/14 simple baselines can share this cache.
-    return {
-        "schema": CLIP_GALLERY_CACHE_SCHEMA,
-        "model_name": model_name,
-        "checkpoint_sha256": sha256_file(checkpoint),
-        "gallery_manifest_sha256": sha256_file(gallery_manifest),
-    }
-
-
-@torch.inference_mode()
-def gallery_features(
-    *,
-    model,
-    preprocess,
-    rows: Sequence[dict[str, Any]],
-    cache: Path,
-    runtime: dict[str, Any],
-    device: torch.device,
-    fingerprint: dict[str, Any],
-) -> np.ndarray:
-    feature_dim = int(model.text_projection.shape[1])
-    expected_shape = (len(rows), feature_dim)
-    meta_path = cache.with_suffix(cache.suffix + ".meta.json")
-    if cache.is_file() and meta_path.is_file():
-        data = np.load(cache, mmap_mode="r", allow_pickle=False)
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except Exception:
-            meta = None
-        if data.shape == expected_shape and meta == fingerprint:
-            print(f"Using CLIP gallery cache: {rel(cache)}", flush=True)
-            return data
-        print(f"Ignoring stale/incompatible CLIP gallery cache: {rel(cache)}", flush=True)
-    elif cache.is_file():
-        print(f"Ignoring CLIP gallery cache without fingerprint: {rel(cache)}", flush=True)
-
-    loader = DataLoader(
-        GalleryDataset(rows, preprocess),
-        batch_size=int(runtime["clip_image_batch_size"]),
-        shuffle=False,
-        num_workers=int(runtime["num_workers"]),
-        pin_memory=(device.type == "cuda"),
-    )
-    chunks: list[np.ndarray] = []
-    for images in progress_bar(
-        loader, desc="Encode CLIP gallery", total=len(loader), unit="batch"
-    ):
-        features = model.encode_image(images.to(device)).float()
-        features /= features.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-        chunks.append(features.cpu().numpy())
-    output = np.concatenate(chunks).astype(np.float32)
-    if output.shape != expected_shape or not np.isfinite(output).all():
-        raise ValueError(f"Invalid CLIP gallery features: {output.shape}")
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    np.save(cache, output)
-    meta_path.write_text(
-        json.dumps(fingerprint, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    return np.load(cache, mmap_mode="r", allow_pickle=False)
-
-
 def text_feature_fingerprint(
     *, cache_path: Path, rewrite_fingerprint_value: dict[str, Any], checkpoint: Path, model_name: str
 ) -> dict[str, Any]:
@@ -586,6 +507,7 @@ def main() -> None:
             raise ValueError(f"config method must be {METHOD_ID!r}")
         gallery_manifest = resolve_path(str(cfg["data"]["gallery_manifest"]))
         query_manifest = resolve_path(str(cfg["data"]["query_manifest"]))
+        data_fingerprint = manifest_file_fingerprint(gallery_manifest, query_manifest)
         gallery = load_jsonl(gallery_manifest)
         queries = load_jsonl(query_manifest)
         gallery_index = build_gallery_index(gallery)
@@ -604,12 +526,7 @@ def main() -> None:
             raise FileNotFoundError(
                 f"Missing CLIP checkpoint: {rel(clip_checkpoint)}. Run download_checkpoint.py first."
             )
-        expected_clip_hash = str(cfg["retriever"]["checkpoint_sha256"])
-        actual_clip_hash = sha256_file(clip_checkpoint)
-        if actual_clip_hash != expected_clip_hash:
-            raise RuntimeError(
-                f"CLIP checkpoint checksum mismatch: expected {expected_clip_hash}, got {actual_clip_hash}"
-            )
+        actual_clip_hash = verify_rcr_scene_clip(clip_checkpoint, cfg["retriever"]["name"])
         tracker.log(
             f"qwen={cfg['mllm']['repo_id']}@{str(cfg['mllm']['revision'])[:12]} "
             f"clip={cfg['retriever']['name']}"
@@ -639,17 +556,14 @@ def main() -> None:
         tracker.log(f"rewritten_queries={len(captions):,} cache={rel(rewrite_cache)}")
 
     with tracker.phase("Load OpenAI CLIP retriever", str(cfg["retriever"]["name"])):
-        clip_model, preprocess = clip.load(str(clip_checkpoint), device=device, jit=False)
-        clip_model.eval()
-        if device.type != "cuda":
-            clip_model.float()
+        clip_model, preprocess = load_openai_clip(clip_checkpoint, device)
 
     with tracker.phase("Prepare global gallery CLIP features"):
         gallery_cache = resolve_path(str(cfg["cache"]["gallery_features"]))
         gallery_fp = build_clip_gallery_cache_fingerprint(
             clip_checkpoint, gallery_manifest, str(cfg["retriever"]["name"])
         )
-        gfeat = gallery_features(
+        gfeat, gallery_cache_used, _ = gallery_features(
             model=clip_model,
             preprocess=preprocess,
             rows=gallery,
@@ -658,7 +572,7 @@ def main() -> None:
             device=device,
             fingerprint=gallery_fp,
         )
-        tracker.log(f"gallery_features={gfeat.shape} cache={rel(gallery_cache)}")
+        tracker.log(f"gallery_features={gfeat.shape} cache={rel(gallery_cache_used)}")
 
     with tracker.phase("Encode rewritten target descriptions with CLIP"):
         text_cache = resolve_path(str(cfg["cache"]["rewritten_text_features"]))
@@ -705,6 +619,8 @@ def main() -> None:
     with tracker.phase("Write reproducibility metadata"):
         run = {
             "method": METHOD_ID,
+            "scene_clip_sha256": actual_clip_hash,
+            "data_fingerprint": data_fingerprint,
             "display_name": str(cfg["display_name"]),
             "group": str(cfg["group"]),
             "cpr_supervision": str(cfg["cpr_supervision"]),
@@ -731,7 +647,7 @@ def main() -> None:
             "caches": {
                 "rewritten_queries": rel(rewrite_cache),
                 "rewritten_text_features": rel(text_cache),
-                "gallery_features": rel(gallery_cache),
+                "gallery_features": rel(gallery_cache_used),
             },
             "config": rel(config_path),
             "num_queries": len(queries),

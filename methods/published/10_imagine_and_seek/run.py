@@ -66,6 +66,7 @@ from torchvision.transforms import CenterCrop, Compose, InterpolationMode, Norma
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+from benchmark_data import manifest_file_fingerprint
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 os.environ["HF_HUB_OFFLINE"] = "1"
@@ -391,6 +392,7 @@ def main() -> None:
             raise RuntimeError("Missing/stale P10 prepared marker")
         gallery_manifest = resolve_path(str(cfg["data"]["gallery_manifest"]))
         query_manifest = resolve_path(str(cfg["data"]["query_manifest"]))
+        data_fingerprint = manifest_file_fingerprint(gallery_manifest, query_manifest)
         gallery = load_jsonl(gallery_manifest)
         queries = load_jsonl(query_manifest)
         gindex = build_gallery_index(gallery)
@@ -495,6 +497,7 @@ def main() -> None:
     with tracker.phase("Write transparent benchmark metadata"):
         payload = {
             "method": cfg["method"],
+            "data_fingerprint": data_fingerprint,
             "display_name": cfg["display_name"],
             "group": cfg["group"],
             "paper": cfg["paper"],

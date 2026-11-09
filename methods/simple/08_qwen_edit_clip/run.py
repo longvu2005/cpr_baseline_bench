@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""S8: frozen Qwen image editing followed by OpenAI CLIP ViT-L/14 retrieval.
+"""S8: frozen Qwen image editing followed by OpenAI CLIP ViT-B/32 retrieval.
 
 For each canonical query, the full reference scene and canonical modification text
 are sent to a frozen image editor, producing one synthetic target image. CLIP
@@ -18,7 +18,6 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
-import clip
 import numpy as np
 import torch
 import yaml
@@ -29,6 +28,9 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from benchmark_data import manifest_file_fingerprint
+from cpr_baselines.scene_clip import gallery_features as read_clip_gallery, gallery_fingerprint as clip_gallery_cache_fingerprint
+from cpr_person.clip_model import load_openai_clip, verify_rcr_scene_clip
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
@@ -306,66 +308,9 @@ class PathDataset(Dataset):
             return self.preprocess(image.convert("RGB"))
 
 
-class GalleryDataset(Dataset):
-    def __init__(self, rows: Sequence[dict[str, Any]], preprocess):
-        self.rows = list(rows)
-        self.preprocess = preprocess
-
-    def __len__(self) -> int:
-        return len(self.rows)
-
-    def __getitem__(self, i: int):
-        with Image.open(gallery_image_path(self.rows[i], i)) as image:
-            return self.preprocess(image.convert("RGB"))
-
-
-@torch.no_grad()
 def clip_gallery_features(model, preprocess, rows, cache, runtime, device, cache_fingerprint):
-    feature_dim = int(model.text_projection.shape[1])
-    expected_shape = (len(rows), feature_dim)
-    meta_path = cache.with_suffix(cache.suffix + ".meta.json")
-
-    if cache.is_file() and meta_path.is_file():
-        x = np.load(cache, mmap_mode="r")
-        try:
-            cached_fingerprint = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            cached_fingerprint = None
-        if x.shape == expected_shape and cached_fingerprint == cache_fingerprint:
-            print(f"Using gallery cache: {rel(cache)}", flush=True)
-            return x, cache
-        print(f"Ignoring stale/incompatible gallery cache: {rel(cache)}", flush=True)
-    elif cache.is_file():
-        print(f"Ignoring legacy gallery cache without fingerprint: {rel(cache)}", flush=True)
-
-    loader = DataLoader(
-        GalleryDataset(rows, preprocess),
-        batch_size=runtime["clip_image_batch_size"],
-        shuffle=False,
-        num_workers=runtime["num_workers"],
-        pin_memory=(device.type == "cuda"),
-    )
-    chunks = []
-    for images in progress_bar(loader, desc="Encode gallery", total=len(loader), unit="batch"):
-        x = model.encode_image(images.to(device)).float()
-        x /= x.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-        chunks.append(x.cpu().numpy())
-    x = np.concatenate(chunks).astype(np.float32)
-    if x.shape != expected_shape:
-        raise ValueError(f"Encoded gallery has shape {x.shape}, expected {expected_shape}")
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    np.save(cache, x)
-    meta_path.write_text(json.dumps(cache_fingerprint, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return np.load(cache, mmap_mode="r"), cache
-
-
-def clip_gallery_cache_fingerprint(checkpoint: Path, gallery_manifest: Path, model_name: str) -> dict[str, Any]:
-    return {
-        "schema": CLIP_GALLERY_CACHE_SCHEMA,
-        "model_name": model_name,
-        "checkpoint_sha256": sha256_file(checkpoint),
-        "gallery_manifest_sha256": sha256_file(gallery_manifest),
-    }
+    features, path, _ = read_clip_gallery(model, preprocess, rows, cache, runtime, device, cache_fingerprint)
+    return features, path
 
 
 def query_feature_cache_fingerprint(config_path: Path, edited_manifest_path: Path, clip_checkpoint: Path, query_manifest: Path) -> dict[str, Any]:
@@ -518,6 +463,7 @@ def main() -> None:
         cfg = load_yaml(config_path)
         gallery_manifest = resolve_path(str(cfg["data"]["gallery_manifest"]))
         query_manifest = resolve_path(str(cfg["data"]["query_manifest"]))
+        data_fingerprint = manifest_file_fingerprint(gallery_manifest, query_manifest)
         gallery = load_jsonl(gallery_manifest)
         queries = load_jsonl(query_manifest)
         output_dir = resolve_path(str(cfg["output"]["dir"]))
@@ -552,16 +498,8 @@ def main() -> None:
             raise FileNotFoundError(
                 f"Missing CLIP checkpoint: {rel(clip_checkpoint)}. Run download_checkpoint.py first."
             )
-        expected_sha = str(cfg["retriever"]["checkpoint_sha256"])
-        actual_sha = sha256_file(clip_checkpoint)
-        if actual_sha != expected_sha:
-            raise RuntimeError(
-                f"CLIP checkpoint checksum mismatch: expected {expected_sha}, got {actual_sha}"
-            )
-        model, preprocess = clip.load(str(clip_checkpoint), device=device, jit=False)
-        model.eval()
-        if device.type != "cuda":
-            model.float()
+        actual_sha = verify_rcr_scene_clip(clip_checkpoint, cfg["retriever"]["name"])
+        model, preprocess = load_openai_clip(clip_checkpoint, device)
 
     with tracker.phase("Prepare CLIP features"):
         gallery_cache = resolve_path(str(cfg["cache"]["gallery_features"]))
@@ -600,6 +538,8 @@ def main() -> None:
     with tracker.phase("Write run metadata and outputs"):
         run = {
             "method": cfg["method"],
+            "scene_clip_sha256": actual_sha,
+            "data_fingerprint": data_fingerprint,
             "display_name": cfg["display_name"],
             "group": cfg["group"],
             "cpr_supervision": cfg["cpr_supervision"],

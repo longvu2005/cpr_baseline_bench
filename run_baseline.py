@@ -8,7 +8,7 @@ Default pipeline:
 Examples:
     python run_baseline.py clip_image
     python run_baseline.py 01_clip_image
-    python run_baseline.py fafa_setmatch --force-checkpoint
+    python run_baseline.py fafa_setmatch --rcr-detection-cache /path/to/rcr/cache/detections
     python run_baseline.py clip_image --skip-install
     python run_baseline.py --list
 """
@@ -27,7 +27,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from benchmark_progress import format_duration
-from benchmark_data import describe_gallery_link, ensure_gallery_layout, manifest_fingerprint
+from benchmark_data import DATA_PROTOCOL, describe_gallery_link, ensure_gallery_layout, manifest_fingerprint
+from cpr_person.cache import atomic_json
+from cpr_person.protocol import PERSON_METHODS, require_aligned_run
+from cpr_person.rcr_cache import RCR_DETECTION_ENV, rcr_index_path
 
 ROOT = Path(__file__).resolve().parent
 METHOD_ROOTS = (
@@ -217,6 +220,8 @@ def run_pipeline(
 ) -> None:
     from baseline_environment import prepare_method_python
 
+    if method.method_id in PERSON_METHODS:
+        os.environ[RCR_DETECTION_ENV] = str(rcr_index_path(required=True))
     total = 6
     print(f"Method : {method.method_id}", flush=True)
     print(f"Path   : {method.relative_directory}", flush=True)
@@ -224,25 +229,13 @@ def run_pipeline(
     started = perf_counter()
     print(flush=True)
     print(f"[1/{total}] Validate gallery data", flush=True)
-    gallery_root = ensure_gallery_layout(ROOT, repair=True)
     subprocess.run(
         [sys.executable, "-u", "validate_data.py", "--skip-image-files"],
         cwd=ROOT, check=True,
     )
+    gallery_root = ensure_gallery_layout(ROOT, repair=True)
     print(f"Gallery: {describe_gallery_link(ROOT)}", flush=True)
     print(f"Files  : validated canonical gallery at {gallery_root}", flush=True)
-    from cpr_person.protocol import PERSON_METHODS
-    if method.method_id in PERSON_METHODS:
-        from cpr_person.runtime import prepare_runtime
-        detector_python = prepare_runtime(skip_install=skip_install)
-        os.environ["CPR_DETECTOR_PYTHON"] = detector_python
-    shared_preparer = method.directory / "prepare_person_cache.py"
-    if shared_preparer.is_file():
-        print("[shared preprocessing] Verify/build the canonical person cache before installing captioner dependencies.", flush=True)
-        shared_command = [sys.executable, "-u", str(shared_preparer)]
-        if skip_install:
-            shared_command.append("--check-only")
-        subprocess.run(shared_command, cwd=ROOT, check=True)
     print(f"[1/{total}] done in {format_duration(perf_counter() - started)}: Validate gallery data", flush=True)
 
     print(flush=True)
@@ -252,6 +245,12 @@ def run_pipeline(
         requirements_path=method.requirements_path, skip_install=skip_install,
     )
     print(f"[2/{total}] environment ready: {method_python}", flush=True)
+    shared_preparer = method.directory / "prepare_person_cache.py"
+    if shared_preparer.is_file():
+        shared_command = [method_python, "-u", str(shared_preparer)]
+        if skip_install:
+            shared_command.append("--check-only")
+        subprocess.run(shared_command, cwd=ROOT, check=True, env=method_env)
 
     if method.checkpoint_path.is_file():
         command = [method_python, "-u", str(method.checkpoint_path.relative_to(ROOT))]
@@ -273,6 +272,9 @@ def run_pipeline(
         )
 
     data_fingerprint = manifest_fingerprint(ROOT)
+    validation_fingerprint = manifest_fingerprint(ROOT, "val")
+    run_path = ROOT / "runs" / method.method_id / "run.json"
+    run_path.unlink(missing_ok=True)
     run_step(
         4,
         total,
@@ -280,14 +282,19 @@ def run_pipeline(
         [method_python, "-u", str(method.run_path.relative_to(ROOT))],
         child_env=method_env,
     )
-    if manifest_fingerprint(ROOT) != data_fingerprint:
-        raise RuntimeError("Manifests changed during inference; rerun this baseline.")
-    run_path = ROOT / "runs" / method.method_id / "run.json"
+    if (manifest_fingerprint(ROOT) != data_fingerprint
+            or manifest_fingerprint(ROOT, "val") != validation_fingerprint):
+        raise RuntimeError("RCR manifests changed during inference; rerun this baseline.")
     run = json.loads(run_path.read_text(encoding="utf-8"))
     if run.get("method") != method.method_id:
         raise ValueError(f"Inference wrote mismatched method metadata: {run_path}")
-    run["data_fingerprint"] = data_fingerprint
-    run_path.write_text(json.dumps(run, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    require_aligned_run(run, method.method_id)
+    if run.get("data_fingerprint") != data_fingerprint:
+        raise RuntimeError("Inference used a different test dataset")
+    if run.get("cpr_supervision") == "Val only" and run.get("validation_fingerprint") != validation_fingerprint:
+        raise RuntimeError("Tuned inference lacks matching validation provenance")
+    run.update(split="test", data_protocol=DATA_PROTOCOL, data_fingerprint=data_fingerprint)
+    atomic_json(run_path, run)
     run_step(
         5,
         total,
@@ -343,6 +350,10 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="List discovered runnable methods and exit.",
     )
+    parser.add_argument(
+        "--rcr-detection-cache", type=Path,
+        help="RCR cache/detections directory or its index.pt for person baselines.",
+    )
     modes.add_argument("--all", action="store_true", help="Run all discovered methods in dependency order.")
     modes.add_argument("--tables-only", action="store_true",
                        help="Rebuild tables from evaluated outputs without installing or running methods.")
@@ -364,6 +375,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.rcr_detection_cache is not None:
+        os.environ[RCR_DETECTION_ENV] = str(args.rcr_detection_cache.expanduser().absolute())
     if args.method and (args.all or args.tables_only):
         raise SystemExit("Choose a method, --all, or --tables-only.")
     if args.tables_only:

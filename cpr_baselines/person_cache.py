@@ -1,4 +1,4 @@
-"""Build shared grounding once in its original runtime; captioners only read it."""
+"""Prepare the shared RCR grounding and localization that captioners read."""
 from __future__ import annotations
 
 import argparse
@@ -18,10 +18,8 @@ def require_shared_context(cfg, device, loader=load_person_context):
     except (RuntimeError, FileNotFoundError) as error:
         raise RuntimeError(
             "Structured Caption Retrieval requires the same verified grounding/localization cache as existing person methods. "
-            "Prepare it once in the shared detector runtime: "
-            "python -m cpr_person.runtime; "
-            "python -m cpr_person.prepare; python -m cpr_baselines.person_cache. "
-            "Then run this method through run_baseline.py. " + str(error)) from error
+            "Set CPR_RCR_DETECTION_CACHE and run through run_baseline.py, or prepare the cache "
+            "with python -m cpr_person.prepare and python -m cpr_baselines.person_cache. " + str(error)) from error
     finally:
         if previous is None:
             os.environ.pop("CPR_REQUIRE_SHARED_CACHE", None)
@@ -34,7 +32,7 @@ def main():
     parser.add_argument("--device", default="auto")
     args = parser.parse_args()
     device = seed_runtime({"seed": 0, "device": args.device})
-    gm, qm = ROOT / "data/gallery.jsonl", ROOT / "data/queries.jsonl"
+    gm, qm = ROOT / "data/test/gallery.jsonl", ROOT / "data/test/queries.jsonl"
     context = load_person_context(load_jsonl(gm), load_jsonl(qm), gm, qm, str(device))
     print("Prepared canonical shared grounding and memberships:", context.metadata())
 

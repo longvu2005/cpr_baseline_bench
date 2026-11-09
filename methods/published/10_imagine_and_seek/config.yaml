@@ -160,8 +160,8 @@ runtime:
   num_workers: 4
 
 data:
-  gallery_manifest: data/gallery.jsonl
-  query_manifest: data/queries.jsonl
+  gallery_manifest: data/test/gallery.jsonl
+  query_manifest: data/test/queries.jsonl
 
 cache:
   captions: runs/imagine_seek/cache/query_captions.jsonl

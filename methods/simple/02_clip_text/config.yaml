@@ -1,18 +1,18 @@
 method: clip_text
 
 model:
-  name: ViT-L/14
-  checkpoint: checkpoints/clip/ViT-L-14.pt
+  name: ViT-B/32
+  checkpoint: checkpoints/clip/ViT-B-32.pt
 
 cache:
-  gallery_features: runs/clip_image/gallery_features_vit_l14.npy
+  gallery_features: runs/clip_image/gallery_features_vit_b32.npy
 
 runtime:
-  device: cuda
-  batch_size: 64
-  text_batch_size: 256
-  score_batch_size: 512
-  num_workers: 4
+  device: auto
+  batch_size: 32
+  text_batch_size: 128
+  score_batch_size: 128
+  num_workers: 0
 
 output:
   dir: runs/clip_text

@@ -74,8 +74,8 @@ adaptation:
   full_gallery_completion: dual_path_best_rank
 
 data:
-  gallery_manifest: data/gallery.jsonl
-  query_manifest: data/queries.jsonl
+  gallery_manifest: data/test/gallery.jsonl
+  query_manifest: data/test/queries.jsonl
 
 runtime:
   device: cuda:0

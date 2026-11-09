@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
 from benchmark_progress import PhaseTracker  # noqa: E402
 
 from cpr_person.adapter import prepare_shared
+from cpr_person.rcr_cache import rcr_index_path
 from cpr_person.detection import protocol_config
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 
@@ -446,9 +447,11 @@ def main() -> None:
     prepare_shared(args.force)
     shared = protocol_config()
     cfg["runtime_assets"]["selector"]["path"] = shared["selector"]["checkpoint"]
-    cfg["runtime_assets"]["detector"]["path"] = shared["detector"]["checkpoint"]
+    cfg["runtime_assets"]["detector"]["path"] = str(
+        rcr_index_path() or resolve_path(shared["detector"]["checkpoint"])
+    )
     selector_path = resolve_path(shared["selector"]["checkpoint"])
-    detector_path = resolve_path(shared["detector"]["checkpoint"])
+    detector_path = resolve_path(cfg["runtime_assets"]["detector"]["path"])
     selector_info = {"size": selector_path.stat().st_size, "sha256": sha256_file(selector_path)}
     detector_info = {"size": detector_path.stat().st_size, "sha256": sha256_file(detector_path)}
 

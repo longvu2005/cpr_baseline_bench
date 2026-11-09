@@ -42,7 +42,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 from cpr_person.adapter import load_person_context, manifest_identity
-from cpr_person.detection import protocol_config
 from cpr_person.detection import BoxCandidate
 from cpr_person.fafa_text import apply_fafa_text_policy, resolve_fafa_text_policy
 from cpr_person.matching import aggregate_component_scores
@@ -373,19 +372,17 @@ def import_official(fafa_dir: Path):
         raise FileNotFoundError(src)
     sys.path.insert(0, str(src))
 
-    from data_utils import squarepad_transform_test, targetpad_transform  # type: ignore
+    from data_utils import squarepad_transform_test  # type: ignore
     from lavis.models import load_model_and_preprocess  # type: ignore
 
-    return squarepad_transform_test, targetpad_transform, load_model_and_preprocess
+    return squarepad_transform_test, load_model_and_preprocess
 
 
 def load_fafa(
     cfg: dict[str, Any], fafa_dir: Path, device: torch.device
 ):
     configure_runtime_cache(cfg)
-    squarepad_transform_test, targetpad_transform, load_model_and_preprocess = (
-        import_official(fafa_dir)
-    )
+    squarepad_transform_test, load_model_and_preprocess = import_official(fafa_dir)
     ckpt_cfg = cfg["checkpoint"]
     ckpt_path = (ROOT / ckpt_cfg["path"]).resolve()
     if not ckpt_path.is_file():
@@ -420,28 +417,19 @@ def load_fafa(
     else:
         state_dict = checkpoint
 
+    if not set(state_dict) & set(model.state_dict()):
+        raise ValueError("FAFA checkpoint has no matching model parameters")
     incompatible = model.load_state_dict(state_dict, strict=False)
     model = model.to(device).eval()
 
-    fda_k = int(ckpt_cfg.get("fda_k", 6))
-    fda_alpha = float(ckpt_cfg.get("fda_alpha", 0.5))
-    if hasattr(model, "fda_k"):
-        model.fda_k = fda_k
-    if hasattr(model, "fda_alpha"):
-        model.fda_alpha = fda_alpha
-    if hasattr(model, "use_soft"):
-        model.use_soft = bool(ckpt_cfg.get("use_soft", True))
+    model.fda_k = int(ckpt_cfg["fda_k"])
+    model.fda_alpha = float(ckpt_cfg["fda_alpha"])
+    model.use_soft = bool(ckpt_cfg["use_soft"])
     text_policy = apply_fafa_text_policy(model, txt_processors, ckpt_cfg)
 
-    transform_name = str(ckpt_cfg.get("transform", "squarepad")).lower()
-    image_size = int(ckpt_cfg.get("image_size", 224))
-    if transform_name == "squarepad":
-        resize_hw = tuple(int(x) for x in ckpt_cfg.get("test_resize_hw", [384, 192]))
-        preprocess = squarepad_transform_test(image_size, need_size=resize_hw)
-    elif transform_name == "targetpad":
-        preprocess = targetpad_transform(1.25, image_size)
-    else:
-        raise ValueError(f"Unsupported official FAFA transform: {transform_name}")
+    preprocess = squarepad_transform_test(
+        int(ckpt_cfg["image_size"]), need_size=tuple(ckpt_cfg["test_resize_hw"]),
+    )
 
     load_info = {
         "missing_keys": list(incompatible.missing_keys),
@@ -516,9 +504,9 @@ def encode_gallery_persons(
 
     loader = DataLoader(
         dataset,
-        batch_size=int(runtime.get("image_batch_size", 64)),
+        batch_size=int(runtime.get("image_batch_size", 4)),
         shuffle=False,
-        num_workers=int(runtime.get("num_workers", 4)),
+        num_workers=int(runtime.get("num_workers", 0)),
         pin_memory=(device.type == "cuda"),
     )
 
@@ -637,9 +625,9 @@ def encode_query_targets(
 ) -> list[np.ndarray]:
     loader = DataLoader(
         dataset,
-        batch_size=int(runtime.get("query_batch_size", 64)),
+        batch_size=int(runtime.get("query_batch_size", 4)),
         shuffle=False,
-        num_workers=int(runtime.get("num_workers", 4)),
+        num_workers=int(runtime.get("num_workers", 0)),
         pin_memory=(device.type == "cuda"),
     )
 
@@ -771,8 +759,8 @@ def validate_setmatch_config(setmatch_cfg: dict[str, Any]) -> float:
     if setmatch_cfg.get("aggregation", "mean") != "mean":
         raise ValueError("Partial SetMatch requires aggregation: mean; update config.yaml")
     unmatched_score = float(setmatch_cfg.get("unmatched_score", 0.0))
-    if not np.isfinite(unmatched_score):
-        raise ValueError("setmatch.unmatched_score must be finite")
+    if unmatched_score != -1.0:
+        raise ValueError("RCR FAFA Partial SetMatch requires unmatched_score: -1.0")
     return unmatched_score
 
 
@@ -840,8 +828,8 @@ def main() -> None:
     output.mkdir(parents=True, exist_ok=True)
 
     data_cfg = cfg.get("data", {})
-    gallery_path = (ROOT / data_cfg.get("gallery_manifest", "data/gallery.jsonl")).resolve()
-    queries_path = (ROOT / data_cfg.get("query_manifest", "data/queries.jsonl")).resolve()
+    gallery_path = (ROOT / data_cfg.get("gallery_manifest", "data/test/gallery.jsonl")).resolve()
+    queries_path = (ROOT / data_cfg.get("query_manifest", "data/test/queries.jsonl")).resolve()
     gallery = load_jsonl(gallery_path)
     queries = load_jsonl(queries_path)
     if not gallery or not queries:
@@ -859,10 +847,13 @@ def main() -> None:
     )
 
     ckpt_cfg = cfg["checkpoint"]
-    if ckpt_cfg.get("use_soft", True) is not True:
-        raise ValueError("This FAFA adapter supports only checkpoint.use_soft: true")
+    if ckpt_cfg["use_soft"] is not True or int(ckpt_cfg["fda_k"]) != 6 or float(ckpt_cfg["fda_alpha"]) != 0.5:
+        raise ValueError("RCR FAFA requires soft FDA with fda_k: 6 and fda_alpha: 0.5")
+    if (ckpt_cfg["transform"], ckpt_cfg["image_size"], ckpt_cfg["test_resize_hw"], ckpt_cfg["max_txt_len"]) != (
+        "squarepad", 224, [384, 192], 128,
+    ):
+        raise ValueError("RCR FAFA requires squarepad 224, resize 384x192 and 128 text tokens")
     ckpt_path = resolve_config_path(str(ckpt_cfg["path"]))
-    detector_cfg = protocol_config()["detector"]
     device = device_from(str(cfg.get("runtime", {}).get("device", "cuda")))
     person = load_person_context(gallery, queries, gallery_path, queries_path, device)
     stage_dirs, cache_fingerprint = build_stage_caches(
@@ -876,18 +867,15 @@ def main() -> None:
 
     runtime = cfg.get("runtime", {})
     device = device_from(str(runtime.get("device", "cuda")))
-    detector_device_name = str(runtime.get("detector_device", str(device)))
-    detector_device = device_from(detector_device_name)
     tracker.log(
         f"gallery={len(gallery):,} queries={len(queries):,} "
         f"targets={sum(len(x) for x in query_targets):,} device={device} "
-        f"detector_device={detector_device} cache={cache_key}"
+        f"cache={cache_key}"
     )
 
     tracker.advance("Consume shared ordered gallery persons")
     candidate_cache_path = person.detections.path
-    detector_info = {"checkpoint": str(resolve_config_path(detector_cfg["checkpoint"])),
-                     "attention_backend": detector_cfg["attention_backend"]}
+    detector_cfg = person.detections.fingerprint["protocol"]
     threshold = float(detector_cfg["threshold"])
     gallery_boxes = person.detections.candidates()
     tracker.advance("Consume shared Subject memberships")
@@ -954,8 +942,8 @@ def main() -> None:
         component_score_path=component_score_path,
         scores_path=scores_path,
         fda_k=fda_k,
-        person_batch_size=int(runtime.get("score_person_batch_size", 2048)),
-        query_batch_size=int(runtime.get("score_query_batch_size", 128)),
+        person_batch_size=int(runtime.get("score_person_batch_size", 1024)),
+        query_batch_size=int(runtime.get("score_query_batch_size", 64)),
         unmatched_score=unmatched_score,
         device=device,
     )
@@ -1005,7 +993,6 @@ def main() -> None:
             "use_soft": bool(ckpt_cfg.get("use_soft", True)),
             "fda_k": fda_k,
             "fda_alpha": float(ckpt_cfg.get("fda_alpha", 0.5)),
-            "fd_margin": float(ckpt_cfg.get("fd_margin", 0.5)),
             "text_policy": resolve_fafa_text_policy(ckpt_cfg),
             "definition": "top-k mean similarity between composed query feature and FAFA target feature tokens",
             "target_token_count": token_dim[0],
@@ -1017,11 +1004,7 @@ def main() -> None:
             "uses_target_ids_for_box_selection": False,
             "uses_positive_labels_for_scoring": False,
             "person_detector": detector_cfg.get("backend"),
-            "detector_weights": detector_info["checkpoint"],
-            "detector_model": detector_cfg["model"],
-            "detector_revision": detector_cfg["revision"],
-            "attention_backend": detector_info.get("attention_backend"),
-            "detector_protocol": {k: detector_cfg[k] for k in ("text_prompt", "threshold", "text_threshold", "processor_revision")},
+            "detector_protocol": detector_cfg,
             "score_threshold": threshold,
             "candidate_cache": rel(candidate_cache_path),
             **selector_stats,
@@ -1055,14 +1038,11 @@ def main() -> None:
         "relation_text_fallback_subjects": relation_fallbacks,
         "runtime": {
             "device": str(device),
-            "detector_device": str(detector_device),
-            "detector_batch_size": int(runtime.get("detector_batch_size", 2)),
-            "detector_num_workers": int(runtime.get("detector_num_workers", 4)),
-            "image_batch_size": int(runtime.get("image_batch_size", 64)),
-            "query_batch_size": int(runtime.get("query_batch_size", 64)),
-            "score_person_batch_size": int(runtime.get("score_person_batch_size", 2048)),
-            "score_query_batch_size": int(runtime.get("score_query_batch_size", 128)),
-            "num_workers": int(runtime.get("num_workers", 4)),
+            "image_batch_size": int(runtime.get("image_batch_size", 4)),
+            "query_batch_size": int(runtime.get("query_batch_size", 4)),
+            "score_person_batch_size": int(runtime.get("score_person_batch_size", 1024)),
+            "score_query_batch_size": int(runtime.get("score_query_batch_size", 64)),
+            "num_workers": int(runtime.get("num_workers", 0)),
         },
         "config": rel(config_path),
         "cache": {

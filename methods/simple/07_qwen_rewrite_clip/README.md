@@ -1,4 +1,4 @@
-# S7. Qwen2.5-VL Rewrite + CLIP ViT-L/14
+# S7. Qwen2.5-VL Rewrite + CLIP ViT-B/32
 
 ## Purpose
 
@@ -13,7 +13,7 @@ full query/reference scene + canonical modification/query text
                     ↓
      one rewritten target-image caption
                     ↓
-          OpenAI CLIP ViT-L/14
+          OpenAI CLIP ViT-B/32
                     ↓
          global gallery retrieval
 ```
@@ -45,16 +45,16 @@ checkpoints/qwen/Qwen2.5-VL-7B-Instruct/
 
 ### Retriever
 
-- model: OpenAI CLIP ViT-L/14;
+- model: OpenAI CLIP ViT-B/32;
 - checkpoint: official `ViT-L-14.pt`;
 - query representation: CLIP text embedding of the Qwen-generated target caption;
 - gallery representation: CLIP image embedding of the complete canonical scene;
 - score: cosine similarity between L2-normalized embeddings.
 
-The gallery feature cache intentionally uses the same fingerprint schema and path as the existing ViT-L/14 CLIP baselines:
+The gallery feature cache intentionally uses the same fingerprint schema and path as the existing ViT-B/32 CLIP baselines:
 
 ```text
-runs/clip_image/gallery_features_vit_l14.npy
+runs/clip_image/scene_clip/<fingerprint>/gallery_features_vit_b32.npy
 ```
 
 so a valid cache can be reused across methods.
@@ -100,8 +100,8 @@ These are runtime choices fixed in `config.yaml`; they are not tuned on CPR labe
 S7 reads only:
 
 ```text
-data/gallery.jsonl
-data/queries.jsonl
+data/test/gallery.jsonl
+data/test/queries.jsonl
 ```
 
 For each query:
@@ -183,7 +183,7 @@ The normal root runner installs requirements first, then `download_checkpoint.py
 1. downloads the exact pinned Qwen Hugging Face snapshot;
 2. validates required model/processor/tokenizer files;
 3. writes the prepared marker;
-4. downloads/checksums OpenAI CLIP ViT-L/14.
+4. downloads/checksums OpenAI CLIP ViT-B/32.
 
 No model or tokenizer is silently downloaded in `run.py`.
 

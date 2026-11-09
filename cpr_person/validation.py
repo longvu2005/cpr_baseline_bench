@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+from benchmark_data import split_paths, verify_manifest
+
 from .cache import canonical_hash, resolve, sha256_file
 
 
@@ -20,3 +22,13 @@ def ensure_separate_queries(main_query_manifest, validation_query_manifest):
         return {public_query_signature(json.loads(line)) for line in path.read_text().splitlines() if line.strip()}
     if signatures(main)&signatures(validation):
         raise ValueError("Validation contains evaluation query inputs, even if IDs/GT labels were changed")
+
+
+def verify_tuning_manifests(root, test_gallery, test_queries, val_gallery, val_queries):
+    """Bind model selection to the canonical, complete val split."""
+    for split, paths in (("test", (test_gallery, test_queries)), ("val", (val_gallery, val_queries))):
+        expected = tuple(path.resolve() for path in split_paths(root, split))
+        if tuple(path.resolve() for path in paths) != expected:
+            raise ValueError(f"Expected the canonical RCR {split} manifests")
+    verify_manifest(root, "test")
+    return verify_manifest(root, "val")["fingerprint"]

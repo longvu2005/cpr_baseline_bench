@@ -40,7 +40,7 @@ def test_seven_integrations_and_assets_are_pinned():
             if asset["kind"] in {"hf", "hf_file", "git"}:
                 assert len(asset["revision"]) == 40 and all(c in '0123456789abcdef' for c in asset["revision"])
         assert cfg["output"]["dir"] == f"runs/{method}"
-        assert cfg["data"] == {"gallery_manifest": "data/gallery.jsonl", "query_manifest": "data/queries.jsonl"}
+        assert cfg["data"] == {"gallery_manifest": "data/test/gallery.jsonl", "query_manifest": "data/test/queries.jsonl"}
         assert cfg["cpr_supervision"] == "No"
     assert config("structured_caption_retrieval")["person_protocol"] == "cpr_person/protocol.yaml"
     assert config("siglip2_compose")["composition"]["alpha_selection"] == "fixed_no_benchmark_labels"
@@ -210,7 +210,8 @@ def test_skip_install_preflight_never_installs_packages(monkeypatch):
     def missing(*args, **kwargs):
         raise RuntimeError('cache is missing')
     monkeypatch.setattr(cpr_baselines.person_cache, 'require_shared_context', missing)
-    monkeypatch.setattr(script.subprocess, 'run', lambda *_args, **_kwargs: pytest.fail('skip-install must not invoke pip'))
+    monkeypatch.setattr("cpr_person.adapter.prepare_shared",
+                        lambda *_args, **_kwargs: pytest.fail("skip-install must not invoke pip"))
     with pytest.raises(SystemExit, match='without --skip-install'):
         script.main()
 
@@ -222,18 +223,16 @@ def test_alternate_manifests_cannot_be_mistaken_for_evaluator_inputs(tmp_path):
         runner.run(cfg)
 
 
-def test_fusion_scene_adapter_evaluates_multiple_positives(toy_protocol, tmp_path, monkeypatch):
+def test_fusion_scene_adapter_evaluates_multiple_positives(toy_protocol, tmp_path, monkeypatch, write_benchmark_views):
     # Full adapter -> existing evaluator -> table builder, with a deterministic
     # toy backbone. No native GPU claim and no modification to relevance formulas.
     _, original_gallery, _, *_ = toy_protocol
-    data=tmp_path/'data';data.mkdir()
     gallery = [original_gallery[0], original_gallery[1],
                {**original_gallery[1], 'image_id': 'c'}]
     gallery = [{**row, 'person_ids': ['identity']} for row in gallery]
     queries = [{'query_id': 'q', 'image_id': 'a', 'text': 'desired people', 'subjects': [],
                 'target_ids': ['identity'], 'full_positive_ids': ['b','c'], 'case': 'GROUP'}]
-    for name,rows in [('gallery', gallery), ('queries', queries)]:
-        (data/f'{name}.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in rows))
+    write_benchmark_views(tmp_path, gallery, queries)
     g,q,index=common.public_inputs(gallery, queries)
     cfg=config('siglip2_compose')
     monkeypatch.setattr(runner, 'feature_cache', lambda stage, fp, runtime: StageCache(stage, fp, write_root=tmp_path/'cache'))
@@ -249,7 +248,7 @@ def test_fusion_scene_adapter_evaluates_multiple_positives(toy_protocol, tmp_pat
     assert score[0,0] == 0  # Raw reference entry is finite and preserved.
     atomic_json(out/'run.json',{'method':'siglip2_compose','higher_is_better':True,
                               'data_fingerprint':manifest_fingerprint(tmp_path)})
-    for key,value in {'ROOT':tmp_path,'DATA_DIR':data,'RUNS_DIR':tmp_path/'runs','OUTPUTS_DIR':tmp_path/'outputs'}.items():
+    for key,value in {'ROOT':tmp_path,'RUNS_DIR':tmp_path/'runs','OUTPUTS_DIR':tmp_path/'outputs'}.items():
         monkeypatch.setattr(evaluate,key,value)
     monkeypatch.setattr('sys.argv',['evaluate.py','--method','siglip2_compose'])
     evaluate.main()

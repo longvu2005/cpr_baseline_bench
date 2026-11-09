@@ -29,6 +29,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from benchmark_data import ensure_gallery_layout  # noqa: E402
+from benchmark_data import manifest_file_fingerprint
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
@@ -416,6 +417,7 @@ def main() -> None:
         snapshot, marker = validate_prepared(cfg)
         gallery_manifest = resolve_path(str(cfg["data"]["gallery_manifest"]))
         query_manifest = resolve_path(str(cfg["data"]["query_manifest"]))
+        data_fingerprint = manifest_file_fingerprint(gallery_manifest, query_manifest)
         gallery = load_jsonl(gallery_manifest)
         queries = load_jsonl(query_manifest)
         gallery_root = ensure_gallery_layout(ROOT, gallery_rows=gallery, repair=True)
@@ -508,6 +510,7 @@ def main() -> None:
         run_path = output_dir / "run.json"
         payload = {
             "method": cfg["method"],
+            "data_fingerprint": data_fingerprint,
             "display_name": cfg["display_name"],
             "group": cfg["group"],
             "cpr_supervision": cfg["cpr_supervision"],

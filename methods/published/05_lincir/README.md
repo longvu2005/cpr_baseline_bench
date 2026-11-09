@@ -152,7 +152,7 @@ text
 
 P5:
 
-- reads `data/gallery.jsonl` and `data/queries.jsonl` in exact row order;
+- reads `data/test/gallery.jsonl` and `data/test/queries.jsonl` in exact row order;
 - scores every query against every gallery row;
 - does not remove the reference image itself;
 - writes only finite `scores.npy` values;

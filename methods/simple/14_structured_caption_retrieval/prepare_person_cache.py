@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Warm canonical grounding in the shared runtime before loading Qwen."""
+"""Warm RCR boxes and Subject localization before loading Qwen."""
 from pathlib import Path
 import argparse
-import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -23,10 +22,11 @@ def main():
         pass
     if args.check_only:
         raise SystemExit("Shared grounding cache is missing. Prepare it first or run without --skip-install.")
-    from cpr_person.runtime import detector_python, detector_env
-    python = detector_python()
-    for module in ("cpr_person.prepare", "cpr_baselines.person_cache"):
-        subprocess.run([python, "-m", module], cwd=ROOT, env=detector_env(python), check=True)
+    from cpr_person.adapter import prepare_shared
+    from cpr_baselines.person_cache import main as build_person_cache
+
+    prepare_shared()
+    build_person_cache()
 
 
 

@@ -6,7 +6,7 @@ Final score:
 
 The ReID-Set branch is exactly the S5 adapter (same Grounding DINO detections,
 CLIP-ReID MSMT17 embeddings, shared Subject localization and Partial SetMatch).
-The semantic branch is global OpenAI CLIP ViT-L/14 text-to-gallery similarity.
+The semantic branch is global OpenAI CLIP ViT-B/32 text-to-gallery similarity.
 By default alpha is fixed, so the baseline is label-free and runnable from a
 clean benchmark checkout. An optional validation mode can select alpha by
 Full-mAP on a genuinely separate validation manifest. Test/evaluation positive
@@ -28,22 +28,23 @@ import clip
 import numpy as np
 import torch
 import yaml
-from PIL import Image
-from torch.utils.data import DataLoader, Dataset
 
 ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from evaluate import full_map
+from cpr_person.validation import verify_tuning_manifests
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
+from cpr_baselines.scene_clip import gallery_features, gallery_fingerprint as clip_gallery_fingerprint
+from cpr_person.clip_model import load_openai_clip, verify_rcr_scene_clip
 from cpr_person.adapter import matching_metadata, manifest_identity
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "groundingdino_clipreid_set_text"
 ADAPTER_VERSION = "2026-08-14-v2-fixed-or-val-fusion"
-CLIP_CACHE_SCHEMA = 2
 SCORE_CACHE_SCHEMA = 1
-ALPHA_SCHEMA = 1
+ALPHA_SCHEMA = 2
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -131,25 +132,6 @@ def device_from(name: str) -> torch.device:
     return device
 
 
-class GalleryDataset(Dataset):
-    def __init__(self, rows: Sequence[dict[str, Any]], preprocess):
-        self.rows = rows
-        self.preprocess = preprocess
-
-    def __len__(self) -> int:
-        return len(self.rows)
-
-    def __getitem__(self, index: int):
-        value = self.rows[index].get("path")
-        if not isinstance(value, str) or not value:
-            raise KeyError(f"Gallery row {index} has no usable path")
-        path = (ROOT / value).resolve()
-        if not path.is_file():
-            raise FileNotFoundError(path)
-        with Image.open(path) as image:
-            return self.preprocess(image.convert("RGB"))
-
-
 def validate_score_matrix(scores: np.ndarray, shape: tuple[int, int], label: str) -> None:
     if scores.shape != shape:
         raise ValueError(f"{label} shape={scores.shape}, expected {shape}")
@@ -158,19 +140,6 @@ def validate_score_matrix(scores: np.ndarray, shape: tuple[int, int], label: str
     for start in range(0, shape[0], 256):
         if not np.isfinite(np.asarray(scores[start : start + 256])).all():
             raise ValueError(f"{label} contains NaN/Inf")
-
-
-def clip_gallery_fingerprint(
-    checkpoint: Path, gallery_manifest: Path, model_name: str
-) -> dict[str, Any]:
-    # Match methods/simple/02_clip_text exactly so the ViT-L/14 gallery cache
-    # is genuinely shared rather than each method invalidating the other's metadata.
-    return {
-        "schema": CLIP_CACHE_SCHEMA,
-        "model_name": model_name,
-        "checkpoint_sha256": sha256_file(checkpoint),
-        "gallery_manifest_sha256": sha256_file(gallery_manifest),
-    }
 
 
 @torch.no_grad()
@@ -185,40 +154,11 @@ def prepare_clip_gallery_features(
     cfg: dict[str, Any],
     device: torch.device,
 ) -> tuple[np.ndarray, bool]:
-    feature_dim = int(model.text_projection.shape[1])
-    expected_shape = (len(gallery), feature_dim)
-    expected_meta = clip_gallery_fingerprint(
-        checkpoint, gallery_manifest, str(cfg["clip_text"]["name"])
+    fingerprint = clip_gallery_fingerprint(checkpoint, gallery_manifest, cfg["clip_text"]["name"])
+    features, _, hit = gallery_features(
+        model, preprocess, gallery, cache_path, cfg["runtime"], device, fingerprint,
     )
-    current_meta = read_json(meta_path(cache_path))
-    if cache_path.is_file() and current_meta == expected_meta:
-        cached = np.load(cache_path, mmap_mode="r", allow_pickle=False)
-        if cached.shape == expected_shape and np.isfinite(np.asarray(cached[: min(8, len(cached))])).all():
-            print(f"Using CLIP gallery cache: {rel(cache_path)}", flush=True)
-            return cached, True
-        print(f"Ignoring incompatible CLIP gallery cache: {rel(cache_path)}", flush=True)
-    elif cache_path.is_file():
-        print(f"Ignoring stale CLIP gallery cache: {rel(cache_path)}", flush=True)
-
-    loader = DataLoader(
-        GalleryDataset(gallery, preprocess),
-        batch_size=int(cfg["runtime"]["clip_image_batch_size"]),
-        shuffle=False,
-        num_workers=int(cfg["runtime"]["num_workers"]),
-        pin_memory=(device.type == "cuda"),
-    )
-    chunks: list[np.ndarray] = []
-    for images in progress_bar(loader, desc="CLIP encode gallery", total=len(loader), unit="batch"):
-        feat = model.encode_image(images.to(device, non_blocking=True)).float()
-        feat /= feat.norm(dim=1, keepdim=True).clamp_min(1e-12)
-        chunks.append(feat.cpu().numpy())
-    features = np.concatenate(chunks, axis=0).astype(np.float32, copy=False)
-    if features.shape != expected_shape:
-        raise RuntimeError(f"CLIP gallery features {features.shape}, expected {expected_shape}")
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    np.save(cache_path, features)
-    write_json(meta_path(cache_path), expected_meta)
-    return np.load(cache_path, mmap_mode="r", allow_pickle=False), False
+    return features, hit
 
 
 @torch.no_grad()
@@ -362,36 +302,6 @@ def prepare_s5_scores(*, s5, s5_cfg, s5_cfg_path, gallery_manifest, query_manife
     return scores, {**stats, "scores_hit": score_hit}
 
 
-def full_map(scores: np.ndarray, gallery: Sequence[dict[str, Any]], queries: Sequence[dict[str, Any]]) -> float:
-    gallery_index = {row["image_id"]: i for i, row in enumerate(gallery)}
-    if len(gallery_index) != len(gallery):
-        raise ValueError("Validation gallery has duplicate image_id")
-    aps: list[float] = []
-    for qi, query in enumerate(queries):
-        image_id = query.get("image_id")
-        if image_id not in gallery_index:
-            raise ValueError(f"Validation query {qi}: query image missing from gallery")
-        positives_raw = query.get("full_positive_ids")
-        if not isinstance(positives_raw, list) or not positives_raw:
-            raise ValueError(
-                f"Validation query {qi}: full_positive_ids is required for alpha selection"
-            )
-        positives = {gallery_index[x] for x in positives_raw if x in gallery_index}
-        self_idx = gallery_index[image_id]
-        positives.discard(self_idx)
-        if not positives:
-            raise ValueError(f"Validation query {qi}: no Full positives")
-        row = np.asarray(scores[qi], dtype=np.float32).copy()
-        row[self_idx] = -np.inf
-        order = np.argsort(-row)
-        relevant = np.isin(order, list(positives))
-        ranks = np.flatnonzero(relevant) + 1
-        if len(ranks) == 0:
-            raise ValueError(f"Validation query {qi}: no positive found after ranking")
-        aps.append(float(np.mean(np.arange(1, len(ranks) + 1) / ranks)))
-    return float(np.mean(aps))
-
-
 def alpha_fingerprint(
     *,
     cfg: dict[str, Any],
@@ -413,6 +323,12 @@ def alpha_fingerprint(
         "validation_gallery_sha256": sha256_file(val_gallery),
         "validation_queries_sha256": sha256_file(val_queries),
         "clip_checkpoint_sha256": sha256_file(clip_checkpoint),
+        "validation_reid_scores_sha256": sha256_file(
+            resolve_path(str(cfg["cache"]["validation"]["reid_set_scores"]))
+        ),
+        "validation_clip_scores_sha256": sha256_file(
+            resolve_path(str(cfg["cache"]["validation"]["clip_text_scores"]))
+        ),
     }
 
 
@@ -471,7 +387,7 @@ def select_alpha(
         raise RuntimeError("Alpha selection produced no candidate")
     payload = {
         "method": METHOD_ID,
-        "selection_split": "validation",
+        "selection_split": "val",
         "selection_metric": "Full-mAP",
         "selected_alpha": float(best_alpha),
         "selected_full_map": float(best_map),
@@ -543,7 +459,7 @@ def main() -> None:
             raise ValueError("Canonical gallery/query manifests must be non-empty")
 
         selection_cfg = cfg["fusion"]["alpha_selection"]
-        alpha_mode = str(selection_cfg.get("mode", "fixed")).strip().lower()
+        alpha_mode = str(selection_cfg.get("mode", "validation")).strip().lower()
         if alpha_mode not in {"fixed", "validation"}:
             raise ValueError(
                 "fusion.alpha_selection.mode must be 'fixed' or 'validation', "
@@ -551,6 +467,7 @@ def main() -> None:
             )
 
         alpha = None
+        validation_fingerprint = None
         val_gallery_manifest = None
         val_query_manifest = None
 
@@ -569,20 +486,9 @@ def main() -> None:
             val_cfg = selection_cfg["validation"]
             val_gallery_manifest = resolve_path(str(val_cfg["gallery_manifest"]))
             val_query_manifest = resolve_path(str(val_cfg["query_manifest"]))
-            if not val_gallery_manifest.is_file() or not val_query_manifest.is_file():
-                raise FileNotFoundError(
-                    "S6 alpha_selection.mode='validation' requires separate validation "
-                    "manifests to avoid test leakage.\n"
-                    f"Expected: {rel(val_gallery_manifest)} and {rel(val_query_manifest)}\n"
-                    "Do not point these paths at the canonical evaluation manifests."
-                )
-            from cpr_person.validation import ensure_separate_queries
-            ensure_separate_queries(query_manifest, val_query_manifest)
-            if sha256_file(val_query_manifest) == sha256_file(query_manifest):
-                raise RuntimeError(
-                    "Validation query manifest is identical to the canonical evaluation "
-                    "query manifest; refusing to tune alpha on evaluation labels."
-                )
+            validation_fingerprint = verify_tuning_manifests(
+                ROOT, gallery_manifest, query_manifest, val_gallery_manifest, val_query_manifest
+            )
 
         cpr_supervision = "Val only" if alpha_mode == "validation" else "No"
 
@@ -592,15 +498,10 @@ def main() -> None:
         clip_checkpoint = resolve_path(str(cfg["clip_text"]["checkpoint"]))
         if not clip_checkpoint.is_file():
             raise FileNotFoundError(
-                f"Missing CLIP ViT-L/14 checkpoint: {rel(clip_checkpoint)}. "
+                f"Missing CLIP ViT-B/32 checkpoint: {rel(clip_checkpoint)}. "
                 "Run this baseline through run_baseline.py."
             )
-        expected_sha = str(cfg["clip_text"]["checkpoint_sha256"])
-        actual_sha = sha256_file(clip_checkpoint)
-        if actual_sha != expected_sha:
-            raise RuntimeError(
-                f"CLIP ViT-L/14 checksum mismatch: expected {expected_sha}, got {actual_sha}"
-            )
+        actual_sha = verify_rcr_scene_clip(clip_checkpoint, cfg["clip_text"]["name"])
         output_dir = resolve_path(str(cfg["output"]["dir"]))
         output_dir.mkdir(parents=True, exist_ok=True)
         validation_status = "separate" if alpha_mode == "validation" else "not-required"
@@ -654,9 +555,8 @@ def main() -> None:
         )
         tracker.log(f"main_s5_cache={main_s5_stats}")
 
-    with tracker.phase("Load OpenAI CLIP ViT-L/14"):
-        model, preprocess = clip.load(str(clip_checkpoint), device=device, jit=False)
-        model.eval()
+    with tracker.phase("Load OpenAI CLIP ViT-B/32"):
+        model, preprocess = load_openai_clip(clip_checkpoint, device)
 
     with tracker.phase("Prepare validation CLIP text branch"):
         if alpha_mode == "validation":
@@ -773,19 +673,21 @@ def main() -> None:
 
     with tracker.phase("Write reproducibility metadata"):
         run = {
+            "scene_clip_sha256": actual_sha,
             "shared_person_protocol": main_s5_stats["shared_person_protocol"],
             "setmatch": matching_metadata(s5_cfg, score_space="cosine"),
             "method": METHOD_ID,
             "display_name": str(cfg.get("display_name")),
             "group": str(cfg.get("group")),
             "cpr_supervision": cpr_supervision,
+            "validation_fingerprint": validation_fingerprint,
             "adapter_version": ADAPTER_VERSION,
             "config": rel(config_path),
             "components": {
                 "reid_set": {
                     "method": str(cfg["base_set"]["method"]),
                     "config": rel(s5_cfg_path),
-                    "detector": "Hugging Face Grounding DINO Tiny",
+                    "detector": "Shared RCR Grounding DINO Tiny boxes",
                     "reid": "CLIP-ReID ViT-B/16 (MSMT17)",
                     "assignment": "maximum-weight Hungarian",
                     "aggregation": "mean over all predicted query components",
@@ -804,7 +706,7 @@ def main() -> None:
                 "selected_alpha": alpha,
                 "selection_mode": alpha_mode,
                 "fixed_alpha": float(alpha) if alpha_mode == "fixed" else None,
-                "selection_split": "validation" if alpha_mode == "validation" else None,
+                "selection_split": "val" if alpha_mode == "validation" else None,
                 "selection_metric": "Full-mAP" if alpha_mode == "validation" else None,
                 "selection_result": (
                     rel(resolve_path(str(selection_cfg["result"])))

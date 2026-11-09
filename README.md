@@ -4,14 +4,10 @@ Seven additional methods are available: SigLIP2 Compose, SEARLE-XL,
 Context-I2W, FTI4CIR, Qwen Caption-to-Caption, Structured Caption Retrieval,
 and GME-Qwen2-VL-2B. See [setup, protocol and limitations](docs/additional_baselines.md).
 
-Shared person detection now uses **Hugging Face Grounding DINO Tiny** in an
-isolated runtime (Transformers 4.56.2). Native FAFA keeps Transformers 4.39.3 and
-128-token text. [Migration, cache regeneration and commands](docs/hf_person_detector.md).
-
-Person-level baselines now use the shared predicted-person protocol in `cpr_person/`:
-Grounding DINO, CLIP Subject membership and Partial SetMatch. Native scene-level
-methods retain their inference paths. See [protocol, method coverage, caches and run commands](docs/baselines.md).
-
+Benchmark-owned scene CLIP uses RCR's official OpenAI ViT-B/32. Person
+adapters read the same RCR Grounding DINO Tiny detection index and share the
+CLIP Subject selector. The FAFA row uses the released FAFA model and Partial
+SetMatch. See [baseline protocol and run commands](docs/baselines.md).
 
 This repository provides a common evaluation protocol for Composed Person Retrieval (CPR) baselines.
 
@@ -39,118 +35,56 @@ validate_data.py
 
 ## Benchmark Gallery Protocol
 
-**The current Stage-2 benchmark uses one shared gallery of 30,552 images, not the 17,000-image TRAIN split alone.** Every baseline must score against the same complete gallery, including images from all three source splits:
-
-| Source split | Images |
-| --- | ---: |
-| TRAIN | 17,000 |
-| VAL | 5,684 |
-| TEST | 7,868 |
-| **Total** | **30,552** |
-
-These counts describe the **current source metadata**, not hard-coded limits or independently specified counts for future dataset versions. `data/source/images.jsonl` is the source of truth for gallery membership and ordering. `prepare_data.py` regenerates `data/gallery.jsonl` and `data/queries.jsonl` from the source metadata and the Stage-2 annotation export. The image files alone do not determine which images enter the benchmark.
-
-Do not evaluate the full Stage-2 benchmark using only TRAIN images. Do not edit a manifest by hand, duplicate images to meet an expected count, or weaken the image-file checks to allow missing gallery members. Inference and evaluation must both use the same ordered manifests; the runner records their SHA-256 fingerprints to prevent mixing incompatible results.
-
-### Prepare the full gallery
-
-The source directory supplied to `link_gallery.py` **must contain three sibling directories**, not just `train/`:
-
-```text
-/path/to/images/
-  train/
-  val/
-  test/
-```
-
-From the repository root, with `data/source/images.jsonl`, `data/source/index.txt`, and `data/source/export_stage2.jsonl` available:
+Use one completed RCR `dataset/data/final` export for all methods. The importer
+creates separate val and test manifests in canonical RCR order.
 
 ```bash
-python link_gallery.py --source /path/to/images
-python prepare_data.py
+python prepare_data.py --rcr-final-dir /path/to/rcr/dataset/data/final
+python link_gallery.py --source /path/to/rcr/dataset/data/raw/images
 python validate_data.py
 ```
 
-For Kaggle, use the actual mounted parent directory containing `train/`, `val/`, and `test/`. For example, if those folders live under `/kaggle/input/cir-data/data/raw/images`, pass that **parent** directory to `--source`, not `/kaggle/input/cir-data/data/raw/images/train`.
+Only val and test are imported. Validation is used for parameter selection.
+All reported scores, metrics and tables use the test split. The overall table
+includes Macro-Full-mAP, the equally weighted mean of Full-mAP across present
+cases. The case table reports ID and Full mAP and R@1 in RCR case order.
 
-For the current dataset, a successful preparation reports **30,552 gallery images**. The query count depends on the supplied annotation export (4,311 queries for the documented export). All baseline methods then use the same manifest.
+Global CLIP early/late fusion, S6, S9, S10 and S11 select their configured
+parameters by complete-validation Full-mAP and then score test with those
+settings. S9 needs completed S5 and S8 runs. S11 needs S6's validation-selected
+alpha and branch scores. Other methods use their predeclared configurations.
 
-### Diagnose an unexpected 17,000-image gallery
-
-If the runner prints `Expected 17,000 images`, the number comes from the **current `data/gallery.jsonl`**, not from a hard-coded benchmark size. It typically means that the local manifest was generated from TRAIN-only metadata or is stale. Check both files:
-
-```bash
-python - <<'PY'
-import json
-from collections import Counter
-from pathlib import Path
-
-root = Path('data')
-for name in ('gallery', 'queries'):
-    path = root / f'{name}.jsonl'
-    rows = [json.loads(line) for line in path.open(encoding='utf-8') if line.strip()]
-    print(f'{name}: {len(rows):,} rows')
-
-source = root / 'source/images.jsonl'
-rows = [json.loads(line) for line in source.open(encoding='utf-8') if line.strip()]
-counts = Counter(row.get('source_split') for row in rows)
-print('Source image splits:', dict(sorted(counts.items())))
-PY
-```
-
-If source metadata contains all three splits but `gallery.jsonl` does not, rerun `prepare_data.py` and `validate_data.py` after linking the complete image source. If `images.jsonl` is itself TRAIN-only, restore the **correct full metadata** first; regeneration cannot recreate missing metadata. If the manifests are complete but image validation fails, confirm that all three image folders are mounted and relink the gallery. `python validate_data.py --skip-image-files` can diagnose manifest inconsistencies without requiring the images on the machine.
-
-> **Kaggle note:** `CPR_GALLERY_SOURCE` points to a directory directly containing every manifest image. It cannot point to `train/` when the gallery contains TRAIN + VAL + TEST. With the split-directory source layout, prefer `link_gallery.py` to create the flat gallery of symlinks at `data/gallery/`.
-
----
-
-## Prepare Stage-2 Data
-
-Place the flattened JSONL export in `data/source/export_stage2.jsonl`, then run:
-
-```bash
-python link_gallery.py --source /path/to/images
-python prepare_data.py
-python validate_data.py
-```
-
-The input fields, adapter mapping, positive filtering, and GROUP limitations
-are documented in [data/README.md](data/README.md). The benchmark uses one common
-gallery containing TRAIN, VAL, and TEST metadata images and supports INDIVIDUAL, DUAL, GROUP, and
-RELATIONAL queries. Query counts come from the input rather than a fixed pilot
-count. `records.jsonl` and the old nested annotation schema are no longer used.
-
-After changing the export, rebuild the manifests and rerun the baselines.
-The runner records manifest hashes with each score matrix; evaluated tables
-include only results for the current manifests.
+See [data layout and field mapping](data/README.md) for Kaggle mounts and the
+split contract. Reimport after finalizing a new RCR release.
 
 ---
 
 ## Run One Baseline End-to-End
 
-From the repository root, pass only the method name:
+From the repository root, use the method name and supply the RCR detection index for person methods.
 
 ```bash
 python run_baseline.py clip_image
+python run_baseline.py fafa_setmatch --rcr-detection-cache /path/to/rcr/cache/detections
 ```
 
 Before model work, the runner checks reporting imports with `build_tables.py --check`.
 It then performs the complete method pipeline in this order:
 
 ```text
-1. validate/repair the canonical gallery image layout, then validate manifest semantics
-2. prepare isolated detector/person and method runtimes, then install method requirements
+1. verify the imported val/test manifests and validate or link the image root
+2. prepare the isolated method environment and verify any required person cache
 3. prepare/validate the method checkpoint when download_checkpoint.py exists
-4. run inference
-5. run the official evaluator
+4. select parameters on val where configured, then score test
+5. evaluate test
 6. rebuild benchmark tables
 ```
 
 **Gallery validation runs before dependency installation.** Requirements are installed
-into each method's isolated environment; person detection uses its separate
-shared environment. The parent notebook's packages are not replaced. See
-[detector setup](docs/hf_person_detector.md) and
-[Benchmark Gallery Protocol](#benchmark-gallery-protocol).
+into each method's isolated environment. Person methods use RCR's existing
+`cache/detections/index.pt`. Supply its directory or the file itself with
+`--rcr-detection-cache` or set `CPR_RCR_DETECTION_CACHE`. Scene-only methods such
+as `clip_image` can run without it. See [detector setup](docs/baselines.md#detection-and-crop-convention).
 
 To rebuild tables from existing evaluated outputs:
 
@@ -206,8 +140,8 @@ Before coding, inspect:
 ```text
 README.md
 data/README.md
-data/gallery.jsonl
-data/queries.jsonl
+data/test/gallery.jsonl
+data/test/queries.jsonl
 validate_data.py
 evaluate.py
 build_tables.py
@@ -333,11 +267,11 @@ System tools that cannot be installed by pip, such as `git`, should fail with a 
 Every method must:
 
 ```text
-read data/gallery.jsonl
-read data/queries.jsonl
+read data/test/gallery.jsonl
+read data/test/queries.jsonl
 preserve their exact row order
 score every query against the complete gallery
-NOT remove the query image itself
+keep a finite placeholder for the query image column
 save scores.npy
 save run.json
 ```
@@ -365,15 +299,15 @@ higher score = better match
 
 The matrix must contain only finite values: no `NaN`, `+Inf`, or `-Inf`.
 
-The method must not calculate the official benchmark metrics itself.
+The evaluator computes the official test metrics.
 
-`evaluate.py` owns query-image exclusion and official benchmark evaluation. Method code must preserve the complete canonical score matrix until evaluation.
+`evaluate.py` excludes the query image and sorts ties in canonical gallery order. Late fusion and rerankers exclude the reference before gallery statistics or candidate selection. Each method still writes the complete test score matrix.
 
 ---
 
 ### 5. Handle CPR Inputs Correctly
 
-Use the canonical fields from `data/queries.jsonl`.
+Use the canonical fields from `data/test/queries.jsonl`.
 
 For ordinary methods, the query-level field:
 
@@ -397,7 +331,7 @@ If a published method does not natively support scene-level target localization,
 
 Do not silently change the original retrieval method while still presenting it as the published baseline.
 
-Do not use CPR evaluation labels, `target_ids`, positives, case annotations, or GT identity-to-box mappings to train, fine-tune, select checkpoints, tune hyperparameters, or secretly localize the target unless the experiment is explicitly defined as an oracle.
+Use public inputs for inference. Select any benchmark hyperparameters on the complete val split and freeze them before scoring test. The test evaluator uses identities, case labels and reviewed positives.
 
 ---
 
@@ -533,7 +467,7 @@ A baseline integration is complete only when:
 [ ] official source code is pinned when practical
 [ ] canonical query/gallery order is preserved
 [ ] every query scores the complete gallery
-[ ] the query image is NOT removed inside the method
+[ ] the score matrix contains a finite query-image entry and eligible shortlists exclude it
 [ ] scores.npy has the exact required shape
 [ ] scores.npy contains only finite values
 [ ] run.json records reproducibility metadata and benchmark adaptations
@@ -602,7 +536,7 @@ Transformers' optional Flax/JAX and TensorFlow backend discovery.
 Run normally (without `--skip-install`) at least once for each method:
 
 ```bash
-python run_baseline.py 10_person_compose_setmatch
+python run_baseline.py 10_person_compose_setmatch --rcr-detection-cache /path/to/rcr/cache/detections
 ```
 
 `--skip-install` only reuses an **already prepared**, up-to-date method

@@ -1,4 +1,4 @@
-# S8. Qwen-Image-Edit-2509 + CLIP ViT-L/14
+# S8. Qwen-Image-Edit-2509 + CLIP ViT-B/32
 
 ## Purpose
 
@@ -14,7 +14,7 @@ full query/reference scene + canonical modification/query text
                     ↓
           one synthetic target/query image
                     ↓
-             OpenAI CLIP ViT-L/14
+             OpenAI CLIP ViT-B/32
                     ↓
             global gallery retrieval
 ```
@@ -42,16 +42,16 @@ checkpoints/qwen/Qwen-Image-Edit-2509/
 
 ### Retriever
 
-- model: OpenAI CLIP ViT-L/14;
+- model: OpenAI CLIP ViT-B/32;
 - checkpoint: official `ViT-L-14.pt`;
 - query representation: CLIP image embedding of the synthetic edited image;
 - gallery representation: CLIP image embedding of the complete canonical scene;
 - score: cosine similarity between L2-normalized embeddings.
 
-The gallery feature cache intentionally uses the same fingerprint schema and path as the existing ViT-L/14 CLIP baselines:
+The gallery feature cache intentionally uses the same fingerprint schema and path as the existing ViT-B/32 CLIP baselines:
 
 ```text
-runs/clip_image/gallery_features_vit_l14.npy
+runs/clip_image/scene_clip/<fingerprint>/gallery_features_vit_b32.npy
 ```
 
 so a valid cache can be reused across methods.
@@ -92,8 +92,8 @@ seed = 42
 S8 reads only:
 
 ```text
-data/gallery.jsonl
-data/queries.jsonl
+data/test/gallery.jsonl
+data/test/queries.jsonl
 ```
 
 For each query:
@@ -185,7 +185,7 @@ The normal root runner installs requirements first, then `download_checkpoint.py
 
 1. downloads the Qwen image-edit snapshot;
 2. inventories the files and writes the prepared marker;
-3. downloads/checksums OpenAI CLIP ViT-L/14.
+3. downloads/checksums OpenAI CLIP ViT-B/32.
 
 No model or tokenizer is silently downloaded in `run.py`.
 

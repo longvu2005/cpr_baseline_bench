@@ -103,8 +103,8 @@ There is one fixed template for the entire benchmark. No prompt differs by INDIV
 P4 reads only the canonical benchmark manifests:
 
 ```text
-data/gallery.jsonl
-data/queries.jsonl
+data/test/gallery.jsonl
+data/test/queries.jsonl
 ```
 
 For each query:

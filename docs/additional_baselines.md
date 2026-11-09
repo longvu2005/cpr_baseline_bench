@@ -33,7 +33,7 @@ python run_baseline.py searle_xl
 python run_baseline.py context_i2w
 python run_baseline.py fti4cir
 python run_baseline.py qwen_caption_to_caption
-python run_baseline.py structured_caption_retrieval
+python run_baseline.py structured_caption_retrieval --rcr-detection-cache /path/to/rcr/cache/detections
 python run_baseline.py gme_qwen2_vl_2b
 ```
 
@@ -52,27 +52,18 @@ repository root. All additions require the common `cpr_baselines/` package.
 
 ## Grounding and dependency handling
 
-Qwen uses Transformers 4.51.3, while the fixed GroundingDINO runtime uses
-4.39.3. Before installing captioner dependencies, the top-level runner
-verifies the original shared detection/membership cache. If missing, a
-method-local preparer installs the original detector dependencies, prepares
-assets and computes the cache in fresh subprocesses. Then the runner installs
-Qwen's dependencies. No extra virtual environment is created.
+The top-level runner prepares the captioner's isolated environment and then
+verifies the shared person cache. The preparer projects boxes from the mounted
+RCR detection index and runs the shared CLIP selector when needed. Caption
+inference reads those verified caches. The check-only path used by
+`--skip-install` requires them to be ready.
 
-The captioner only reads verified shared caches and cannot recompute grounding
-under the newer runtime. Existing person baselines also prepare reusable
-caches. The preparer handles setuptools compatibility for the legacy CLIP
-dependency. `--skip-install` never installs a missing shared runtime.
-
-Manual preparation:
 ```bash
-python methods/simple/14_structured_caption_retrieval/prepare_person_cache.py
-python run_baseline.py structured_caption_retrieval
+python run_baseline.py structured_caption_retrieval --rcr-detection-cache /path/to/rcr/cache/detections
 ```
 
-Mounted caches retain `CPR_SHARED_CACHE_READ_ROOTS` and
-`CPR_SHARED_CACHE_ROOT`. Canonical manifests and detector/selector assets
-must remain available for provenance checks.
+To use a read-only mount for the projected boxes and memberships, set
+`CPR_SHARED_CACHE_READ_ROOTS`. Use `CPR_SHARED_CACHE_ROOT` for writable entries.
 
 ## Fairness rules
 

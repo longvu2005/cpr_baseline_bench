@@ -22,7 +22,6 @@ checkpoint:
   max_txt_len: 128
   fda_k: 6
   fda_alpha: 0.5
-  fd_margin: 0.5
   use_soft: true
   transform: squarepad
   image_size: 224
@@ -33,18 +32,15 @@ checkpoint:
   cache_root: checkpoints/fafa/runtime_cache
 runtime:
   device: cuda
-  detector_device: cuda
-  detector_batch_size: 2
-  detector_num_workers: 4
-  image_batch_size: 64
-  query_batch_size: 64
-  score_person_batch_size: 2048
-  score_query_batch_size: 128
-  num_workers: 4
+  image_batch_size: 4
+  query_batch_size: 4
+  score_person_batch_size: 1024
+  score_query_batch_size: 64
+  num_workers: 0
   gallery_feature_dtype: float16
 data:
-  gallery_manifest: data/gallery.jsonl
-  query_manifest: data/queries.jsonl
+  gallery_manifest: data/test/gallery.jsonl
+  query_manifest: data/test/queries.jsonl
 localization:
   detector:
     protocol: cpr_person/protocol.yaml
@@ -61,7 +57,7 @@ localization:
     tokenize_truncate: true
     assignment: hungarian_anchors_then_disjoint_expansion
     tokenizer_packages:
-      ftfy: '5.8'
+      ftfy: '6.3.1'
       wcwidth: 0.2.13
     tokenizer_runtime_dir: checkpoints/clip/selector_tokenizer
 setmatch:

@@ -2,8 +2,8 @@
 numpy>=1.24,<2
 pillow
 pyyaml
-torch
-torchvision
+torch==2.5.1
+torchvision==0.20.1
 tqdm
 scipy
 gdown>=5.2,<7
@@ -14,7 +14,7 @@ pandas
 omegaconf
 iopath
 timm==0.9.16
-decord
+eva-decord==0.6.1
 opencv-python==4.10.0.84
 # Keep the official FAFA pin. Shared notebook environments may warn that an
 # unrelated preinstalled package wants a newer Transformers; do not relax this

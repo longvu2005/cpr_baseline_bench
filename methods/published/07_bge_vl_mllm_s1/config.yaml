@@ -54,8 +54,8 @@ cache:
   query_features: runs/bge_vl_mllm_s1/cache/query_features.npy
 
 data:
-  gallery_manifest: data/gallery.jsonl
-  query_manifest: data/queries.jsonl
+  gallery_manifest: data/test/gallery.jsonl
+  query_manifest: data/test/queries.jsonl
 
 output:
   dir: runs/bge_vl_mllm_s1

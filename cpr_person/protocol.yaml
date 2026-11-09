@@ -1,4 +1,4 @@
-version: 2026-10-22-person-hf-v2
+version: rcr-packed-boxes-v3
 detector:
   backend: huggingface_grounding_dino
   model: IDEA-Research/grounding-dino-tiny
@@ -32,7 +32,7 @@ selector:
   max_members_per_subject: 5
   tokenize_truncate: true
   tokenizer_packages:
-    ftfy: '5.8'
+    ftfy: '6.3.1'
     wcwidth: '0.2.13'
   tokenizer_runtime_dir: checkpoints/clip/selector_tokenizer
 image:

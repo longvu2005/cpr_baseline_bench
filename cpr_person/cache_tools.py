@@ -82,7 +82,7 @@ def main():
     sub=parser.add_subparsers(dest="command",required=True)
     inspect=sub.add_parser("inspect");inspect.add_argument("roots",nargs="+")
     migrate=sub.add_parser("import-shared")
-    migrate.add_argument("source_root");migrate.add_argument("--gallery-manifest",default="data/gallery.jsonl")
+    migrate.add_argument("source_root");migrate.add_argument("--gallery-manifest",default="data/test/gallery.jsonl")
     migrate.add_argument("--query-manifest")
     args=parser.parse_args()
     if args.command=="inspect":

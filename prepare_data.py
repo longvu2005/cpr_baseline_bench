@@ -1,44 +1,24 @@
 #!/usr/bin/env python3
-"""Build the common TRAIN/VAL/TEST gallery from the flattened Stage-2 export."""
+"""Import validation and test manifests from a finalized RCR dataset."""
+
+from __future__ import annotations
 
 import argparse
-import json
-import re
 from collections import Counter, defaultdict
-from pathlib import Path
+import json
+from pathlib import Path, PurePosixPath
+import re
+from tempfile import TemporaryDirectory
+
+from benchmark_data import CASE_TYPES, DATA_PROTOCOL, SPLITS, load_jsonl, manifest_fingerprint
+from cpr_person.cache import cache_lock, canonical_hash
 
 ROOT = Path(__file__).resolve().parent
-DATA = ROOT / "data"
-SOURCE = DATA / "source"
-GALLERY_DIR = DATA / "gallery"
-IMAGES = SOURCE / "images.jsonl"
-ANNOTATIONS = SOURCE / "export_stage2.jsonl"
-PIPA_INDEX = SOURCE / "index.txt"
-GALLERY_OUT = DATA / "gallery.jsonl"
-QUERIES_OUT = DATA / "queries.jsonl"
-CASE_TYPES = ("INDIVIDUAL", "DUAL", "GROUP", "RELATIONAL")
-GALLERY_SPLITS = ("TRAIN", "VAL", "TEST")
 
-SUBJECT_DESC = re.compile(r"\bSubject\s+(\d+)\s+as\s+", re.IGNORECASE)
 SUBJECT_REF = re.compile(r"\bSubject\s+(\d+)\b", re.IGNORECASE)
-CHANGE_PREFIX = re.compile(r"^then\s+retrieve\s+target\s+images\s+where\s+", re.IGNORECASE)
+SELECT_SPLIT = re.compile(r"\s+and\s+(?=Subject\s+\d+\s+as\s+)")
+CHANGE_PREFIX = "then retrieve target images where "
 CLAUSE_JOIN = re.compile(r"(?:[,;]?\s+and|[,;]?\s+while|[,;])\s*$", re.IGNORECASE)
-
-
-def read_jsonl(path):
-    rows = []
-    with path.open("r", encoding="utf-8-sig") as handle:
-        for line_no, line in enumerate(handle, 1):
-            if not line.strip():
-                continue
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError as error:
-                raise ValueError(f"{path}:{line_no}: invalid JSON") from error
-            if not isinstance(row, dict):
-                raise TypeError(f"{path}:{line_no}: JSONL row must be an object")
-            rows.append(row)
-    return rows
 
 
 def write_jsonl(path, rows):
@@ -47,245 +27,214 @@ def write_jsonl(path, rows):
             handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
-def select_gallery_images(images):
-    """Keep all three source splits, in the canonical metadata image order."""
-    return sorted((image for image in images if image["source_split"] in GALLERY_SPLITS),
-                  key=lambda image: int(image["image_idx"]))
+def index_unique(rows, key):
+    indexed = {}
+    for row in rows:
+        value = row[key]
+        if not isinstance(value, str) or not value or value in indexed:
+            raise ValueError(f"Invalid or duplicate {key}: {value!r}")
+        indexed[value] = row
+    return indexed
 
 
-def load_identity_index(path):
-    """PIPA columns: album_id photo_id x y width height identity_id split."""
-    identities = defaultdict(set)
-    with path.open("r", encoding="utf-8") as handle:
-        for line_no, line in enumerate(handle, 1):
-            parts = line.split()
-            if not parts:
-                continue
-            if len(parts) != 8:
-                raise ValueError(f"{path}:{line_no}: expected 8 columns, got {len(parts)}")
-            identities[f"{parts[0]}_{parts[1]}"].add(parts[6])
-    return {image_id: sorted(ids, key=int) for image_id, ids in identities.items()}
-
-
-def query_texts(record):
-    """Derive adapter inputs from text alone; case and identity labels never route text."""
-    query_id = record["sample_id"]
-    texts = {}
-    for key in ("final_desc", "final_change", "final_instruction"):
-        value = record.get(key)
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError(f"{query_id}: missing or empty {key}")
-        texts[key] = value.strip()
-
-    description = texts["final_desc"]
-    markers = list(SUBJECT_DESC.finditer(description))
-    if not markers or description[:markers[0].start()].strip().lower() != "identify":
-        raise ValueError(f"{query_id}: final_desc must identify named Subjects")
-
-    selectors = {}
-    for index, marker in enumerate(markers):
-        subject_id = int(marker.group(1))
-        end = markers[index + 1].start() if index + 1 < len(markers) else len(description)
-        fragment = description[marker.end():end].strip()
-        if index + 1 < len(markers):
-            fragment = CLAUSE_JOIN.sub("", fragment).strip()
-        if subject_id in selectors or not fragment:
-            raise ValueError(f"{query_id}: duplicate or empty Subject {subject_id} description")
-        selectors[subject_id] = fragment
-
-    condition = CHANGE_PREFIX.sub("", texts["final_change"]).strip()
-    mentions = list(SUBJECT_REF.finditer(condition))
-    if not condition or not mentions:
-        raise ValueError(f"{query_id}: final_change must mention a named Subject")
-    mentioned_ids = {int(marker.group(1)) for marker in mentions}
-    if not mentioned_ids.issubset(selectors):
-        raise ValueError(f"{query_id}: final_change mentions an undefined Subject")
-
-    # Split only unambiguous independent clauses. Cross-Subject references,
-    # shared predicates and repeated mentions keep the entire condition.
-    modifiers = {}
-    independent = (
-        len(mentions) == len(selectors)
-        and mentioned_ids == set(selectors)
-        and mentions[0].start() == 0
+def query_texts(sample, subject_ids):
+    """Apply RCR's selection parser and case-independent FAFA clause routing."""
+    desc, change, instruction = (
+        sample[key] for key in ("final_desc", "final_change", "final_instruction")
     )
-    if independent:
+    if any(not isinstance(text, str) or not text.strip() for text in (desc, change, instruction)):
+        raise ValueError(f"{sample['sample_id']}: missing finalized text")
+    if not desc.startswith("Identify ") or not change.startswith(CHANGE_PREFIX):
+        raise ValueError(f"{sample['sample_id']}: invalid finalized text prefix")
+    parts = SELECT_SPLIT.split(desc.removeprefix("Identify "))
+    if len(parts) != len(subject_ids):
+        raise ValueError(f"{sample['sample_id']}: selection text does not match Subject slots")
+    selectors = []
+    for part, subject_id in zip(parts, subject_ids, strict=True):
+        prefix = f"Subject {subject_id} as "
+        if not part.startswith(prefix) or not part[len(prefix):].strip():
+            raise ValueError(f"{sample['sample_id']}: missing selection for Subject {subject_id}")
+        selectors.append(part[len(prefix):].strip())
+
+    condition = change.removeprefix(CHANGE_PREFIX).strip()
+    mentions = list(SUBJECT_REF.finditer(condition))
+    mentioned_ids = {int(marker[1]) for marker in mentions}
+    if mentioned_ids != set(subject_ids):
+        raise ValueError(f"{sample['sample_id']}: target text does not match Subject slots")
+
+    if len(mentions) == len(subject_ids) and mentions[0].start() == 0:
+        modifiers = {}
         for index, marker in enumerate(mentions):
             end = mentions[index + 1].start() if index + 1 < len(mentions) else len(condition)
             fragment = condition[marker.end():end].strip()
             if index + 1 < len(mentions):
                 join = CLAUSE_JOIN.search(fragment)
                 if join is None:
-                    independent = False
                     break
                 fragment = fragment[:join.start()].strip()
             if not fragment:
-                independent = False
                 break
-            modifiers[int(marker.group(1))] = fragment
-
-    relation_text = None
-    if not independent:
-        modifiers = {subject_id: condition for subject_id in selectors}
-        if len(selectors) > 1:
-            relation_text = condition
-
-    return texts, selectors, modifiers, relation_text
+            modifiers[int(marker[1])] = fragment
+        if len(modifiers) == len(subject_ids):
+            return selectors, [modifiers[subject_id] for subject_id in subject_ids], None
+    return selectors, [condition] * len(subject_ids), condition if len(subject_ids) > 1 else None
 
 
-def build_queries(records, gallery):
-    for index, record in enumerate(records):
-        for key in ("sample_id", "query_image_id", "target_image_id"):
-            if key not in record:
-                raise ValueError(f"Stage-2 row {index}: missing {key}; expected the flattened export format")
+def build_queries(samples, gallery, split):
     gallery_by_id = {row["image_id"]: row for row in gallery}
-    gallery_order = {row["image_id"]: index for index, row in enumerate(gallery)}
     queries = []
-    skipped = Counter()
-    seen = set()
-
-    # Same deterministic convention as the previous pilot: image order, then ID.
-    ordered = sorted(records, key=lambda row: (
-        gallery_order.get(str(row["query_image_id"]), -1), str(row["sample_id"])
-    ))
-    for record in ordered:
-        query_id = str(record["sample_id"])
-        if query_id in seen:
-            raise ValueError(f"Duplicate sample_id: {query_id}")
-        seen.add(query_id)
-        query_image_id = str(record["query_image_id"])
-        target_image_id = str(record["target_image_id"])
-        if query_image_id not in gallery_by_id:
-            skipped["query_outside_gallery"] += 1
-            continue
-        if target_image_id not in gallery_by_id:
-            skipped["target_outside_gallery"] += 1
-            continue
-
-        case = record.get("case_type")
+    for sample in samples:
+        query_id = sample["sample_id"]
+        image_id = sample["query_image_id"]
+        target_id = sample["target_image_id"]
+        if image_id not in gallery_by_id or target_id not in gallery_by_id or image_id == target_id:
+            raise ValueError(f"{query_id}: query and distinct seed must belong to {split}")
+        case = sample["case_type"]
         if case not in CASE_TYPES:
-            raise ValueError(f"{query_id}: unsupported case_type {case!r}")
-        texts, selectors, modifiers, relation_text = query_texts(record)
-        source_subjects = record.get("subjects")
-        if not isinstance(source_subjects, list) or not source_subjects:
-            raise ValueError(f"{query_id}: subjects must be a non-empty list")
-        labels = {}
-        for subject in source_subjects:
-            subject_id = subject["subject_id"]
-            ids = subject.get("identity_ids")
-            if not isinstance(subject_id, int) or subject_id <= 0 or subject_id in labels:
-                raise ValueError(f"{query_id}: invalid or duplicate subject_id {subject_id!r}")
-            if not isinstance(ids, list) or not ids:
-                raise ValueError(f"{query_id}: Subject {subject_id} has no identity_ids")
-            ids = [str(identity_id) for identity_id in ids]
-            if len(ids) != len(set(ids)) or any(not identity_id for identity_id in ids):
-                raise ValueError(f"{query_id}: Subject {subject_id} has invalid identity_ids")
-            labels[subject_id] = ids
-        if set(labels) != set(selectors):
-            raise ValueError(f"{query_id}: subjects do not match final_desc Subject names")
+            raise ValueError(f"{query_id}: unknown RCR case {case!r}")
+        subjects = sample["subjects"]
+        subject_ids = [subject["subject_id"] for subject in subjects]
+        expected = [1] if case in ("INDIVIDUAL", "GROUP") else [1, 2]
+        if subject_ids != expected:
+            raise ValueError(f"{query_id}: {case} requires Subject slots {expected}")
+        target_ids = []
+        for subject in subjects:
+            ids = subject["identity_ids"]
+            if not isinstance(ids, list) or not ids or any(not isinstance(i, str) or not i for i in ids):
+                raise ValueError(f"{query_id}: invalid Subject identity IDs")
+            target_ids.extend(ids)
+        required = set(target_ids)
+        if len(required) != len(target_ids):
+            raise ValueError(f"{query_id}: duplicate Subject identity")
+        if (case == "INDIVIDUAL" and len(required) != 1) or (case == "GROUP" and len(required) < 2):
+            raise ValueError(f"{query_id}: {case} does not match the finalized Subject size")
 
-        # Subject slots come from final_desc, including one slot for a group.
-        # identity_ids are evaluation labels, never person counts for inference.
-        subjects = [{
-            "subject_id": subject_id,
-            "identity_ids": labels[subject_id],
-            "select_text": selector,
-            "modify_text": modifiers[subject_id],
-        } for subject_id, selector in selectors.items()]
-        target_ids = [identity_id for subject in subjects for identity_id in subject["identity_ids"]]
-        if len(target_ids) != len(set(target_ids)):
-            raise ValueError(f"{query_id}: identity_ids overlap between Subjects")
+        # Same projection as RCR split_samples(). Preserve the reviewed order.
+        positives = [i for i in sample["positive_image_ids"] if i in gallery_by_id]
+        if target_id not in positives or image_id in positives or len(set(positives)) != len(positives):
+            raise ValueError(f"{query_id}: invalid split Full positives")
+        for i in (image_id, *positives):
+            if not required.issubset(gallery_by_id[i]["person_ids"]):
+                raise ValueError(f"{query_id}: image {i} lacks a required identity")
 
-        positive_ids = record.get("positive_image_ids")
-        if not isinstance(positive_ids, list) or not positive_ids:
-            raise ValueError(f"{query_id}: positive_image_ids must be a non-empty list")
-        positive_ids = list(dict.fromkeys(str(image_id) for image_id in positive_ids))
-        if target_image_id not in positive_ids or target_image_id == query_image_id:
-            raise ValueError(f"{query_id}: target_image_id must be a non-self positive")
-        full_positive_ids = []
-        for image_id in positive_ids:
-            if image_id == query_image_id:
-                skipped["self_positive_removed"] += 1
-            elif image_id not in gallery_by_id:
-                skipped["positive_outside_gallery"] += 1
-            else:
-                full_positive_ids.append(image_id)
-
-        expected_ids = set(target_ids)
-        for image_id in (query_image_id, *full_positive_ids):
-            if not expected_ids.issubset(gallery_by_id[image_id]["person_ids"]):
-                raise ValueError(f"{query_id}: image {image_id} does not contain all target identities")
-
+        selectors, modifiers, relation = query_texts(sample, subject_ids)
         queries.append({
             "query_idx": len(queries),
             "query_id": query_id,
-            "image_id": query_image_id,
-            "path": gallery_by_id[query_image_id]["path"],
-            "target_image_id": target_image_id,
-            "text": texts["final_instruction"],
-            "final_desc": texts["final_desc"],
-            "final_change": texts["final_change"],
+            "image_id": image_id,
+            "path": gallery_by_id[image_id]["path"],
+            "target_image_id": target_id,
+            "source_split": split.upper(),
             "case": case,
-            "subjects": subjects,
-            "relation_text": relation_text,
+            "text": sample["final_instruction"],
+            "final_desc": sample["final_desc"],
+            "final_change": sample["final_change"],
+            "subjects": [
+                {
+                    "subject_id": subject["subject_id"],
+                    "identity_ids": subject["identity_ids"],
+                    "select_text": select,
+                    "modify_text": modify,
+                }
+                for subject, select, modify in zip(subjects, selectors, modifiers, strict=True)
+            ],
+            "relation_text": relation,
             "target_ids": target_ids,
-            "full_positive_ids": full_positive_ids,
+            "full_positive_ids": positives,
         })
+    return queries
 
-    if not queries:
-        raise ValueError("No Stage-2 queries belong to the gallery")
-    return queries, skipped
+
+def import_final(final_dir, root):
+    source = json.loads((final_dir / "manifest.json").read_text(encoding="utf-8"))
+    if source.get("partial") is not False or not source.get("version"):
+        raise ValueError("Expected a complete, versioned RCR final export")
+    samples = index_unique(load_jsonl(final_dir / "samples.jsonl"), "sample_id")
+    images = index_unique(load_jsonl(final_dir / "images.jsonl"), "image_id")
+    gallery = index_unique(load_jsonl(final_dir / "gallery.jsonl"), "image_id")
+    if gallery.keys() != images.keys():
+        raise ValueError("RCR gallery must contain every registered image exactly once")
+
+    by_split = {split: [] for split in SPLITS}
+    for image_id in gallery:
+        path = PurePosixPath(images[image_id]["path"])
+        if path.is_absolute() or len(path.parts) < 2 or ".." in path.parts:
+            raise ValueError(f"Invalid RCR image path: {path}")
+        if path.parts[0] in by_split:
+            by_split[path.parts[0]].append((image_id, path))
+    eligible = {image_id for rows in by_split.values() for image_id, _ in rows}
+    identities = defaultdict(set)
+    for head in load_jsonl(final_dir / "head_boxes.jsonl"):
+        if head["image_id"] in eligible:
+            identities[head["image_id"]].add(head["identity_id"])
+
+    data = root / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "protocol": DATA_PROTOCOL,
+        "rcr_version": source["version"],
+        "rcr_gallery_ids_sha256": canonical_hash(list(gallery)),
+        "splits": {},
+    }
+    seen = set()
+    with TemporaryDirectory(prefix=".rcr-import-", dir=data) as temporary:
+        staged_root = Path(temporary)
+        for split in SPLITS:
+            split_path = final_dir / "splits" / f"{split}.txt"
+            sample_ids = split_path.read_text(encoding="utf-8").split()
+            if (
+                not sample_ids
+                or len(sample_ids) != source["splits"].get(split)
+                or len(set(sample_ids)) != len(sample_ids)
+                or seen.intersection(sample_ids)
+                or not set(sample_ids) <= samples.keys()
+            ):
+                raise ValueError(f"Invalid RCR {split} split: {split_path}")
+            seen.update(sample_ids)
+            rows = []
+            for image_id, path in by_split[split]:
+                rows.append({
+                    "gallery_idx": len(rows),
+                    "image_id": image_id,
+                    "path": str(PurePosixPath("data/gallery") / path),
+                    "source_split": split.upper(),
+                    "person_ids": sorted(identities[image_id]),
+                })
+            if len(rows) < 2:
+                raise ValueError(f"{split}: expected at least two gallery images")
+            queries = build_queries([samples[i] for i in sample_ids], rows, split)
+            staged = staged_root / "data" / split
+            staged.mkdir(parents=True)
+            write_jsonl(staged / "gallery.jsonl", rows)
+            write_jsonl(staged / "queries.jsonl", queries)
+            counts = Counter(query["case"] for query in queries)
+            metadata["splits"][split] = {
+                "num_gallery": len(rows),
+                "num_queries": len(queries),
+                "case_counts": {case: counts[case] for case in CASE_TYPES},
+                "fingerprint": manifest_fingerprint(staged_root, split),
+            }
+
+        # Publish the manifest last. Readers reject mixed-generation split files.
+        marker = staged_root / "manifest.json"
+        marker.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+        with cache_lock(data):
+            for split in SPLITS:
+                (data / split).mkdir(exist_ok=True)
+                for name in ("gallery.jsonl", "queries.jsonl"):
+                    (staged_root / "data" / split / name).replace(data / split / name)
+            marker.replace(data / "manifest.json")
+    return metadata
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--annotations", type=Path, default=ANNOTATIONS,
-                        help="Flattened Stage-2 JSONL input (a .txt JSONL file is also accepted).")
-    parser.add_argument("--skip-image-files", action="store_true",
-                        help="Build manifests from metadata without requiring local image files.")
+    parser.add_argument("--rcr-final-dir", type=Path, required=True, help="RCR dataset/data/final directory")
     args = parser.parse_args()
-    for path in (IMAGES, args.annotations, PIPA_INDEX):
-        if not path.is_file():
-            raise FileNotFoundError(path)
-    if not args.skip_image_files and not GALLERY_DIR.is_dir():
-        raise FileNotFoundError(f"{GALLERY_DIR} must be a directory or directory symlink")
-
-    images = read_jsonl(IMAGES)
-    if len({str(image["image_id"]) for image in images}) != len(images):
-        raise ValueError("Duplicate image_id in images.jsonl")
-    identities_by_image = load_identity_index(PIPA_INDEX)
-    gallery_images = select_gallery_images(images)
-    if not gallery_images:
-        raise ValueError("No TRAIN/VAL/TEST images found in images.jsonl")
-
-    gallery = []
-    for gallery_idx, image in enumerate(gallery_images):
-        image_id = str(image["image_id"])
-        file_name = Path(image["relative_path"]).name
-        if not args.skip_image_files and not (GALLERY_DIR / file_name).is_file():
-            raise FileNotFoundError(f"Missing gallery image: {GALLERY_DIR / file_name}")
-        person_ids = identities_by_image.get(image_id, [])
-        if not person_ids:
-            raise ValueError(f"No identity annotation for gallery image: {image_id}")
-        gallery.append({"gallery_idx": gallery_idx, "image_id": image_id,
-                        "path": f"data/gallery/{file_name}", "person_ids": person_ids,
-                        "source_split": image["source_split"]})
-
-    queries, skipped = build_queries(read_jsonl(args.annotations), gallery)
-    write_jsonl(GALLERY_OUT, gallery)
-    write_jsonl(QUERIES_OUT, queries)
-    cases = Counter(query["case"] for query in queries)
-    print(f"CPR data prepared: {len(gallery):,} gallery images, {len(queries):,} queries")
-    image_counts = Counter(row["source_split"] for row in gallery)
-    for split in GALLERY_SPLITS:
-        print(f"Gallery {split:16s}: {image_counts[split]:,}")
-    for case in CASE_TYPES:
-        print(f"{case:24s}: {cases[case]:,}")
-    for reason, count in sorted(skipped.items()):
-        print(f"{reason:24s}: {count:,}")
-    if args.skip_image_files:
-        print("Image files: skipped by request")
-    print(f"Saved: {GALLERY_OUT}\nSaved: {QUERIES_OUT}")
+    metadata = import_final(args.rcr_final_dir.expanduser(), ROOT)
+    print(f"Imported RCR {metadata['rcr_version']}")
+    for split, info in metadata["splits"].items():
+        print(f"{split}: {info['num_queries']:,} queries, {info['num_gallery']:,} images")
 
 
 if __name__ == "__main__":

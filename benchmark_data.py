@@ -23,19 +23,49 @@ GALLERY_ENV = "CPR_GALLERY_SOURCE"
 CANONICAL_GALLERY_PREFIX = ("data", "gallery")
 
 
-def manifest_fingerprint(repo_root: Path) -> dict[str, str]:
-    """Identify the exact ordered manifests used by scores and result tables."""
+DATA_PROTOCOL = "rcr-final-val-test-v1"
+SPLITS = ("val", "test")
+CASE_TYPES = ("INDIVIDUAL", "GROUP", "DUAL", "RELATIONAL")
+
+
+def split_paths(repo_root: Path, split: str = "test") -> tuple[Path, Path]:
+    if split not in SPLITS:
+        raise ValueError(f"Unsupported benchmark split: {split!r}")
+    directory = repo_root / "data" / split
+    return directory / "gallery.jsonl", directory / "queries.jsonl"
+
+
+def manifest_fingerprint(repo_root: Path, split: str = "test") -> dict[str, str]:
+    """Identify the exact ordered gallery and query views used by a score matrix."""
+    return manifest_file_fingerprint(*split_paths(repo_root, split))
+
+
+def manifest_file_fingerprint(gallery_path: Path, query_path: Path) -> dict[str, str]:
     result = {}
-    for name in ("gallery", "queries"):
+    for name, path in (("gallery", gallery_path), ("queries", query_path)):
         digest = hashlib.sha256()
-        with (repo_root / "data" / f"{name}.jsonl").open("rb") as handle:
+        with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
         result[f"{name}_sha256"] = digest.hexdigest()
     return result
 
 
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+def verify_manifest(repo_root: Path, split: str) -> dict:
+    """Accept only a complete split published by prepare_data.py."""
+    try:
+        metadata = json.loads((repo_root / "data" / "manifest.json").read_text(encoding="utf-8"))
+        if metadata["protocol"] != DATA_PROTOCOL or set(metadata["splits"]) != set(SPLITS):
+            raise ValueError("Dataset uses a different benchmark protocol")
+        info = metadata["splits"][split]
+        if info["fingerprint"] != manifest_fingerprint(repo_root, split):
+            raise ValueError(f"{split} manifest files differ from the finalized import")
+        return info
+    except (FileNotFoundError, KeyError) as error:
+        raise ValueError("Import both RCR splits with prepare_data.py --rcr-final-dir first") from error
+
+
+def load_jsonl(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as handle:
         for line_no, line in enumerate(handle, 1):
@@ -121,7 +151,7 @@ def _kaggle_candidates(relative_paths: Sequence[Path]) -> list[Path]:
         return []
 
     candidates: list[Path] = [
-        kaggle_input / "cir-data" / "data" / "raw" / "images" / "train",
+        kaggle_input / "cir-data" / "data" / "raw" / "images",
         kaggle_input / "cir-data" / "gallery",
         kaggle_input / "cir-data" / "data" / "gallery",
     ]
@@ -210,6 +240,7 @@ def ensure_gallery_layout(
     gallery_rows: Sequence[dict[str, Any]] | None = None,
     manifest_path: Path | None = None,
     repair: bool = True,
+    source_root: Path | None = None,
 ) -> Path:
     """Return a fully validated gallery root and repair a stale local link.
 
@@ -220,12 +251,16 @@ def ensure_gallery_layout(
     """
 
     repo_root = Path(repo_root).resolve()
-    manifest = manifest_path or (repo_root / "data" / "gallery.jsonl")
-    rows = list(gallery_rows) if gallery_rows is not None else _read_jsonl(manifest)
+    if gallery_rows is not None:
+        rows = list(gallery_rows)
+    elif manifest_path is not None:
+        rows = load_jsonl(manifest_path)
+    else:
+        rows = [row for split in SPLITS for row in load_jsonl(split_paths(repo_root, split)[0])]
     relative_paths = _relative_paths(rows)
     gallery_link = repo_root / "data" / "gallery"
 
-    if _root_has(gallery_link, _probe_paths(relative_paths)):
+    if source_root is None and _root_has(gallery_link, _probe_paths(relative_paths)):
         missing = _missing(gallery_link, relative_paths, limit=1)
         if not missing:
             return gallery_link.resolve()
@@ -237,7 +272,15 @@ def ensure_gallery_layout(
         except OSError:
             current_target = "<unresolvable symlink>"
 
-    discovered = _discover_gallery_root(relative_paths)
+    if source_root is not None:
+        discovered = source_root.expanduser().resolve()
+        missing = _missing(discovered, relative_paths, limit=1)
+        if missing:
+            raise FileNotFoundError(f"Gallery source is missing {discovered / missing[0]}")
+        if discovered == gallery_link.resolve():
+            return discovered
+    else:
+        discovered = _discover_gallery_root(relative_paths)
     if discovered is None:
         first_relative = relative_paths[0]
         current = gallery_link / first_relative

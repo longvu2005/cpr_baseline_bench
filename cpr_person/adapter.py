@@ -6,7 +6,8 @@ import subprocess
 from dataclasses import dataclass
 
 from . import PROTOCOL_VERSION
-from .cache import ROOT, resolve
+from .cache import ROOT, resolve, sha256_file
+from .rcr_cache import rcr_index_path
 from .detection import get_detections, protocol_config, detection_array_sha256
 from .localization import get_localization
 
@@ -25,7 +26,7 @@ class PersonContext:
     def metadata(self):
         cfg = protocol_config()
         from .cache import canonical_hash
-        return {"version": PROTOCOL_VERSION, "detector": cfg["detector"],
+        return {"version": PROTOCOL_VERSION, "detector": self.detections.fingerprint["protocol"],
                 "selector": cfg["selector"], "image": cfg["image"],
                 "detections_fingerprint": self.detections.fingerprint,
                 "localization_fingerprint": self.localization.fingerprint,
@@ -81,6 +82,10 @@ def expand_targets(targets, localization):
 
 
 def prepare_shared(force=False):
+    if rcr_index_path() is not None:
+        from .prepare import prepare
+        prepare(force)
+        return
     from .runtime import detector_python, detector_env
     python = detector_python()
     command = [python, "-m", "cpr_person.prepare"]
@@ -90,17 +95,16 @@ def prepare_shared(force=False):
 
 
 def require_person_branch(run, gallery_manifest, query_manifest):
-    from .cache import sha256_file
-    protocol = run.get("shared_person_protocol", {})
-    if (protocol.get("version") != PROTOCOL_VERSION
-            or protocol.get("detections_fingerprint", {}).get("gallery_manifest_sha256") != sha256_file(gallery_manifest)
-            or protocol.get("localization_fingerprint", {}).get("queries_manifest_sha256") != sha256_file(query_manifest)):
+    protocol.require_aligned_run(run, "groundingdino_clipreid_set")
+    provenance = run["shared_person_protocol"]
+    if (provenance.get("version") != PROTOCOL_VERSION
+            or provenance.get("detections_fingerprint", {}).get("gallery_manifest_sha256") != sha256_file(gallery_manifest)
+            or provenance.get("localization_fingerprint", {}).get("queries_manifest_sha256") != sha256_file(query_manifest)):
         raise RuntimeError("Inherited ReID scores have an old/different person protocol or manifest; rerun S5")
-    return protocol
+    return provenance
 
 
 def require_manifest_branch(run, gallery_manifest, query_manifest):
-    from .cache import sha256_file
     expected={"gallery_sha256":sha256_file(gallery_manifest),"queries_sha256":sha256_file(query_manifest)}
     if not isinstance(run,dict) or run.get("data_fingerprint")!=expected:
         raise RuntimeError("Source scores lack the same complete manifest identity; rerun their method through run_baseline.py")

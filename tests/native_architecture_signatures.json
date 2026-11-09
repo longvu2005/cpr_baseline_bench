@@ -5,9 +5,9 @@
     "compute_component_person_scores": "4e92b5123068671ba94eaaba5e80d0c498c48562f2075d06a4e09793d2486981"
   },
   "methods/published/02_fafa_setmatch/run.py": {
-    "load_fafa": "2939e219a9b048f90b824b5f10e2836e75e7ddefd1bafd492adcd82b7c0d7595",
+    "load_fafa": "845c3af460b6e0e7895c565aa55e0418c70b6da4f606a46734359095e02d4e1b",
     "compute_component_person_scores": "a28b9fcfb50901007efb73bd9b4d3dce209ecf3f70b4aa29d3383f9e09192eb2",
-    "encode_query_targets": "b9466d58d03a1522c855374cb11e9bf5b3df751ad29295555896b6d501313494"
+    "encode_query_targets": "2d6494f4abcdfd3e68c4448bc4da32efc4f5cc219e378e429833386a4668ad78"
   },
   "methods/published/03_instruct_reid_setmatch/run.py": {
     "load_official_instruct_model": "c2a450e042b0f6563b70bcea053910e58ed0cfee782f4deabda985780093a64f",
@@ -35,7 +35,7 @@
     "compute_clip_text_scores": "ae471d1d0ec568f4e6398b1a56b9ad6eec2d852bf4266a693a48f89ef2a25c4d"
   },
   "methods/simple/09_reid_qwen_proxy/run.py": {
-    "build_validation_proxy_scores": "d74699289e212ee11841fbb33b8f76418eb5bb63ee843757f2199e998ea13711"
+    "build_validation_proxy_scores": "e4552388e0a8c5b8fff84ddbaaee966a14d2cffceb70b4a17e921203a1a6d736"
   },
   "methods/simple/10_person_compose_setmatch/run.py": {
     "compose_query_set": "11f9135f7f7636ea0cf172ae6c92ca41c60906d53911d4661bd93f69831dba3a",

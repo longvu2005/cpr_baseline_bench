@@ -88,7 +88,7 @@ The final permutation is converted to strictly descending rank-derived numerical
 - every top-K candidate remains in the top-K block;
 - images outside top-K keep exactly their original first-stage relative order;
 - the evaluator still receives one finite full `queries × gallery` score matrix;
-- self-image exclusion remains the evaluator's responsibility.
+- the reference is excluded before top-K and gets a finite placeholder in the score matrix.
 
 ## Validation-only hyperparameters
 
@@ -116,23 +116,23 @@ Ties are resolved by:
 Separate manifests are required:
 
 ```text
-data/validation/gallery.jsonl
-data/validation/queries.jsonl
+data/val/gallery.jsonl
+data/val/queries.jsonl
 ```
 
-S11 refuses to tune if validation manifests are byte-identical to the main evaluation manifests.
+S11 requires the canonical val and test manifests from the same RCR import.
 
 ## First-stage requirement
 
 S11 deliberately treats S6 as a completed first-stage system. Run S6 first:
 
 ```bash
-python run_baseline.py groundingdino_clipreid_set_text
+python run_baseline.py groundingdino_clipreid_set_text --rcr-detection-cache /path/to/rcr/cache/detections
 ```
 
 S11 then reuses:
 
-- main S6 `scores.npy`;
+- test S6 `scores.npy`;
 - S6 validation ReID and CLIP-text branch caches;
 - S6 validation-selected alpha to reconstruct the exact validation S6 first-stage scores.
 
@@ -143,7 +143,7 @@ This avoids silently training or changing the first-stage retriever inside S11.
 Because MLLM verification is expensive, S11 caches Qwen scores.
 
 Validation computes Qwen only for the maximum configured K once, then reuses subsets for all smaller K values.
-Main inference computes only the selected K.
+Test inference computes only the selected K.
 
 Cache fingerprints include:
 
@@ -164,8 +164,8 @@ No model download occurs in `run.py`.
 Recommended order:
 
 ```bash
-python run_baseline.py groundingdino_clipreid_set_text
-python run_baseline.py retrieve_qwen25vl_rerank
+python run_baseline.py groundingdino_clipreid_set_text --rcr-detection-cache /path/to/rcr/cache/detections
+python run_baseline.py retrieve_qwen25vl_rerank --rcr-detection-cache /path/to/rcr/cache/detections
 ```
 
 ## Compute

@@ -35,16 +35,20 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from evaluate import full_map
+from cpr_person.validation import verify_tuning_manifests
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 from cpr_person.adapter import matching_metadata, manifest_identity
 from cpr_person.adapter import require_person_branch
 from cpr_person.adapter import require_manifest_branch
+from cpr_person.clip_model import load_openai_clip, verify_rcr_scene_clip
+from cpr_person.protocol import require_aligned_run
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "reid_set_qwen_edit_proxy"
 ADAPTER_VERSION = "2026-08-13-v1-hybrid-val-fullmap"
 BRANCH_SCORE_SCHEMA = 1
-ALPHA_SCHEMA = 1
+ALPHA_SCHEMA = 2
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -210,55 +214,7 @@ def build_gallery_index(gallery: Sequence[dict[str, Any]]) -> dict[Any, int]:
     return index
 
 
-def ensure_validation_split(main_gallery_manifest: Path, main_query_manifest: Path, val_gallery_manifest: Path, val_query_manifest: Path) -> None:
-    from cpr_person.validation import ensure_separate_queries
-    ensure_separate_queries(main_query_manifest, val_query_manifest)
-    for path in (val_gallery_manifest, val_query_manifest):
-        if not path.is_file():
-            raise FileNotFoundError(
-                f"Missing validation manifest: {rel(path)}. "
-                "S9 requires a separate validation split for alpha selection."
-            )
-    if sha256_file(main_gallery_manifest) == sha256_file(val_gallery_manifest) and sha256_file(main_query_manifest) == sha256_file(val_query_manifest):
-        raise RuntimeError(
-            "Validation manifests are byte-identical to the main evaluation manifests. "
-            "Refusing to tune alpha on the evaluation set."
-        )
-
-
-def measure(scores: np.ndarray, positives: set[int]) -> float:
-    order = np.argsort(-scores)
-    rel_mask = np.isin(order, list(positives))
-    ranks = np.flatnonzero(rel_mask) + 1
-    if len(ranks) == 0:
-        raise ValueError("No positive found for a validation query.")
-    return float(np.mean(np.arange(1, len(ranks) + 1) / ranks))
-
-
-def full_map(scores: np.ndarray, gallery: Sequence[dict[str, Any]], queries: Sequence[dict[str, Any]]) -> float:
-    if scores.shape != (len(queries), len(gallery)):
-        raise ValueError("Validation score matrix shape mismatch")
-    gallery_index = build_gallery_index(gallery)
-    aps: list[float] = []
-    for qi, query in enumerate(queries):
-        image_id = query.get("image_id")
-        if image_id not in gallery_index:
-            raise ValueError(f"Validation query {query.get('query_id', qi)} image missing from gallery")
-        positive_ids = query.get("full_positive_ids")
-        if not isinstance(positive_ids, list) or not positive_ids:
-            raise ValueError(f"Validation query {query.get('query_id', qi)} has no full_positive_ids")
-        s = np.array(scores[qi], copy=True)
-        self_idx = gallery_index[image_id]
-        s[self_idx] = -np.inf
-        positives = {gallery_index[x] for x in positive_ids if x in gallery_index}
-        positives.discard(self_idx)
-        if not positives:
-            raise ValueError(f"Validation query {query.get('query_id', qi)} has no usable Full positives")
-        aps.append(measure(s, positives))
-    return float(np.mean(aps))
-
-
-def select_alpha(*, cfg: dict[str, Any], config_path: Path, main_gallery_manifest: Path, main_query_manifest: Path, val_gallery_manifest: Path, val_query_manifest: Path, val_reid_scores: np.ndarray, val_proxy_scores: np.ndarray, gallery: Sequence[dict[str, Any]], queries: Sequence[dict[str, Any]]) -> tuple[float, dict[str, Any]]:
+def select_alpha(*, cfg: dict[str, Any], config_path: Path, val_gallery_manifest: Path, val_query_manifest: Path, val_reid_scores: np.ndarray, val_proxy_scores: np.ndarray, gallery: Sequence[dict[str, Any]], queries: Sequence[dict[str, Any]]) -> tuple[float, dict[str, Any]]:
     selection = cfg["fusion"]["alpha_selection"]
     result_path = resolve_path(str(selection["result"]))
     grid = [float(x) for x in selection["grid"]]
@@ -269,10 +225,9 @@ def select_alpha(*, cfg: dict[str, Any], config_path: Path, main_gallery_manifes
         raise ValueError("Only tie_break=smallest_alpha is supported")
     expected = {
         "schema": ALPHA_SCHEMA,
+        "selection_split": "val",
         "adapter_version": ADAPTER_VERSION,
         "config_sha256": sha256_file(config_path),
-        "main_gallery_manifest_sha256": sha256_file(main_gallery_manifest),
-        "main_query_manifest_sha256": sha256_file(main_query_manifest),
         "val_gallery_manifest_sha256": sha256_file(val_gallery_manifest),
         "val_query_manifest_sha256": sha256_file(val_query_manifest),
         "val_reid_scores_sha256": sha256_file(resolve_path(str(cfg["cache"]["validation"]["reid_scores"]))),
@@ -335,7 +290,10 @@ def build_validation_proxy_scores(*, cfg: dict[str, Any], config_path: Path, val
     expected_shape = (len(val_queries), len(val_gallery))
     proxy_cfg_path = resolve_path(str(cfg["proxy"]["config"]))
     proxy_cfg = load_yaml(proxy_cfg_path)
+    checkpoint = resolve_path(str(proxy_cfg["retriever"]["checkpoint"]))
+    clip_sha = verify_rcr_scene_clip(checkpoint, proxy_cfg["retriever"]["name"])
     extras = {
+        "scene_clip_sha256": clip_sha,
         "proxy_config_sha256": sha256_file(proxy_cfg_path),
         "generator_repo_id": str(proxy_cfg["generator"]["repo_id"]),
         "generator_revision": str(proxy_cfg["generator"]["revision"]),
@@ -360,14 +318,7 @@ def build_validation_proxy_scores(*, cfg: dict[str, Any], config_path: Path, val
         val_proxy_cfg["cache"]["gallery_features"] = str(cache_cfg["proxy_gallery_features"])
         edited_paths, edited_manifest_path, _edited_meta = s8.generate_or_load_edited_queries(cfg=val_proxy_cfg, config_path=proxy_cfg_path, gallery_manifest=val_gallery_manifest, query_manifest=val_query_manifest, generator_marker=generator_marker, generator_dir=generator_dir, gallery=val_gallery, queries=val_queries, device=device)
 
-        import clip  # imported lazily to keep generator-only steps lighter before CLIP is needed.
-        checkpoint = resolve_path(str(proxy_cfg["retriever"]["checkpoint"]))
-        if not checkpoint.is_file():
-            raise FileNotFoundError(f"Missing CLIP checkpoint: {rel(checkpoint)}")
-        model, preprocess = clip.load(str(checkpoint), device=device, jit=False)
-        model.eval()
-        if device.type != "cuda":
-            model.float()
+        model, preprocess = load_openai_clip(checkpoint, device)
         gallery_cache_fp = s8.clip_gallery_cache_fingerprint(checkpoint, val_gallery_manifest, str(proxy_cfg["retriever"]["name"]))
         gallery_features, _ = s8.clip_gallery_features(model, preprocess, val_gallery, resolve_path(str(cache_cfg["proxy_gallery_features"])), val_proxy_cfg["runtime"], device, gallery_cache_fp)
         query_cache_fp = s8.query_feature_cache_fingerprint(proxy_cfg_path, edited_manifest_path, checkpoint, val_query_manifest)
@@ -408,7 +359,9 @@ def main() -> None:
         selection_cfg = cfg["fusion"]["alpha_selection"]
         val_gallery_manifest = resolve_path(str(selection_cfg["validation"]["gallery_manifest"]))
         val_query_manifest = resolve_path(str(selection_cfg["validation"]["query_manifest"]))
-        ensure_validation_split(main_gallery_manifest, main_query_manifest, val_gallery_manifest, val_query_manifest)
+        validation_fingerprint = verify_tuning_manifests(
+            ROOT, main_gallery_manifest, main_query_manifest, val_gallery_manifest, val_query_manifest
+        )
         val_gallery = load_jsonl(val_gallery_manifest)
         val_queries = load_jsonl(val_query_manifest)
 
@@ -422,13 +375,14 @@ def main() -> None:
 
     main_person_protocol = require_person_branch(
         read_json(resolve_path(cfg["base_set"]["main_run"])), main_gallery_manifest, main_query_manifest)
-    require_manifest_branch(read_json(resolve_path(cfg["proxy"]["main_run"])),
-                            main_gallery_manifest, main_query_manifest)
+    proxy_run = read_json(resolve_path(cfg["proxy"]["main_run"]))
+    require_manifest_branch(proxy_run, main_gallery_manifest, main_query_manifest)
+    require_aligned_run(proxy_run, cfg["proxy"]["method"])
     val_reid_scores = build_validation_reid_scores(cfg=cfg, config_path=config_path, val_gallery_manifest=val_gallery_manifest, val_query_manifest=val_query_manifest, val_gallery=val_gallery, val_queries=val_queries, s5=s5, tracker=tracker)
     val_proxy_scores = build_validation_proxy_scores(cfg=cfg, config_path=config_path, val_gallery_manifest=val_gallery_manifest, val_query_manifest=val_query_manifest, val_gallery=val_gallery, val_queries=val_queries, s8=s8, tracker=tracker)
 
     with tracker.phase("Select alpha on validation Full-mAP"):
-        alpha, alpha_payload = select_alpha(cfg=cfg, config_path=config_path, main_gallery_manifest=main_gallery_manifest, main_query_manifest=main_query_manifest, val_gallery_manifest=val_gallery_manifest, val_query_manifest=val_query_manifest, val_reid_scores=val_reid_scores, val_proxy_scores=val_proxy_scores, gallery=val_gallery, queries=val_queries)
+        alpha, alpha_payload = select_alpha(cfg=cfg, config_path=config_path, val_gallery_manifest=val_gallery_manifest, val_query_manifest=val_query_manifest, val_reid_scores=val_reid_scores, val_proxy_scores=val_proxy_scores, gallery=val_gallery, queries=val_queries)
         tracker.log(f"selected_alpha={alpha:.2f} best_full_map={alpha_payload.get('best_full_map'):.6f}")
 
     with tracker.phase("Fuse main branch scores"):
@@ -447,11 +401,13 @@ def main() -> None:
         output_dir = resolve_path(str(cfg["output"]["dir"]))
         run_path = output_dir / "run.json"
         payload = {
+            "scene_clip_sha256": proxy_run["scene_clip_sha256"],
             "shared_person_protocol": main_person_protocol,
             "setmatch": matching_metadata(load_yaml(resolve_path(cfg["base_set"]["config"])), score_space="cosine"),
             "method": cfg["method"],
             "display_name": cfg["display_name"],
             "group": cfg["group"],
+            "validation_fingerprint": validation_fingerprint,
             "cpr_supervision": cfg["cpr_supervision"],
             "formula": cfg["fusion"]["formula"],
             "alpha": alpha,

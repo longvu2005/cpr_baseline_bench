@@ -1,4 +1,4 @@
-"""Prepare the one shared detector and CLIP selector, without a ReID download."""
+"""Prepare the shared CLIP selector for the configured detection source."""
 from __future__ import annotations
 
 import argparse
@@ -6,25 +6,37 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .cache import ROOT, resolve
+from .cache import ROOT, cache_lock, resolve
+from .rcr_cache import rcr_index_path
 from .detection import protocol_config
 
 
 def prepare(force=False):
     from . import assets
-    from .tokenizer_runtime import prepare_tokenizer
+    from .clip_model import prepare_openai_clip
+    from .tokenizer_runtime import prepare_tokenizer, validate_tokenizer
     cfg = protocol_config()
     d, s = cfg["detector"], cfg["selector"]
-    assets.prepare_detector(d, force)
-    assets.download_stream(url=s["checkpoint_url"], path=resolve(s["checkpoint"]), force=force,
-                           expected_sha256=s["checkpoint_sha256"])
-    prepare_tokenizer(s,force)
+    if rcr_index_path() is None:
+        assets.prepare_detector(d, force)
+    prepare_openai_clip(s["model"], s["checkpoint"], force)
+    try:
+        if not force:
+            validate_tokenizer(s)
+            return
+    except RuntimeError:
+        pass
+    with cache_lock(resolve(s["tokenizer_runtime_dir"]).with_name(".selector-tokenizer")):
+        prepare_tokenizer(s, force)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
+    if rcr_index_path() is not None:
+        prepare(args.force)
+        return
     from .runtime import detector_python, detector_env
     python = detector_python()
     if Path(sys.executable).absolute() != Path(python).absolute():

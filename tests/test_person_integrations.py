@@ -126,7 +126,8 @@ def test_s5_s6_s9_share_actual_cached_context_and_score_contract(toy_protocol,tm
         score_cache=tmp_path/"s6.npy",device="cpu")
     np.testing.assert_array_equal(s6,got)
     assert len(calls)==1 and stats["shared_person_protocol"]["version"]
-    require_person_branch({"shared_person_protocol":person.metadata()},gm,qm)
+    with pytest.raises(RuntimeError, match="RCR detection index"):
+        require_person_branch({"shared_person_protocol":person.metadata()},gm,qm)
     with pytest.raises(RuntimeError):require_person_branch({"shared_person_protocol":{}},gm,qm)
     basecfg=tmp_path/"base.yaml";basecfg.write_text(yaml.safe_dump(bcfg))
     nine=function("methods/simple/09_reid_qwen_proxy/run.py","build_validation_reid_scores", {
@@ -149,16 +150,20 @@ def test_expanded_members_keep_native_subject_texts(toy_protocol):
     assert [t.modify_text for t in expanded[2]]==["subject-0","subject-1","subject-2"]
 
 
-def test_official_evaluator_and_table_builder_accept_adapter_scores(toy_protocol,tmp_path,monkeypatch):
+def test_official_evaluator_and_table_builder_accept_adapter_scores(
+    toy_protocol, rcr_detection_index, tmp_path, monkeypatch, write_benchmark_views,
+):
     cfg,gallery,queries,gm,qm,calls,selector=toy_protocol
-    person=load_person_context(gallery,queries,gm,qm,"cpu")
-    data=tmp_path/"data";data.mkdir()
+    rcr_detection_index(["a", "b"], [[0, 0, 20, 30], [20, 0, 40, 30]], [0, 2, 2])
+    data = tmp_path / "data" / "test"
     gallery=[{**g,"person_ids":["id"]} for g in gallery]
     queries=[{**q,"query_id":str(i),"target_ids":["id"],
               "full_positive_ids":["b" if q["image_id"]=="a" else "a"],"case":"GROUP"} for i,q in enumerate(queries)]
-    for name,rows in [("gallery",gallery),("queries",queries)]:
-        (data/f"{name}.jsonl").write_text("".join(json.dumps(r)+"\n" for r in rows))
+    write_benchmark_views(tmp_path, gallery, queries)
     person=load_person_context(gallery,queries,data/"gallery.jsonl",data/"queries.jsonl","cpu")
+    require_person_branch(
+        {"shared_person_protocol": person.metadata()}, data / "gallery.jsonl", data / "queries.jsonl",
+    )
     runs,outputs=tmp_path/"runs",tmp_path/"outputs"
     run_dir=runs/"fafa_setmatch";run_dir.mkdir(parents=True)
     np.save(run_dir/"scores.npy",np.array([[1,.2],[.3,1],[1,.1]],np.float32))
@@ -166,7 +171,7 @@ def test_official_evaluator_and_table_builder_accept_adapter_scores(toy_protocol
     # point at the tiny test fixture. Positive sets and formulas are untouched.
     (run_dir/"run.json").write_text(json.dumps({"method":"fafa_setmatch","higher_is_better":True,
         "shared_person_protocol":person.metadata(),"data_fingerprint":manifest_fingerprint(tmp_path)}))
-    for key,val in {"ROOT":tmp_path,"DATA_DIR":data,"RUNS_DIR":runs,"OUTPUTS_DIR":outputs}.items():
+    for key,val in {"ROOT":tmp_path,"RUNS_DIR":runs,"OUTPUTS_DIR":outputs}.items():
         monkeypatch.setattr(evaluate,key,val)
     monkeypatch.setattr("sys.argv",["evaluate.py","--method","fafa_setmatch"])
     evaluate.main()
@@ -174,7 +179,7 @@ def test_official_evaluator_and_table_builder_accept_adapter_scores(toy_protocol
     assert metrics["overall"]["Full-mAP"]==1.0
     monkeypatch.setattr(build_tables,"ROOT",tmp_path);monkeypatch.setattr(build_tables,"OUTPUTS_DIR",outputs)
     result=build_tables.collect_results()
-    assert len(result)==1 and result[0]["protocol"]=="Shared person HF v2"
+    assert len(result)==1 and result[0]["protocol"]=="Shared RCR boxes"
 
 
 def test_all_configs_and_execution_paths_are_integrated():
@@ -196,6 +201,9 @@ def test_all_configs_and_execution_paths_are_integrated():
             assert "require_shared_context(" in source and "require_cache=True" in source
             assert "load_person_context" in source and "score_feature_sets(" in source
             assert "shared_person_protocol" in source
+            continue
+        if method == "retrieve_qwen25vl_rerank":
+            assert "require_person_branch(" in source and "shared_person_protocol" in source
             continue
         if method not in {"groundingdino_clipreid_set_text","reid_set_qwen_edit_proxy"}:
             assert "load_person_context(" in source

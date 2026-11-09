@@ -12,11 +12,12 @@ from scipy.optimize import linear_sum_assignment
 
 from . import PROTOCOL_VERSION
 from .cache import ROOT, StageCache, cache_lock, read_json, resolve, sha256_file
+from .clip_model import load_openai_clip
 from .detection import BoxCandidate, crop_person, image_path, protocol_config, read_rgb, detection_array_sha256
 
 
 def select_subject_members(similarity, candidates, *, threshold=0.20, margin=0.03, max_members=5):
-    sim = np.asarray(similarity, dtype=np.float64)
+    sim = np.asarray(similarity)
     if (sim.ndim != 2 or not np.isfinite(sim).all() or sim.shape[0] < 1
             or sim.shape[1] < sim.shape[0] or len(candidates) != sim.shape[1]
             or not np.isfinite([threshold, margin]).all() or margin < 0 or max_members < 1):
@@ -73,24 +74,17 @@ class ClipSelector:
         import clip
         import torch
         self.clip, self.torch, self.device = clip, torch, device
-        self.model, self.preprocess = clip.load(str(resolve(cfg["checkpoint"])), device=device, jit=False)
-        self.model.eval()
-        if str(device).startswith("cpu"):
-            self.model.float()
+        self.model, self.preprocess = load_openai_clip(resolve(cfg["checkpoint"]), device)
 
     def images(self, images):
-        with self.torch.no_grad():
+        with self.torch.inference_mode():
             tensors = self.torch.stack([self.preprocess(image) for image in images]).to(self.device)
-            feat = self.model.encode_image(tensors).float()
-            feat /= feat.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-            return feat.cpu().numpy()
+            return self.torch.nn.functional.normalize(self.model.encode_image(tensors).float(), dim=-1)
 
     def texts(self, texts):
-        with self.torch.no_grad():
+        with self.torch.inference_mode():
             tokens = self.clip.tokenize(list(texts), truncate=True).to(self.device)
-            feat = self.model.encode_text(tokens).float()
-            feat /= feat.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-            return feat.cpu().numpy()
+            return self.torch.nn.functional.normalize(self.model.encode_text(tokens).float(), dim=-1)
 
 
 def localize_queries(queries, gallery, detections, selector_cfg, selector):
@@ -122,6 +116,8 @@ def localize_queries(queries, gallery, detections, selector_cfg, selector):
         if text_key not in text_features:
             text_features[text_key] = selector.texts(texts)
         sim = text_features[text_key] @ crop_features[feature_key].T
+        if not isinstance(sim, np.ndarray):
+            sim = sim.cpu().numpy()
         members, anchors = select_subject_members(sim, candidates,
             threshold=float(selector_cfg["membership_threshold"]), margin=float(selector_cfg["membership_margin"]),
             max_members=int(selector_cfg["max_members_per_subject"]))

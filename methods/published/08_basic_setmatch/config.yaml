@@ -67,7 +67,7 @@ localization:
     tokenize_truncate: true
     assignment: hungarian_anchors_then_disjoint_expansion
     tokenizer_packages:
-      ftfy: '5.8'
+      ftfy: '6.3.1'
       wcwidth: 0.2.13
     tokenizer_runtime_dir: checkpoints/clip/selector_tokenizer
 query_text_adapter:
@@ -92,8 +92,8 @@ runtime:
 cache:
   root: runs/basic_setmatch/cache
 data:
-  gallery_manifest: data/gallery.jsonl
-  query_manifest: data/queries.jsonl
+  gallery_manifest: data/test/gallery.jsonl
+  query_manifest: data/test/queries.jsonl
 output:
   dir: runs/basic_setmatch
 person_protocol: cpr_person/protocol.yaml

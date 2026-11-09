@@ -269,7 +269,7 @@ def test_real_hf_processor_thresholds_and_pixel_conversion(tmp_path):
 
 
 @pytest.mark.parametrize('method', ['fafa_setmatch','structured_caption_retrieval','clip_image'])
-def test_runner_prepares_shared_runtime_only_for_person_methods(tmp_path,monkeypatch,method):
+def test_runner_requires_rcr_index_only_for_person_methods(tmp_path,monkeypatch,method):
     import run_baseline as runner
     directory = tmp_path/'methods'/method
     directory.mkdir(parents=True)
@@ -282,19 +282,27 @@ def test_runner_prepares_shared_runtime_only_for_person_methods(tmp_path,monkeyp
     monkeypatch.setattr(runner,'ensure_gallery_layout',lambda *a,**k:tmp_path/'gallery')
     monkeypatch.setattr(runner,'describe_gallery_link',lambda *a:'test gallery')
     events = []
-    def detector(**kwargs):
-        assert kwargs['skip_install'];events.append('detector');return '/shared/bin/python'
+    index = tmp_path / "index.pt"
+    monkeypatch.delenv("CPR_RCR_DETECTION_CACHE", raising=False)
+
+    def detection_index(*, required):
+        assert required
+        events.append("rcr index")
+        return index
+
     def native(**kwargs):
-        events.append('native')
+        events.append("native")
         if method in PERSON_METHODS:
-            assert __import__('os').environ['CPR_DETECTOR_PYTHON'] == '/shared/bin/python'
-        return '/native/bin/python',{}
-    monkeypatch.setattr(runtime,'prepare_runtime',detector)
+            assert __import__("os").environ["CPR_RCR_DETECTION_CACHE"] == str(index)
+        return "/native/bin/python", {}
+
+    monkeypatch.setattr(runner, "rcr_index_path", detection_index)
+    monkeypatch.setattr(runtime, "prepare_runtime", lambda **kw: pytest.fail("must reuse RCR boxes"))
     monkeypatch.setattr('baseline_environment.prepare_method_python',native)
     monkeypatch.setattr(runner.subprocess,'run',lambda *a,**k:None)
     monkeypatch.setattr(runner,'run_checkpoint_step',lambda *a,**k:False)
     runner.run_pipeline(runner.MethodSpec(method,directory),False,True)
-    assert events == (['detector','native'] if method in PERSON_METHODS else ['native'])
+    assert events == (["rcr index", "native"] if method in PERSON_METHODS else ["native"])
 
 
 def test_worker_builds_gallery_then_cache_hit_avoids_forward(toy_protocol,monkeypatch):

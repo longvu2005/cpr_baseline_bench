@@ -44,8 +44,8 @@ rerank:
   tie_break: smallest_top_k_then_largest_first_stage_weight
   result: runs/retrieve_qwen25vl_rerank/rerank_selection.json
   validation:
-    gallery_manifest: data/validation/gallery.jsonl
-    query_manifest: data/validation/queries.jsonl
+    gallery_manifest: data/val/gallery.jsonl
+    query_manifest: data/val/queries.jsonl
 
 runtime:
   device: cuda
@@ -58,8 +58,9 @@ cache:
   main_verifier: runs/retrieve_qwen25vl_rerank/cache/main_qwen_verifier.npz
 
 data:
-  gallery_manifest: data/gallery.jsonl
-  query_manifest: data/queries.jsonl
+  gallery_manifest: data/test/gallery.jsonl
+  query_manifest: data/test/queries.jsonl
 
 output:
   dir: runs/retrieve_qwen25vl_rerank
+person_protocol: cpr_person/protocol.yaml

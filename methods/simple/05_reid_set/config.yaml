@@ -47,8 +47,8 @@ runtime:
   feature_cache_dtype: float16
   score_feature_chunk_size: 65536
 data:
-  gallery_manifest: data/gallery.jsonl
-  query_manifest: data/queries.jsonl
+  gallery_manifest: data/test/gallery.jsonl
+  query_manifest: data/test/queries.jsonl
 cache:
   detections: runs/groundingdino_clipreid_set/cache/person_detections.npz
   reid_features: runs/groundingdino_clipreid_set/cache/person_features.npy

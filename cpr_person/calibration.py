@@ -15,7 +15,7 @@ def load_rows(path):
 
 
 def freeze(scores_path, query_manifest, gallery_manifest, checkpoint, source_commit, dataset_id,
-           output, *, benchmark_queries="data/queries.jsonl", benchmark_gallery="data/gallery.jsonl", quantile=.01):
+           output, *, benchmark_queries="data/test/queries.jsonl", benchmark_gallery="data/test/gallery.jsonl", quantile=.01):
     ensure_separate_queries(benchmark_queries, query_manifest)
     if not dataset_id.strip() or not 0<=quantile<=1:
         raise ValueError("Need an external dataset ID and a quantile in [0,1]")

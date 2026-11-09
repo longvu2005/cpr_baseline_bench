@@ -55,8 +55,8 @@ cache:
   detections: runs/groundingdino_clipreid_set/cache/person_detections.npz
   target_person_features: runs/adafocal_setmatch/cache/target_person_features.npy
 data:
-  gallery_manifest: data/gallery.jsonl
-  query_manifest: data/queries.jsonl
+  gallery_manifest: data/test/gallery.jsonl
+  query_manifest: data/test/queries.jsonl
 output:
   dir: runs/adafocal_setmatch
 person_protocol: cpr_person/protocol.yaml

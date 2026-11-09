@@ -1,5 +1,5 @@
-# Shared cache consumers and CLIP selector. Detector dependencies live in
-# detector-requirements.txt; native methods keep their own Transformers version.
+# Shared RCR detection index reader and CLIP selector. Native methods
+# install their own Transformers version.
 numpy>=1.24,<2
 Pillow>=9.5
 PyYAML>=6

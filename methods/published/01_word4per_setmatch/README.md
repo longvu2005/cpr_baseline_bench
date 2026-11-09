@@ -9,7 +9,7 @@ This is a benchmark adaptation of native representation/scoring. No evaluation
 identities, positive sets or annotation boxes select people.
 
 ```bash
-python run_baseline.py word4per_setmatch
+python run_baseline.py word4per_setmatch --rcr-detection-cache /path/to/rcr/cache/detections
 ```
 
 Outputs remain `runs/word4per_setmatch/scores.npy` and `run.json`.
@@ -19,6 +19,5 @@ Read [the shared protocol and complete method table](../../../docs/baselines.md)
 for exact thresholds, unmatched references, Kaggle cache inspection/reuse,
 installation, validation, dependencies, calibration and optional native smoke tests.
 
-Shared detection uses the isolated HF Grounding DINO Tiny runtime. See
-[shared detector setup and cache migration](../../../docs/hf_person_detector.md).
-Run through `run_baseline.py` to prepare its interpreter before method assets.
+Shared detection reads RCR's existing `cache/detections/index.pt`.
+See the [benchmark detection setup](../../../docs/baselines.md#detection-and-crop-convention).

@@ -12,9 +12,17 @@ runs/*
 *.npy
 *.npz
 
+# Imported RCR data and generated reports
+data/manifest.json
+data/.lock
+data/.rcr-import-*/
+data/val/
+data/test/
+outputs/
+tables/
+
 # Local gallery images
-data/gallery/*
-!data/gallery/.gitkeep
+/data/gallery
 
 # Python
 __pycache__/
@@ -44,6 +52,8 @@ checkpoints/fafa/runtime_assets_ready.json
 checkpoints/groundingdino/runtime_cache/
 checkpoints/groundingdino/runtime_assets_ready.json
 checkpoints/clip/selector_tokenizer/
+checkpoints/clip/.selector-tokenizer/
+checkpoints/clip/.clip-prepare/
 
 # Isolated Python environments used by run_baseline.py
 .baseline_venvs/

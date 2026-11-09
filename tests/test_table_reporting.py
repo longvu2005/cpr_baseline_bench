@@ -13,7 +13,7 @@ import pytest
 
 import build_tables
 import run_baseline
-from benchmark_data import manifest_fingerprint
+from benchmark_data import DATA_PROTOCOL, manifest_fingerprint
 from cpr_person import PROTOCOL_VERSION
 from cpr_person.protocol import PERSON_METHODS, TEXTFREE_DIAGNOSTIC_METHOD
 
@@ -21,19 +21,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
-def reporting_repo(tmp_path, monkeypatch):
+def reporting_repo(tmp_path, monkeypatch, write_benchmark_views):
     # Copy only reporting code, not adapters, models, images or checkpoints.
     files = ["build_tables.py", "run_baseline.py", "benchmark_data.py",
              "benchmark_progress.py", "prepare_data.py", "cpr_person/__init__.py",
-             "cpr_person/protocol.py", "cpr_person/cache.py"]
+             "cpr_person/protocol.py", "cpr_person/cache.py", "cpr_person/rcr_cache.py"]
     for name in files:
         target = tmp_path / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / name, target)
-    data = tmp_path / "data"
-    data.mkdir()
-    for name in ("gallery", "queries"):
-        (data / f"{name}.jsonl").write_text(json.dumps({"id": name}) + "\n")
+    write_benchmark_views(tmp_path, [{"id": "gallery"}], [{"id": "queries"}])
     monkeypatch.setattr(build_tables, "ROOT", tmp_path)
     monkeypatch.setattr(build_tables, "OUTPUTS_DIR", tmp_path / "outputs")
     monkeypatch.setattr(build_tables, "TABLES_DIR", tmp_path / "tables")
@@ -46,13 +43,16 @@ def write_result(root, method="lincir", provenance=None):
     fingerprint = manifest_fingerprint(root)
     run = {"method": method, "display_name": "LinCIR" if method == "lincir" else method,
            "group": "Published / SOTA Baselines", "cpr_supervision": "No",
-           "higher_is_better": True, "data_fingerprint": fingerprint}
+           "higher_is_better": True, "data_fingerprint": fingerprint,
+           "split": "test", "data_protocol": DATA_PROTOCOL}
     if provenance is not None:
         run["shared_person_protocol"] = provenance
     metrics = {"method": method, "data_fingerprint": fingerprint,
-               "overall": {f"{kind}-{metric}": 0.125
-                           for kind in ("ID", "Full")
-                           for metric in ("mAP", "R@1", "R@5", "R@10")},
+               "split": "test", "data_protocol": DATA_PROTOCOL,
+               "overall": {"Macro-Full-mAP": 0.25, **{
+                   f"{kind}-{metric}": 0.125 for kind in ("ID", "Full")
+                   for metric in ("mAP", "R@1", "R@5", "R@10")
+               }},
                "cases": {case: {"Full-mAP": 0.25, "Full-R@1": 0.5}
                          for case in build_tables.CASE_TYPES}}
     (output / "run.json").write_text(json.dumps(run))
@@ -65,7 +65,9 @@ def shared_provenance(root):
     detection = {"adapter_version": PROTOCOL_VERSION,
                  "gallery_manifest_sha256": fingerprint["gallery_sha256"],
                  "gallery_image_content_sha256": "a" * 64,
-                 "protocol": {"backend": "huggingface_grounding_dino", "threshold": 0.30, "text_threshold": 0.25}}
+                 "protocol": {"backend": "rcr_detection_cache", "threshold": 0.30, "text_threshold": 0.25},
+                 "rcr_cache": {"layout": "person-detections-v1", "index_sha256": "1" * 64,
+                               "cache_id": "2" * 64, "gallery_ids_sha256": "3" * 64}}
     boxes = "b" * 64
     return {"version": PROTOCOL_VERSION, "detections_fingerprint": detection,
             "detection_array_sha256": boxes, "localization_components_sha256": "c" * 64,
@@ -94,10 +96,11 @@ def test_scene_tables_run_without_site_packages_or_person_adapters(reporting_rep
     assert rows[0]["Method"] == "LinCIR"
     assert rows[0]["Protocol"] == "Native scene v1"
     assert rows[0]["ID-mAP"] == "12.50"
+    assert rows[0]["Macro-Full-mAP"] == "25.00"
     with (reporting_repo / "tables" / "table2_cases.csv").open() as handle:
         cases = list(csv.DictReader(handle))
-    assert cases[0]["GROUP mAP"] == "25.00"
-    assert cases[0]["RELATIONAL R@1"] == "50.00"
+    assert cases[0]["GROUP Full-mAP"] == "25.00"
+    assert cases[0]["RELATIONAL Full-R@1"] == "50.00"
 
 
 def test_check_needs_neither_manifests_nor_evaluated_results(reporting_repo):
@@ -146,13 +149,13 @@ def test_all_mode_checks_reporting_once_before_starting_methods(monkeypatch):
     assert events == ["check"] + [method.method_id for method in methods]
 
 
-def test_scene_result_from_direct_evaluator_without_runner_stamp_is_accepted(reporting_repo):
+def test_evaluated_scene_result_requires_inference_manifest_identity(reporting_repo):
     output = write_result(reporting_repo)
     run = json.loads((output / "run.json").read_text())
     run.pop("data_fingerprint")
     (output / "run.json").write_text(json.dumps(run))
-    results = build_tables.collect_results()
-    assert [result["method_id"] for result in results] == ["lincir"]
+    with pytest.raises(RuntimeError, match="Run metadata does not match"):
+        build_tables.collect_results()
 
 
 def test_scene_and_same_protocol_person_runs_share_a_table(reporting_repo):
@@ -161,7 +164,7 @@ def test_scene_and_same_protocol_person_runs_share_a_table(reporting_repo):
         write_result(reporting_repo, method, shared_provenance(reporting_repo))
     results = build_tables.collect_results()
     assert len(results) == 3
-    assert sum(result["protocol"] == "Shared person HF v2" for result in results) == 2
+    assert sum(result["protocol"] == "Shared RCR boxes" for result in results) == 2
 
 
 @pytest.mark.parametrize("provenance", [None, {}, {"version": "legacy"}])
@@ -258,9 +261,9 @@ def test_missing_adjacent_run_metadata_has_a_clear_error(reporting_repo):
         build_tables.collect_results()
 
 
-def test_old_manifest_results_do_not_overwrite_existing_tables(reporting_repo):
+def test_old_manifest_results_do_not_overwrite_existing_tables(reporting_repo, write_benchmark_views):
     write_result(reporting_repo)
-    (reporting_repo / "data" / "queries.jsonl").write_text('{"changed":true}\n')
+    write_benchmark_views(reporting_repo, [{"id": "gallery"}], [{"changed": True}])
     tables = reporting_repo / "tables"
     tables.mkdir()
     old = tables / "table1_main.csv"
@@ -345,9 +348,9 @@ def test_interrupted_csv_write_preserves_completed_file(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == [path]
 
 
-def test_stale_results_do_not_create_tables_directory(reporting_repo):
+def test_stale_results_do_not_create_tables_directory(reporting_repo, write_benchmark_views):
     write_result(reporting_repo)
-    (reporting_repo/'data/queries.jsonl').write_text('{"changed":true}\n')
+    write_benchmark_views(reporting_repo, [{"id": "gallery"}], [{"changed": True}])
     completed = cli(reporting_repo, 'build_tables.py')
     assert completed.returncode != 0
     assert 'No evaluated results match' in completed.stderr

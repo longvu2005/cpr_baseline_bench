@@ -1,5 +1,10 @@
 # Shared HF person detector (protocol v2)
 
+This page records the previous standalone detector runtime for diagnostics.
+Official val/test person baselines now consume the RCR detection index. Use the
+[current benchmark setup](baselines.md#detection-and-crop-convention) for runs.
+
+
 Audit base: CPR `0fbe43a98e920c634a9a638c4287ac6b1cd1d2f4`.
 Read-only reference: RCR `def2f0d56330f5a27cd4aec52becdbbb9972a16d`.
 

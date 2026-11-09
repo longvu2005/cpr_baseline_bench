@@ -1141,7 +1141,6 @@ def main() -> None:
     with tracker.phase("Consume shared candidates and Subject memberships"):
         person = load_person_context(gallery, queries, gallery_manifest, query_manifest, device)
         detection_cache, offsets, boxes = person.detections.path, person.detections.offsets, person.detections.boxes
-        attention_backend = protocol_config()["detector"]["attention_backend"]
 
     with tracker.phase("Prepare AdaFocal gallery-person target features"):
         checkpoint = resolve_path(str(cfg["adafocal"]["checkpoint"]))
@@ -1315,7 +1314,6 @@ def main() -> None:
             "gallery_candidates": "shared-detector person crops encoded by official AdaFocal target branch",
             "setmatch": matching_metadata(cfg, score_space="cosine_max_over_target_tokens"),
             "relational_text_behavior": cfg["adaptation"]["relational_text_behavior"],
-            "groundingdino_attention_backend": attention_backend,
             "num_queries": len(queries),
             "num_gallery": len(gallery),
             "num_detected_persons": int(offsets[-1]),

@@ -61,6 +61,7 @@ from openai import OpenAI  # noqa: E402
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from benchmark_data import ensure_gallery_layout  # noqa: E402
+from benchmark_data import manifest_file_fingerprint
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 METHOD_ID = "wiser"
@@ -874,6 +875,7 @@ def main() -> None:
         checkout, _marker = validate_prepared(cfg)
         gallery_manifest = resolve(str(cfg["data"]["gallery_manifest"]))
         query_manifest = resolve(str(cfg["data"]["query_manifest"]))
+        data_fingerprint = manifest_file_fingerprint(gallery_manifest, query_manifest)
         gallery = load_jsonl(gallery_manifest)
         queries = load_jsonl(query_manifest)
         gindex = build_gallery_index(gallery)
@@ -1111,6 +1113,7 @@ def main() -> None:
         out_dir = resolve(str(cfg["output"]["dir"]))
         payload = {
             "method": cfg["method"],
+            "data_fingerprint": data_fingerprint,
             "display_name": cfg["display_name"],
             "group": cfg["group"],
             "paper": cfg["paper"],

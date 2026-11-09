@@ -29,7 +29,7 @@ runtime:
   score_query_batch_size: 64
   score_gallery_batch_size: 4096
 data:
-  gallery_manifest: data/gallery.jsonl
-  query_manifest: data/queries.jsonl
+  gallery_manifest: data/test/gallery.jsonl
+  query_manifest: data/test/queries.jsonl
 output:
   dir: runs/gme_qwen2_vl_2b

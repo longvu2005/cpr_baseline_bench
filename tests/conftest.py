@@ -34,6 +34,7 @@ class ToySelector:
 def toy_protocol(tmp_path,monkeypatch):
     monkeypatch.setenv("CPR_SHARED_CACHE_ROOT",str(tmp_path/"shared"))
     monkeypatch.delenv("CPR_SHARED_CACHE_READ_ROOTS",raising=False)
+    monkeypatch.delenv("CPR_RCR_DETECTION_CACHE", raising=False)
     cfg=protocol_config()
     for section in ["detector","selector"]:
         p=tmp_path/(section+".pt");p.write_bytes(section.encode())
@@ -63,3 +64,48 @@ def toy_protocol(tmp_path,monkeypatch):
     monkeypatch.setattr("cpr_person.adapter.get_detections",detections)
     monkeypatch.setattr("cpr_person.adapter.get_localization",localization)
     return cfg,gallery,queries,gm,qm,calls,selector
+
+
+@pytest.fixture
+def write_benchmark_views():
+    from benchmark_data import DATA_PROTOCOL, SPLITS, manifest_fingerprint, split_paths
+
+    def write(root, gallery, queries, *, val_gallery=(), val_queries=()):
+        metadata = {"protocol": DATA_PROTOCOL, "rcr_version": "fixture", "splits": {}}
+        rows_by_split = {"test": (gallery, queries), "val": (val_gallery, val_queries)}
+        for split in SPLITS:
+            rows = rows_by_split[split]
+            for path, entries in zip(split_paths(root, split), rows, strict=True):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("".join(json.dumps(row) + "\n" for row in entries))
+            metadata["splits"][split] = {
+                "fingerprint": manifest_fingerprint(root, split),
+                "num_gallery": len(rows[0]),
+                "num_queries": len(rows[1]),
+            }
+        (root / "data" / "manifest.json").write_text(json.dumps(metadata))
+
+    return write
+
+
+@pytest.fixture
+def rcr_detection_index(tmp_path, monkeypatch):
+    torch = pytest.importorskip("torch")
+
+    from cpr_person.rcr_cache import RCR_DETECTION_LAYOUT, RCR_DETECTOR, _rcr_cache_id
+
+    def write(ids, boxes, offsets):
+        path = tmp_path / "rcr-detections" / "index.pt"
+        path.parent.mkdir(exist_ok=True)
+        index = {
+            "layout": RCR_DETECTION_LAYOUT, "prompt": "person", "detector": RCR_DETECTOR,
+            "image_ids": ids, "image_sizes": torch.tensor([[40, 30]] * len(ids)),
+            "offsets": torch.tensor(offsets),
+            "boxes_pixel": torch.tensor(boxes, dtype=torch.float32).reshape(-1, 4),
+        }
+        index["cache_id"] = _rcr_cache_id(index)
+        torch.save(index, path)
+        monkeypatch.setenv("CPR_RCR_DETECTION_CACHE", str(path.parent))
+        return path
+
+    return write

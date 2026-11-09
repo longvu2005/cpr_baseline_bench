@@ -3,7 +3,7 @@
 
 S9 introduces no new checkpoints beyond its two source branches:
 - S5: Grounding DINO + CLIP-ReID - Set
-- S8: Qwen-Image-Edit-2509 + CLIP ViT-L/14
+- S8: Qwen-Image-Edit-2509 + CLIP ViT-B/32
 
 This preparer simply runs the method-local checkpoint preparers for both baselines
 so S9 can later reuse their runtime assets and caches.

@@ -35,39 +35,37 @@ these detection, localization or image aggregation procedures.
 | P10 `imagine_seek` | Native full-scene generation/retrieval | No | No | No |
 | P11 `wiser` | Native scene retrieval | No | No | No |
 
-S11 continues to pass full scenes to its verifier. Its only code change is a
-guard against old/incompatible S6 first-stage scores. Scene encoders and their
-inference paths are otherwise unchanged.
+## Scene CLIP
+
+S1–S4 and the benchmark CLIP branches of S6–S9 and S11 use RCR's official
+OpenAI ViT-B/32 weights, RGB preprocessing, L2-normalized features and CLIP
+tokenization with truncation. S2–S4 and S6 encode the finalized instruction.
+S7 embeds the Qwen rewrite and S8 embeds the generated proxy. S9 reuses the
+S8 scores and S11 reranks the aligned S6 shortlist. Published native encoders
+and S10's person-crop ViT-L/14 remain method-specific.
+
+S3 and S4 select the RCR fusion weight grid on val by Full-mAP. S4 standardizes
+each score branch over the split gallery with the reference image excluded.
 
 ## Detection and crop convention
 
-`cpr_person/protocol.yaml` is the authoritative shared configuration. Method
-configs point to it instead of duplicating detector settings. See the
-[HF migration audit and setup](hf_person_detector.md) for exact revisions,
-runtime pins, dependency coverage and verification commands.
+Use the `index.pt` produced by RCR for the same finalized gallery. If needed,
+build it once from the RCR root in its Proposed environment.
 
-- Hugging Face `IDEA-Research/grounding-dino-tiny`, immutable model/processor
-  revision `a2bb814dd30d776dcf7e30523b00659f4f141c71`.
-- Same RCR Proposed call: RGB stored pixels, `text=[["person"]]`, one image per
-  forward, processor defaults, threshold `0.30`, text threshold `0.25`, and
-  `target_sizes=[(height,width)]`.
-- Keep only exact `text_labels == "person"`. Preserve processor float32 pixel
-  `xyxy` boxes, query ordering and original confidence. No NMS, cap, minimum
-  size, clipping or integer rounding.
-- Crops call PIL `image.crop(tuple(box))`, as RCR and FAFA do. PIL rounds each
-  edge to nearest/even and pads pixels beyond the image with zero. Model-specific
-  resizing/normalization remains native.
-- CPR retains one **flagged full-image fallback**, confidence `-1`, when no
-  person is detected. RCR Proposed retains zero people instead. Fallbacks are
-  CPR adaptation records, never Grounding DINO detections.
+```bash
+.venv-proposed/bin/python tools/run.py build-cache --config configs/proposed.yaml --cache-stage detections
+```
 
-The detector runs in an explicitly selected Python environment with
-Transformers `4.56.2`; FAFA stays on `4.39.3` and `max_txt_len=128`. A worker
-loads only prepared local assets. Cache hits do not import the detector model,
-require its interpreter, or require its weights. The selector still uses its
-private `ftfy==5.8` / `wcwidth==0.2.13` target so native tokenizer pins remain
-intact. Detection journals resume at the last checksummed complete image;
-there is no cross-image batching/padding to replay.
+- The benchmark validates the index content ID, finalized gallery order, and
+  Grounding DINO Tiny settings (prompt `person`, thresholds `0.30` and `0.25`).
+- The adapter projects the original float32 `xyxy` boxes onto the selected
+  split and preserves their order. PIL crops use the original coordinates,
+  including out-of-frame padding.
+- As in RCR FAFA, accepted boxes carry an eligibility marker of `1.0`. Images
+  without boxes get one flagged full-image fallback. Query localization adds
+  full-image slots only when there are too few candidates for the Subject slots.
+- The benchmark reads the RCR index and reuses its boxes across person methods.
+  See the [legacy detector notes](hf_person_detector.md) for diagnostic runs.
 
 ## Subject localization and GROUP
 
@@ -169,12 +167,10 @@ cache/shared/
 ```
 
 Both files have content-checksummed `.meta.json` sidecars. Fingerprints include
-ordered manifest hashes, actual gallery image byte hashes, immutable HF
-model/processor revisions, pinned processing/runtime versions, detector/crop
-conventions, adapter version,
-selector checksum/source and membership parameters. Localization also includes
-the actual detection array digest. Atomic writes, OS locks, semantic validation
-and ordered worker journals protect interruption/corruption.
+ordered manifest hashes, actual gallery image byte hashes, the RCR detection
+cache ID and file SHA256, adapter version, selector checkpoint checksum and
+membership parameters. Localization also records the projected box array digest.
+Atomic writes and OS locks protect both caches.
 
 Hashing gallery bytes is a CPU verification pass, not detector inference. A
 matching verified cache skips detector/model construction. Native feature caches
@@ -187,6 +183,7 @@ For Kaggle, use a writable root and separate read roots (colon separated on
 Linux/macOS; OS path separator on Windows):
 
 ```bash
+export CPR_RCR_DETECTION_CACHE=/kaggle/input/rcr-cache/cache/detections
 export CPR_SHARED_CACHE_ROOT=/kaggle/working/cpr_shared
 export CPR_SHARED_CACHE_READ_ROOTS=/kaggle/input/cpr-shared-person-cache/cache/shared
 # Optional mounted CLIP selector weights, always checksummed:
@@ -201,21 +198,13 @@ Inspect actual mounted datasets before selecting paths:
 ```bash
 python -m cpr_person.cache_tools inspect /kaggle/input/fafa-data /kaggle/input/rcr-proposed-cache
 python -m cpr_person.cache_tools import-shared /absolute/verified_shared_root \
-  --gallery-manifest data/gallery.jsonl --query-manifest data/queries.jsonl
+  --gallery-manifest data/test/gallery.jsonl --query-manifest data/test/queries.jsonl
 ```
 
 Use the actual mount paths in the notebook if they differ. Import performs no
 model inference and fails closed unless full fingerprints, content checksums
 and semantic arrays/memberships match. Legacy files without equivalent
 provenance are reported for inspection, not accepted by tensor shape.
-
-The public Kaggle listing inspected during this refactor shows
-`fafa-data/referential-composition-retrieval/...` and
-`rcr-proposed-cache/features/<id>.pt`. The complete archives/provenance could
-not be verified from this environment, so neither dataset was certified as an
-equivalent Grounding DINO cache. DINO/DINOv3 feature tensors are not Grounding
-DINO detections or FAFA features. Existing weights can be pointed to explicitly;
-no notebook environment or feature tensor is automatically adopted.
 
 ## Install, validate and run
 
@@ -225,6 +214,7 @@ python -m pytest -q tests
 python -m compileall -q cpr_person methods scripts tests run_baseline.py build_tables.py
 python run_baseline.py --list
 python validate_data.py
+export CPR_RCR_DETECTION_CACHE=/path/to/rcr/cache/detections
 python run_baseline.py fafa_setmatch
 # Or any stable method ID / directory alias:
 python run_baseline.py word4per_setmatch
@@ -233,8 +223,7 @@ python run_baseline.py groundingdino_clipreid_set
 
 The runner first prepares the shared detector interpreter for registered person
 methods, then installs the separate method requirements and prepares shared/native assets. It
-runs inference, invokes the **unchanged** evaluator and builds tables. It does
-not fine-tune on the benchmark. Word4Per still needs the independently
+runs inference on the imported test split, evaluates it and builds tables. Word4Per still needs the independently
 reproduced Stage-2 artifacts described in
 `checkpoints/word4per/README.word4per.md`.
 
@@ -246,20 +235,18 @@ python run_baseline.py qwen_image_edit_clip
 python run_baseline.py reid_set_qwen_edit_proxy
 ```
 
-S9 and S11 need genuinely separate validation manifests. S11 requires S6's
-validation-selected alpha artifact; configure S6's existing
-`fusion.alpha_selection.mode: validation` before that dependency run.
-Fixed-alpha S6/S10 remain label-free defaults. Validation guards reject copied
-evaluation inputs even if query IDs or GT labels were changed.
+S6 and S10 default to alpha selection on RCR val. S9 selects alpha on the
+same val split. S11 uses S6's validation-selected alpha and branch scores to
+select its rerank settings. The selectors require the val manifests from the
+same finalized RCR import as the test manifests.
 
 To attempt every configured baseline in dependency order:
 
 ```bash
-python run_baseline.py --all
+python run_baseline.py --all --rcr-detection-cache /path/to/rcr/cache/detections
 ```
 
-Prepare the required checkpoints, validation inputs and S6 selection mode
-first. Failures are reported and remaining methods are attempted; the command
+Prepare the required checkpoints and both RCR splits first. Failures are reported and remaining methods are attempted; the command
 returns nonzero if any method fails. Checkpoint-unavailable methods keep the
 existing explicit unavailable status and produce no substitute scores.
 
@@ -278,6 +265,6 @@ their full native proxy/verifier runs still need their configured source runs.
 
 Every normal run preserves complete gallery/query ordering and the
 `scores.npy` / `run.json` contract, including the reference image column.
-The evaluator alone excludes the reference. Tables skip old person-protocol
+The evaluator excludes the reference from metrics. Reranking also excludes it from the candidate shortlist. Tables skip old person-protocol
 results and reject different actual detection/membership digests; rerun all
 affected methods before comparing this protocol with itself.

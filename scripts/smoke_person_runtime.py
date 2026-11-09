@@ -30,8 +30,8 @@ def main():
     if args.gallery_limit<30 or args.query_limit<1:
         parser.error("Use at least 30 gallery scenes (BASIC needs >=25 persons) and one query")
     load=lambda path:[json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-    full_gallery=load(ROOT/"data/gallery.jsonl")
-    queries=load(ROOT/"data/queries.jsonl")[:args.query_limit]
+    full_gallery=load(ROOT/"data/test/gallery.jsonl")
+    queries=load(ROOT/"data/test/queries.jsonl")[:args.query_limit]
     reference_ids={q["image_id"] for q in queries}
     refs=[g for g in full_gallery if g["image_id"] in reference_ids]
     gallery=refs+[g for g in full_gallery if g["image_id"] not in reference_ids][:max(0,args.gallery_limit-len(refs))]

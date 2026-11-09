@@ -29,8 +29,8 @@ runtime:
   num_workers: 4
   gallery_feature_dtype: float16
 data:
-  gallery_manifest: data/gallery.jsonl
-  query_manifest: data/queries.jsonl
+  gallery_manifest: data/test/gallery.jsonl
+  query_manifest: data/test/queries.jsonl
 localization:
   detector:
     protocol: cpr_person/protocol.yaml
@@ -47,7 +47,7 @@ localization:
     tokenize_truncate: true
     assignment: hungarian_anchors_then_disjoint_expansion
     tokenizer_packages:
-      ftfy: '5.8'
+      ftfy: '6.3.1'
       wcwidth: 0.2.13
     tokenizer_runtime_dir: checkpoints/clip/selector_tokenizer
 setmatch:

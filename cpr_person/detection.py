@@ -1,6 +1,7 @@
 """Canonical detections, ordered crops and explicitly flagged fallbacks."""
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import hashlib
@@ -13,7 +14,8 @@ import yaml
 from PIL import Image
 
 from . import PROTOCOL_VERSION
-from .cache import ROOT, StageCache, atomic_file, cache_lock, resolve, sha256_file
+from .cache import ROOT, StageCache, atomic_file, cache_lock, read_json, resolve, sha256_file
+from .rcr_cache import read_rcr_index, rcr_index_path
 
 PROTOCOL_PATH = Path(__file__).with_name("protocol.yaml")
 
@@ -51,7 +53,7 @@ DETECTION_PROCESSING = {
     "boxes": "float32 pixel xyxy; no clipping, rounding, NMS, size filter or cap",
     "ordering": "original model query order after processor/label filtering",
     "confidence": "unaltered processor scores; fallback=-1",
-    "zero_detections": "one flagged full-image CPR candidate; RCR instead keeps an empty set",
+    "zero_detections": "one flagged full-image candidate",
     "precision": "float32; eval; inference_mode; no autocast",
 }
 
@@ -92,7 +94,7 @@ class Detections:
                 or np.any(self.boxes[:, 2:] <= self.boxes[:, :2])):
             raise ValueError("Invalid canonical detection arrays")
         protocol = self.fingerprint.get("protocol", {})
-        if protocol.get("backend") != "huggingface_grounding_dino":
+        if protocol.get("backend") not in {"huggingface_grounding_dino", "rcr_detection_cache"}:
             raise ValueError("Retired/noncanonical person detector cache")
         for gi, (start, end) in enumerate(zip(self.offsets[:-1], self.offsets[1:])):
             width, height = self.image_sizes[gi]
@@ -100,6 +102,9 @@ class Detections:
             if np.any(f):
                 if len(b) != 1 or not np.array_equal(b[0], [0, 0, width, height]) or scores[0] != -1:
                     raise ValueError("No-detection fallback must be one flagged full-image candidate")
+            elif protocol["backend"] == "rcr_detection_cache":
+                if not np.all(scores == 1):
+                    raise ValueError("RCR boxes have a fixed eligibility marker of 1")
             elif np.any((scores <= float(protocol["threshold"])) | (scores > 1)):
                 raise ValueError("Invalid HF detection confidence")
 
@@ -113,29 +118,96 @@ def detection_array_sha256(detections):
     return digest.hexdigest()
 
 
-def detection_fingerprint(gallery_manifest, cfg=None):
-    cfg = cfg or protocol_config()
+def _rcr_source(gallery_manifest):
+    manifest = resolve(gallery_manifest)
+    canonical = manifest in {ROOT / "data" / split / "gallery.jsonl" for split in ("val", "test")}
+    path = rcr_index_path(required=canonical)
+    if path is None:
+        return None, None
+    index, provenance = read_rcr_index(path)
+    if canonical:
+        data = read_json(ROOT / "data" / "manifest.json") or {}
+        expected = data.get("rcr_gallery_ids_sha256")
+        if expected is None:
+            raise ValueError("Reimport the complete RCR final data with prepare_data.py")
+        if provenance["gallery_ids_sha256"] != expected:
+            raise ValueError("RCR detection gallery IDs/order differ from the imported final dataset")
+    return index, provenance
+
+
+def _detection_fingerprint(gallery_manifest, cfg, index, provenance):
     detector = cfg["detector"]
-    if detector["backend"] != "huggingface_grounding_dino":
-        raise ValueError("Only the canonical Hugging Face detector is supported")
-    for key in ("revision", "processor_revision"):
-        if not re.fullmatch(r"[0-9a-f]{40}", detector[key]):
-            raise ValueError(f"detector.{key} must be an immutable HF commit SHA")
-    # Provenance comes from immutable revisions and pinned runtime, not whatever
-    # Transformers happens to be installed in a native/cache-only consumer.
-    # Neither model assets nor the detector interpreter are needed on cache hits.
-    import json
+    processing = DETECTION_PROCESSING
+    if index is not None:
+        detector = {**index["detector"], "backend": "rcr_detection_cache",
+                    "text_prompt": index["prompt"]}
+        processing = {
+            "boxes": "original RCR float32 pixel xyxy and per-image order",
+            "confidence": "1 for RCR accepted boxes, -1 for a full-image fallback",
+            "zero_detections": "one flagged full-image candidate, as in RCR FAFA",
+        }
+    else:
+        if detector["backend"] != "huggingface_grounding_dino":
+            raise ValueError("Only the legacy diagnostic Hugging Face detector is supported here")
+        for key in ("revision", "processor_revision"):
+            if not re.fullmatch(r"[0-9a-f]{40}", detector[key]):
+                raise ValueError(f"detector.{key} must be an immutable HF commit SHA")
+        detector = {key: detector[key] for key in (
+            "backend", "model", "revision", "processor_revision", "text_prompt", "threshold",
+            "text_threshold", "runtime_versions", "attention_backend",
+        )}
     gallery = [json.loads(line) for line in Path(gallery_manifest).read_text().splitlines() if line.strip()]
     images_digest = hashlib.sha256()
     for row in gallery:
-        # Content, order and portable manifest paths are immutable inputs.
         images_digest.update(json.dumps([row["image_id"], row["path"], sha256_file(image_path(row))],
                                         separators=(",", ":")).encode())
-    return {"adapter_version": PROTOCOL_VERSION, "gallery_manifest_sha256": sha256_file(gallery_manifest),
-            "gallery_image_content_sha256": images_digest.hexdigest(),
-            "image": cfg["image"], "processing": DETECTION_PROCESSING,
-            "protocol": {k: detector[k] for k in ("backend", "model", "revision", "processor_revision",
-                         "text_prompt", "threshold", "text_threshold", "runtime_versions", "attention_backend")}}
+    fingerprint = {
+        "adapter_version": PROTOCOL_VERSION, "gallery_manifest_sha256": sha256_file(gallery_manifest),
+        "gallery_image_content_sha256": images_digest.hexdigest(), "image": cfg["image"],
+        "processing": processing, "protocol": detector,
+    }
+    if provenance is not None:
+        fingerprint["rcr_cache"] = provenance
+    return fingerprint
+
+
+def detection_fingerprint(gallery_manifest, cfg=None):
+    return _detection_fingerprint(gallery_manifest, cfg or protocol_config(), *_rcr_source(gallery_manifest))
+
+
+def project_rcr_detections(index, gallery, fingerprint):
+    by_id = {image_id: i for i, image_id in enumerate(index["image_ids"])}
+    offsets, boxes, confidences, fallback, sizes = [0], [], [], [], []
+    for row in gallery:
+        image_id = row["image_id"]
+        if image_id not in by_id:
+            raise ValueError(f"Image {image_id} is absent from the RCR detection index")
+        i = by_id[image_id]
+        size = tuple(index["image_sizes"][i].tolist())
+        with Image.open(image_path(row)) as image:
+            if image.size != size:
+                raise ValueError(f"Image {image_id} size differs from the RCR detection index")
+        start, end = index["offsets"][i:i + 2].tolist()
+        if start < end:
+            boxes.extend(index["boxes_pixel"][start:end].tolist())
+            confidences.extend([1.0] * (end - start))
+            fallback.extend([False] * (end - start))
+        else:
+            boxes.append([0, 0, *size])
+            confidences.append(-1.0)
+            fallback.append(True)
+        offsets.append(len(boxes))
+        sizes.append(size)
+    result = Detections(
+        np.asarray(offsets, dtype=np.int64),
+        np.asarray(boxes, dtype=np.float32).reshape(-1, 4),
+        np.asarray(confidences, dtype=np.float32),
+        np.asarray(fallback, dtype=bool),
+        np.asarray(sizes, dtype=np.int64).reshape(-1, 2),
+        fingerprint,
+    )
+    result.validate(len(gallery))
+    return result
 
 
 def save_detections(cache, detections, **metadata):
@@ -144,7 +216,8 @@ def save_detections(cache, detections, **metadata):
         np.savez_compressed(handle, offsets=detections.offsets, boxes=detections.boxes,
                             confidences=detections.confidences, fallback=detections.fallback,
                             image_sizes=detections.image_sizes)
-    cache.seal(path, attention_backend=cache.fingerprint["protocol"]["attention_backend"], **metadata)
+    backend = cache.fingerprint["protocol"].get("attention_backend")
+    cache.seal(path, attention_backend=backend, **metadata)
     detections.path = path
     return detections
 
@@ -166,7 +239,8 @@ def load_detections(cache, gallery_count):
 
 def get_detections(gallery, gallery_manifest, device, *, require_cache=False, runner=None, cfg=None):
     cfg = cfg or protocol_config()
-    cache = StageCache("detections", detection_fingerprint(gallery_manifest, cfg))
+    rcr_index, provenance = _rcr_source(gallery_manifest)
+    cache = StageCache("detections", _detection_fingerprint(gallery_manifest, cfg, rcr_index, provenance))
     result = load_detections(cache, len(gallery))
     if result is not None:
         result.gallery_manifest = resolve(gallery_manifest)
@@ -178,7 +252,9 @@ def get_detections(gallery, gallery_manifest, device, *, require_cache=False, ru
         if result is not None:
             result.gallery_manifest = resolve(gallery_manifest)
             return result
-        if runner is None:
+        if rcr_index is not None:
+            save_detections(cache, project_rcr_detections(rcr_index, gallery, cache.fingerprint))
+        elif runner is None:
             from .runtime import detector_python, detector_env
             python = detector_python()
             subprocess.run([python, "-m", "cpr_person.worker", "--gallery-manifest", str(resolve(gallery_manifest)),

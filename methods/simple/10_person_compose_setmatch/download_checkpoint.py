@@ -2,50 +2,42 @@
 """Prepare S10 external artifacts.
 
 S10 needs:
-- the shared Grounding DINO protocol assets from S5
-- the OpenAI CLIP ViT-L/14 checkpoint used by the CLIP baselines
+- the RCR detection index and shared CLIP selector
+- OpenAI CLIP ViT-L/14 for S10's person-crop composition
 """
 
 from __future__ import annotations
 
 import argparse
-import subprocess
 import sys
 from pathlib import Path
+
+import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from benchmark_progress import PhaseTracker  # noqa: E402
+from cpr_person.adapter import prepare_shared
+from cpr_person.cache import resolve
+from cpr_person.clip_model import prepare_openai_clip
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
-
-
-def run_step(command: list[str]) -> None:
-    print(f"$ {' '.join(command)}", flush=True)
-    subprocess.run(command, cwd=ROOT, check=True)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare S10 artifacts.")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
-    parser.add_argument("--force", action="store_true", help="Pass --force to delegated preparers.")
+    parser.add_argument("--force", action="store_true", help="Reprepare the selector and person composition checkpoints.")
     args = parser.parse_args()
-    _ = Path(args.config)
+    cfg = yaml.safe_load(resolve(args.config).read_text(encoding="utf-8"))
 
     tracker = PhaseTracker("s10_prepare", total=2)
-    tracker.advance("Prepare shared Grounding DINO protocol assets")
-    cmd = [sys.executable, "-m", "cpr_person.prepare"]
-    if args.force:
-        cmd.append("--force")
-    run_step(cmd)
-
-    tracker.advance("Prepare CLIP ViT-L/14 checkpoint")
-    cmd = [sys.executable, "-u", "methods/simple/02_clip_text/download_checkpoint.py"]
-    if args.force:
-        cmd.append("--force")
-    run_step(cmd)
+    tracker.advance("Prepare the shared RCR CLIP selector")
+    prepare_shared(args.force)
+    tracker.advance("Prepare CLIP ViT-L/14 for person-crop composition")
+    prepare_openai_clip(cfg["clip"]["name"], cfg["clip"]["checkpoint"], args.force)
     tracker.finish()
 
 

@@ -1,198 +1,52 @@
-# Canonical Stage-2 Data
+# RCR validation and test data
 
-`prepare_data.py` reads the flattened `data/source/export_stage2.jsonl` directly.
-Each non-empty line is one JSON object; a `.txt` file containing JSONL is also
-accepted. The export is already curated, so no old `qc_pass`, submission-ID join,
-or nested `annotation` object is required. `records.jsonl` is no longer an input.
+Import a completed RCR `dataset/data/final` export from the repository root.
 
-## Source Schema
-
-```json
-{
-  "sample_id": "train__query__target",
-  "case_type": "GROUP",
-  "query_image_id": "query",
-  "target_image_id": "target",
-  "positive_image_ids": ["target", "another_positive"],
-  "subjects": [{"subject_id": 1, "identity_ids": ["10", "20"]}],
-  "final_desc": "Identify Subject 1 as the couple wearing white shirts",
-  "final_change": "then retrieve target images where Subject 1 are wearing costumes",
-  "final_instruction": "Identify Subject 1 as the couple wearing white shirts; then retrieve target images where Subject 1 are wearing costumes."
-}
+```bash
+python prepare_data.py --rcr-final-dir /path/to/rcr/dataset/data/final
+python link_gallery.py --source /path/to/rcr/dataset/data/raw/images
+python validate_data.py
 ```
 
-Supported case labels are `INDIVIDUAL`, `DUAL`, `GROUP`, and `RELATIONAL`.
-Case labels are used for reporting only. Text routing is derived from the
-Subject mentions in `final_desc` and `final_change`.
+The same commands work with a Kaggle mount. Pass the image root that contains
+both `val/` and `test/`. A previous flat `data/gallery` directory can be moved
+aside before linking the split image root. For a metadata-only check, use
+`python validate_data.py --skip-image-files`.
 
-## Canonical Manifest Mapping
+## Imported files
 
-| Export field | `data/queries.jsonl` field |
+| Path | Purpose |
+| --- | --- |
+| `data/val/gallery.jsonl` and `data/val/queries.jsonl` | Complete validation inputs for parameter selection |
+| `data/test/gallery.jsonl` and `data/test/queries.jsonl` | Complete test inputs and relevance labels |
+| `data/manifest.json` | RCR version, split counts, ordered manifest checksums and full RCR gallery ID hash |
+
+The importer reads `samples.jsonl`, `images.jsonl`, `gallery.jsonl`,
+`head_boxes.jsonl`, `manifest.json` and `splits/{val,test}.txt` from RCR.
+Gallery membership comes from image paths and preserves RCR gallery order.
+Query membership and order come from the two split files. Images are linked
+by their RCR relative paths. A new finalized release can be imported without
+changing baseline configs.
+
+| RCR field | Baseline query field |
 | --- | --- |
 | `sample_id` | `query_id` |
-| `query_image_id` | `image_id`; `path` comes from the gallery |
-| `target_image_id` | `target_image_id` |
-| `case_type` | `case` (reporting only) |
-| `final_instruction` | `text`, preserved as supplied |
-| `final_desc` | `final_desc` plus parsed `subjects[].select_text` |
-| `final_change` | `final_change` plus parsed `subjects[].modify_text` |
-| `subjects[].identity_ids` | `subjects[].identity_ids` plus flattened `target_ids` |
-| `positive_image_ids` | `full_positive_ids`, restricted to the evaluation gallery |
+| `query_image_id` | `image_id` and its gallery `path` |
+| `case_type` | `case` |
+| `final_instruction` | `text` |
+| `final_desc`, `final_change` | Subject selection and modification text |
+| `subjects[].identity_ids` | Flattened `target_ids` for evaluation |
+| `positive_image_ids` | `full_positive_ids` projected onto the query split |
 
-The parser recognizes `Identify Subject N as ...` selector clauses. Independent
-target clauses are split only when each Subject is mentioned once and the
-clauses have an explicit connector. Cross-Subject references, repeated mentions,
-and shared predicates retain the complete target condition in every Subject's
-`modify_text` and in `relation_text`. Existing adapters that use full instructions
-for relational inputs continue to do so, without consulting `case`.
+Case order is INDIVIDUAL, GROUP, DUAL, RELATIONAL. GROUP has one public Subject
+slot with multiple annotated identities. Person adapters predict its membership
+from the reference image and selection text. Case and identity labels are used
+for evaluation. ID relevance requires every target identity. Full relevance uses
+the reviewed positives in the same split. The exact reference image is removed
+from eligible rankings.
 
-## Gallery and Relevance
+Reimport the dataset after finalizing new queries or relevance labels. A run
+records the manifests it scored. Tuned runs also record the validation
+fingerprint, which binds the result to the selection inputs.
 
-> **Full-gallery protocol:** TRAIN-only (17,000 images) is **not** the Stage-2
-> evaluation gallery. The current canonical gallery combines TRAIN, VAL, and TEST
-> (30,552 images). Every baseline must use the same ordered full gallery.
-> `data/source/images.jsonl` defines membership and order; image files found on
-> disk do not automatically become benchmark candidates. The counts below apply
-> to the current dataset version, not to all future versions.
-
-The benchmark uses all TRAIN, VAL, and TEST images from `images.jsonl` in one
-common gallery, ordered by `image_idx`. PIPA `index.txt` supplies evaluation identity labels.
-Queries are ordered by gallery image position, then `sample_id`. Both the query
-image and annotated target must belong to this gallery. Queries from all three
-source splits are evaluated against the same full gallery. This is a shared-gallery
-evaluation protocol, not three separate split-specific galleries.
-
-All distinct positive images inside the gallery are retained in source order.
-Out-of-gallery positives are counted and excluded from this gallery's relevance
-set. The query image is removed from positives and excluded by the evaluator
-when ranking. The annotated target must remain a non-self positive. Preparation
-checks that the query and every retained positive contain all target identities.
-
-With the current image metadata, the gallery contains 30,552 images: 17,000 TRAIN,
-5,684 VAL, and 7,868 TEST. For the supplied 4,311-row export, the benchmark has:
-
-| Case | Queries |
-| --- | ---: |
-| INDIVIDUAL | 3,671 |
-| DUAL | 308 |
-| GROUP | 151 |
-| RELATIONAL | 181 |
-| Total | 4,311 |
-
-The 264 VAL and 14 TEST queries are included. These counts describe this export;
-the validator checks membership and ordering against the source image metadata
-instead of hard-coding gallery or query counts. The supplied export also has
-1,759 positive assignments referring to images absent from that metadata; these
-are counted as `positive_outside_gallery` and excluded from this gallery's
-relevance set. Every annotated target is retained.
-
-### Why the runner might say "Expected 17,000 images"
-
-`benchmark_data.py` derives that number from the number of rows in the *local*
-`data/gallery.jsonl`. It is **not** a hard-coded gallery size. A 17,000-row
-manifest can be stale or can have been generated from TRAIN-only source metadata.
-The existence of 30,552 image files on Kaggle does not repair an incomplete
-manifest by itself.
-
-To inspect the manifests without checking image files:
-
-```bash
-python validate_data.py --skip-image-files
-```
-
-If this reports an image-id/order mismatch, ensure `data/source/images.jsonl`
-contains all three splits and regenerate the manifests with `prepare_data.py`.
-If `images.jsonl` is itself TRAIN-only, restore complete source metadata first.
-If the manifests are correct but gallery images are missing, link all three
-split directories as described in [Flat Symlink Gallery](#flat-symlink-gallery).
-Do not manually append images to `gallery.jsonl` or change evaluation counts.
-Re-run every baseline after changing the manifests: existing score matrices and
-metrics are not interchangeable across manifest versions.
-
-## GROUP Adapter Limitation
-
-A group remains one textual Subject with multiple identity labels. Its
-`target_ids` contain every member, so strict ID relevance and Full relevance
-require all members. A group is never expanded into person slots using GT
-identity counts or mappings.
-
-The current text-selected person-crop adapters (Word4Per, FAFA, Instruct-ReID,
-Per-Person CLIP Compose, BASIC, and AdaFocal) create one predicted crop slot per
-textual Subject. For a GROUP Subject this is a single-crop approximation and
-does not explicitly match every group member. Their GROUP scores are reported
-with this limitation. Scene-level methods continue to consume the complete
-instruction; text-free ReID-Set continues to use all predicted query persons.
-
-## Commands
-
-From the repository root, after replacing `data/source/export_stage2.jsonl`:
-
-```bash
-python link_gallery.py --source /path/to/images
-python prepare_data.py
-python validate_data.py
-python run_baseline.py clip_image
-```
-
-`/path/to/images` must be the **parent of `train/`, `val/`, and `test/`**.
-For this dataset version, preparation should report 30,552 gallery rows and,
-with the supplied export, 4,311 query rows. If it reports 17,000 gallery rows,
-check `data/source/images.jsonl` before running any baseline.
-
-To read a JSONL attachment directly, supply its path:
-
-```bash
-python prepare_data.py --annotations /path/to/export_stage2.txt
-```
-
-For manifest-only inspection on a machine without images:
-
-```bash
-python prepare_data.py --skip-image-files
-python validate_data.py --skip-image-files
-python -m unittest discover -s tests -v
-```
-
-Inference still requires the gallery image files. Rebuild `queries.jsonl` after
-changing the export, and rerun inference. `run_baseline.py` validates the new
-manifest before checkpoint/model work and records ordered manifest SHA-256s
-with `run.json`. `evaluate.py` rejects a recorded fingerprint mismatch and
-places manifest fingerprints in evaluated metrics. `build_tables.py` skips
-older outputs, including results without fingerprints, instead of mixing
-different query sets in the same comparison.
-
-## Flat Symlink Gallery
-
-`link_gallery.py --source /path/to/images` expects sibling `train/`, `val/`,
-and `test/` folders. It creates one symlink per image under `data/gallery`, so
-the manifests keep portable paths such as `data/gallery/<image_id>.jpg`.
-It replaces an old gallery directory symlink with a real directory containing
-file symlinks, without deleting or copying the source images. Repeated execution
-reuses matching links. Duplicate filenames across splits and existing real image
-files in the destination fail before the directory link is changed.
-
-For example, the source must look like:
-
-```text
-/path/to/images/
-├── train/
-├── val/
-└── test/
-```
-
-On Kaggle, from the repository root (adjust the source to your actual mount):
-
-```bash
-python link_gallery.py --source /kaggle/input/datasets/phmhunhlongv/cir-data/data/raw/images
-python prepare_data.py
-python validate_data.py
-```
-
-**Do not** pass a path ending in `/train` to `link_gallery.py` or point
-`CPR_GALLERY_SOURCE` at TRAIN alone. `CPR_GALLERY_SOURCE` is for a directory
-that *directly* contains every manifest image. With images separated into
-`train/`, `val/`, `test/`, `link_gallery.py` is the correct preparation path.
-
-Image files not listed in `images.jsonl` are linked if present in the three source
-folders, but they do not become evaluation candidates automatically. The source
-metadata defines the canonical candidate set.
+Person methods use that gallery ID hash to verify the detector index built by RCR.

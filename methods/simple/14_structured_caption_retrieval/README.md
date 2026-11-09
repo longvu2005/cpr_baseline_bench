@@ -3,7 +3,7 @@
 Run from the repository root:
 
 ```bash
-python run_baseline.py structured_caption_retrieval
+python run_baseline.py structured_caption_retrieval --rcr-detection-cache /path/to/rcr/cache/detections
 ```
 
 Standalone preparation/inference also accepts `--config`:

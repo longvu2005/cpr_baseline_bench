@@ -669,8 +669,8 @@ def main() -> None:
     output.mkdir(parents=True, exist_ok=True)
 
     data_cfg = cfg.get("data", {})
-    gallery_path = (ROOT / data_cfg.get("gallery_manifest", "data/gallery.jsonl")).resolve()
-    queries_path = (ROOT / data_cfg.get("query_manifest", "data/queries.jsonl")).resolve()
+    gallery_path = (ROOT / data_cfg.get("gallery_manifest", "data/test/gallery.jsonl")).resolve()
+    queries_path = (ROOT / data_cfg.get("query_manifest", "data/test/queries.jsonl")).resolve()
     gallery = load_jsonl(gallery_path)
     queries = load_jsonl(queries_path)
     if not gallery or not queries:
@@ -705,18 +705,16 @@ def main() -> None:
 
     runtime = cfg.get("runtime", {})
     device = device_from(str(runtime.get("device", "cuda")))
-    detector_device = device_from(str(runtime.get("detector_device", str(device))))
     tracker.log(
         f"gallery={len(gallery):,} queries={len(queries):,} "
         f"targets={sum(len(x) for x in query_targets):,} device={device} "
-        f"detector_device={detector_device} cache={cache_key}"
+        f"cache={cache_key}"
     )
 
     tracker.advance("Consume shared ordered gallery persons")
-    detector_cfg = protocol_config()["detector"]
+    detector_cfg = person.detections.fingerprint["protocol"]
     candidate_cache_path = person.detections.path
     gallery_boxes = person.detections.candidates()
-    detector_weights = str(resolve_config_path(detector_cfg["checkpoint"]))
     threshold = float(detector_cfg["threshold"])
     tracker.advance("Consume shared Subject memberships")
     selected_query_boxes = person.localization.boxes()
@@ -839,7 +837,6 @@ def main() -> None:
             "uses_target_ids_for_box_selection": False,
             "uses_positive_labels_for_scoring": False,
             "person_detector": detector_cfg.get("backend"),
-            "detector_weights": detector_weights,
             "score_threshold": threshold,
             "candidate_cache": rel(candidate_cache_path),
             **selector_stats,
@@ -860,7 +857,6 @@ def main() -> None:
         "relation_text_fallback_subjects": relation_fallbacks,
         "runtime": {
             "device": str(device),
-            "detector_device": str(detector_device),
             "image_batch_size": int(runtime.get("image_batch_size", 64)),
             "query_batch_size": int(runtime.get("query_batch_size", 128)),
             "score_person_batch_size": int(runtime.get("score_person_batch_size", 4096)),

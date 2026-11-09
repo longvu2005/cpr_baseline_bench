@@ -130,7 +130,7 @@ def run(cfg):
     # The canonical evaluator reads these exact paths. Reject alternate manifests
     # instead of writing scores it would evaluate against different row ordering.
     gm, qm = resolve(cfg["data"]["gallery_manifest"]), resolve(cfg["data"]["query_manifest"])
-    if gm != ROOT / "data/gallery.jsonl" or qm != ROOT / "data/queries.jsonl":
+    if gm != ROOT / "data/test/gallery.jsonl" or qm != ROOT / "data/test/queries.jsonl":
         raise ValueError("Use the canonical manifests required by evaluate.py")
     if resolve(cfg["output"]["dir"]) != ROOT / "runs" / cfg["method"]:
         raise ValueError("Output must be runs/<method>, as required by the evaluator")

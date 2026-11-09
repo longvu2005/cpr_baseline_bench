@@ -23,17 +23,19 @@ also rejects a positional method. `--skip-install` is unnecessary for tables-onl
 ## Inputs and comparability
 
 Each accepted result is a pair of `outputs/<method>/metrics.json` and `run.json`.
-The evaluator's metric values and the existing percentage formatting are retained.
+The overall CSV includes Macro-Full-mAP, the arithmetic mean of the
+per-case Full-mAP values over the cases present on test. Full-mAP remains
+query-weighted. The case CSV reports ID and Full mAP and R@1 in RCR order.
+Empty cases have blank cells. Values in the CSVs are percentages.
 
-- Metrics must match the current gallery/query manifest hashes. Previous-data
-  results are skipped, rather than mixed into the current comparison.
+- Metrics must use the RCR test protocol and match the current test
+  gallery/query hashes. Tuned runs must also match the current val fingerprint.
 - Method IDs must agree between the directory, metrics and adjacent run metadata.
-  An optional runner manifest stamp must match the evaluated stamp. Scene results
-  produced by the direct evaluator can omit this runner stamp.
-- Legacy person-protocol results are skipped. A current person-protocol result
-  must have complete detector/localization fingerprints, matching versions and
-  manifest hashes, SHA256 digests for image bytes, actual detection arrays and
-  selected memberships, and selector provenance.
+  The inference metadata records the manifests used to score the test set.
+- Legacy person results and benchmark scene CLIP results from older checkpoints
+  are skipped. A current person result must record the RCR detection cache ID
+  and index SHA256, matching manifests and selector provenance, and checksums
+  for gallery image bytes, projected boxes and selected memberships.
 - Localization must link back to the same detection fingerprint and array digest.
   Across person runs, detector geometry and selected memberships must agree.
   Image-content hashes must agree across runs that record them, including scene
@@ -41,8 +43,8 @@ The evaluator's metric values and the existing percentage formatting are retaine
   forward or a fresh scan of gallery image files.
 - The separate text-free diagnostic is excluded from the primary table.
 
-Shared HF results are labeled `Shared person HF v2`; scene results retain
-`Native scene v1`. Historical metrics and model scoring are not rewritten.
+Person results using RCR detections carry the label `Shared RCR boxes`. Scene results
+carry `Native scene v1`. Historical metrics and model scoring are not rewritten.
 If comparison fails, rerun the affected baseline with the current manifests and
 shared cache rather than editing provenance to force acceptance.
 
@@ -61,5 +63,3 @@ python -m pytest -q
 Regression tests exercise standalone `python -S` entry points without adapters,
 models or a method environment, provenance mismatches, current scene/person
 comparisons, early preflight, and preservation of existing tables after failures.
-Detector, FAFA text policy, evaluator and retrieval algorithms are unchanged by
-the reporting follow-up.

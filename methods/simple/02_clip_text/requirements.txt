@@ -2,5 +2,8 @@ numpy
 pillow
 pyyaml
 torch
+torchvision
 tqdm
 git+https://github.com/openai/CLIP.git@a1d071733d7111c9c014f024669f959182114e33
+ftfy==6.3.1
+wcwidth==0.2.13

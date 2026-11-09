@@ -3,16 +3,24 @@
 from __future__ import annotations
 import argparse, gc, hashlib, json, os, re, sys
 from pathlib import Path
-from typing import Any, Sequence
+from statistics import fmean
+from tempfile import TemporaryDirectory
 import numpy as np
 import torch
 import yaml
-from PIL import Image
 ROOT=Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path: sys.path.insert(0,str(ROOT))
+from benchmark_data import manifest_fingerprint
+from cpr_person.cache import atomic_json
+from cpr_person.protocol import require_aligned_run
+from cpr_person.validation import verify_tuning_manifests
+from evaluate import average_precision, full_relevance, rank_scores
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 DEFAULT_CONFIG=Path(__file__).resolve().parent/'config.yaml'
-METHOD_ID='retrieve_qwen25vl_rerank'; ADAPTER_VERSION='2026-08-13-v1-rank-safe-topk'; CACHE_SCHEMA=1; SELECT_SCHEMA=1
+METHOD_ID = "retrieve_qwen25vl_rerank"
+ADAPTER_VERSION = "rcr-val-test-nonself-topk-v2"
+CACHE_SCHEMA = 2
+SELECT_SCHEMA = 2
 
 def load_yaml(p):
     with p.open('r',encoding='utf-8') as f: x=yaml.safe_load(f)
@@ -66,10 +74,6 @@ def validate_scores(x,shape,label):
     if not np.issubdtype(x.dtype,np.floating): raise TypeError(f'{label} must be floating')
     for s in range(0,shape[0],256):
         if not np.isfinite(np.asarray(x[s:s+256])).all(): raise ValueError(f'{label} contains NaN/Inf')
-def ensure_val(main_g,main_q,val_g,val_q):
-    for p in (val_g,val_q):
-        if not p.is_file(): raise FileNotFoundError(f'Missing validation manifest: {rel(p)}')
-    if sha(main_g)==sha(val_g) and sha(main_q)==sha(val_q): raise RuntimeError('Validation manifests equal evaluation manifests; refusing leakage.')
 def validate_qwen(cfg):
     v=cfg['verifier']; d=resolve(v['checkpoint_dir']); m=resolve(v['prepared_marker'])
     data=read_json(m)
@@ -101,18 +105,25 @@ def s6_sources(cfg,main_g,main_q,val_g,val_q):
     if not main_scores.is_file() or run is None or run.get('method')!=f['method']:
         raise FileNotFoundError('S11 requires a completed S6 run. Run `python run_baseline.py groundingdino_clipreid_set_text` first.')
     from cpr_person.adapter import require_person_branch
+    require_aligned_run(run, f["method"])
     require_person_branch(run, main_g, main_q)
     if alpha is None or not isinstance(alpha.get('selected_alpha'),(int,float)): raise RuntimeError('Missing/stale S6 alpha_selection.json')
     afp=alpha.get('fingerprint')
     if not isinstance(afp,dict) or afp.get('validation_gallery_sha256')!=sha(val_g) or afp.get('validation_queries_sha256')!=sha(val_q):
         raise RuntimeError('S6 alpha selection was not produced from the configured validation manifests.')
+    if alpha.get("selection_split") != "val" or run.get("validation_fingerprint") != manifest_fingerprint(ROOT, "val"):
+        raise RuntimeError("Run S6 with selection on the current RCR val split first")
+    for kind, key in (("reid_scores", "validation_reid_scores_sha256"),
+                      ("clip_text_scores", "validation_clip_scores_sha256")):
+        if afp.get(key) != sha(resolve(f["validation"][kind])):
+            raise RuntimeError(f"S6 validation {kind} differ from the frozen selection")
     run_alpha=(run.get('fusion') or {}).get('selected_alpha')
     if not isinstance(run_alpha,(int,float)) or abs(float(run_alpha)-float(alpha['selected_alpha']))>1e-12:
         raise RuntimeError('S6 run.json and alpha_selection.json disagree on selected alpha.')
     mg=load_jsonl(main_g); mq=load_jsonl(main_q); x=np.load(main_scores,mmap_mode='r',allow_pickle=False); validate_scores(x,(len(mq),len(mg)),'S6 main scores')
     vr=np.load(resolve(f['validation']['reid_scores']),mmap_mode='r',allow_pickle=False); vt=np.load(resolve(f['validation']['clip_text_scores']),mmap_mode='r',allow_pickle=False)
     vg=load_jsonl(val_g); vq=load_jsonl(val_q); shape=(len(vq),len(vg)); validate_scores(vr,shape,'S6 val ReID'); validate_scores(vt,shape,'S6 val CLIP')
-    a=float(alpha['selected_alpha']); return x,vr,vt,a,mg,mq,vg,vq
+    a=float(alpha['selected_alpha']); return x,vr,vt,a,mg,mq,vg,vq,run
 
 def prepare_val_s6(cfg,vr,vt,a,shape):
     p=resolve(cfg['cache']['validation_first_stage_scores']); meta=p.with_suffix(p.suffix+'.meta.json')
@@ -142,8 +153,11 @@ def qwen_verify_cache(cfg,gallery,queries,first_scores,first_stage_path,manifest
     model=Qwen2_5_VLForConditionalGeneration.from_pretrained(str(checkpoint),torch_dtype=qdtype(str(cfg['runtime']['qwen_dtype'])),attn_implementation=str(cfg['runtime']['qwen_attn_implementation']),local_files_only=True).to(device); model.eval()
     gidx=gallery_index(gallery); indices=np.empty((len(queries),max_k),np.int64); scores=np.empty((len(queries),max_k),np.float32)
     for qi in progress_bar(range(len(queries)),desc=f'Qwen verify top-{max_k}',total=len(queries),unit='query'):
-        order=np.argsort(-np.asarray(first_scores[qi]),kind='stable'); top=order[:max_k]; indices[qi]=top
-        ref_i=gidx[queries[qi]['image_id']]; ref=image_path(gallery[ref_i],ref_i); inst=prompt(cfg,queries[qi].get('text'))
+        ref_i = gidx[queries[qi]["image_id"]]
+        top = rank_scores(first_scores[qi], ref_i)[:max_k]
+        indices[qi] = top
+        ref = image_path(gallery[ref_i], ref_i)
+        inst = prompt(cfg, queries[qi].get("text"))
         for j,gi in enumerate(top):
             cand=image_path(gallery[int(gi)],int(gi)); messages=[{'role':'user','content':[{'type':'image','image':ref.as_uri()},{'type':'image','image':cand.as_uri()},{'type':'text','text':inst}]}]
             rendered=processor.apply_chat_template(messages,tokenize=False,add_generation_prompt=True); images,videos=process_vision_info(messages)
@@ -155,63 +169,164 @@ def qwen_verify_cache(cfg,gallery,queries,first_scores,first_stage_path,manifest
     del model,processor; gc.collect(); torch.cuda.empty_cache(); return indices,scores
 
 def rank_prior(k):
-    if k==1:return np.ones(1,np.float32)
-    return (1.0-np.arange(k,dtype=np.float32)/(k-1)).astype(np.float32)
-def reranked_order(first_row,top_indices,verifier,k,w):
-    base=np.argsort(-np.asarray(first_row),kind='stable'); expected=base[:k]
-    if not np.array_equal(expected,np.asarray(top_indices[:k])): raise RuntimeError('Verifier cache top-K does not match first-stage ranking')
-    fused=w*rank_prior(k)+(1-w)*np.asarray(verifier[:k],np.float32); local=np.argsort(-fused,kind='stable')
-    return np.concatenate([expected[local],base[k:]])
-def ap_from_order(order,query,gidx):
-    self_i=gidx[query['image_id']]; order=order[order!=self_i]; pos={gidx[x] for x in query['full_positive_ids'] if x in gidx}; pos.discard(self_i)
-    if not pos: raise ValueError(f"{query.get('query_id')}: no validation Full positives")
-    ranks=np.flatnonzero(np.isin(order,list(pos)))+1
-    if not len(ranks): raise ValueError('No positive after ranking')
-    return float(np.mean(np.arange(1,len(ranks)+1)/ranks))
-def select_params(cfg,val_scores,indices,verifier,gallery,queries):
-    p=resolve(cfg['rerank']['result']); expected={'schema':SELECT_SCHEMA,'adapter':ADAPTER_VERSION,'val_scores_sha':sha(resolve(cfg['cache']['validation_first_stage_scores'])),'verifier_sha':sha(resolve(cfg['cache']['validation_verifier'])),'top_k_grid':[int(x) for x in cfg['rerank']['top_k_grid']],'weight_grid':[float(x) for x in cfg['rerank']['first_stage_weight_grid']]}
-    cur=read_json(p)
-    if cur and all(cur.get(k)==v for k,v in expected.items()): return int(cur['selected_top_k']),float(cur['selected_first_stage_weight']),cur
-    gidx=gallery_index(gallery); best=None; trials=[]
-    for k in sorted(expected['top_k_grid']):
-        for w in sorted(expected['weight_grid'],reverse=True):
-            aps=[]
-            for qi,q in enumerate(queries): aps.append(ap_from_order(reranked_order(val_scores[qi],indices[qi],verifier[qi],k,w),q,gidx))
-            m=float(np.mean(aps)); trials.append({'top_k':k,'first_stage_weight':w,'Full-mAP':m})
-            key=(m,-k,w)
-            if best is None or key>best[0]: best=(key,k,w,m)
-    payload={**expected,'selected_top_k':best[1],'selected_first_stage_weight':best[2],'selected_full_map':best[3],'trials':trials,'tie_break':cfg['rerank']['tie_break']}; write_json(p,payload); return best[1],best[2],payload
+    return np.linspace(1.0, 0.0, k, dtype=np.float32)
 
-def write_final(first_scores,indices,verifier,k,w,out_path):
-    q,n=first_scores.shape; out=np.lib.format.open_memmap(out_path,'w+',dtype=np.float32,shape=(q,n)); rank_scores=np.arange(n,0,-1,dtype=np.float32)
-    for qi in progress_bar(range(q),desc='Write reranked full rankings',total=q,unit='query'):
-        order=reranked_order(first_scores[qi],indices[qi],verifier[qi],k,w); row=np.empty(n,np.float32); row[order]=rank_scores; out[qi]=row
-    out.flush(); return out
+
+def reranked_order(base, top_indices, verifier, k, weight):
+    top = base[:k]
+    if not np.array_equal(top, top_indices[:k]):
+        raise RuntimeError("Verifier cache top-K does not match the eligible first-stage ranking")
+    fused = weight * rank_prior(k) + (1.0 - weight) * verifier[:k]
+    local = np.argsort(-fused, kind="stable")
+    return np.concatenate([top[local], base[k:]])
+
+
+def select_params(cfg, val_scores, indices, verifier, gallery, queries, validation_fingerprint):
+    rerank = cfg["rerank"]
+    path = resolve(rerank["result"])
+    expected = {
+        "schema": SELECT_SCHEMA,
+        "adapter": ADAPTER_VERSION,
+        "selection_split": "val",
+        "validation_fingerprint": validation_fingerprint,
+        "val_scores_sha": sha(resolve(cfg["cache"]["validation_first_stage_scores"])),
+        "verifier_sha": sha(resolve(cfg["cache"]["validation_verifier"])),
+        "top_k_grid": sorted({int(x) for x in rerank["top_k_grid"]}),
+        "weight_grid": sorted({float(x) for x in rerank["first_stage_weight_grid"]}, reverse=True),
+    }
+    if not expected["weight_grid"] or any(not 0.0 <= w <= 1.0 for w in expected["weight_grid"]):
+        raise ValueError("Rerank weights must lie in [0, 1]")
+    current = read_json(path)
+    if current and all(current.get(key) == value for key, value in expected.items()):
+        k, weight = current.get("selected_top_k"), current.get("selected_first_stage_weight")
+        if k in expected["top_k_grid"] and weight in expected["weight_grid"]:
+            return k, weight, current
+
+    gallery_ids = gallery_index(gallery)
+    relevance = [full_relevance(query, gallery_ids) for query in queries]
+    bases = [rank_scores(row, self_index) for row, (self_index, _) in zip(val_scores, relevance, strict=True)]
+    trials = []
+    for k in expected["top_k_grid"]:
+        for weight in expected["weight_grid"]:
+            score = fmean(
+                average_precision(reranked_order(base, top, values, k, weight), positives)
+                for base, top, values, (_, positives) in zip(bases, indices, verifier, relevance, strict=True)
+            )
+            trials.append({"top_k": k, "first_stage_weight": weight, "Full-mAP": score})
+    best = max(trials, key=lambda row: (row["Full-mAP"], -row["top_k"], row["first_stage_weight"]))
+    result = {
+        **expected,
+        "selected_top_k": best["top_k"],
+        "selected_first_stage_weight": best["first_stage_weight"],
+        "selected_full_map": best["Full-mAP"],
+        "trials": trials,
+        "tie_break": rerank["tie_break"],
+    }
+    atomic_json(path, result)
+    return best["top_k"], best["first_stage_weight"], result
+
+
+def write_final(first_scores, indices, verifier, self_indices, k, weight, path):
+    num_queries, num_gallery = first_scores.shape
+    scores = np.arange(num_gallery - 1, 0, -1, dtype=np.float32)
+    with TemporaryDirectory(prefix=".rerank-", dir=path.parent) as directory:
+        temporary = Path(directory) / path.name
+        output = np.lib.format.open_memmap(
+            temporary, mode="w+", dtype=np.float32, shape=(num_queries, num_gallery)
+        )
+        try:
+            for qi in progress_bar(
+                range(num_queries), desc="Write reranked full rankings", total=num_queries, unit="query"
+            ):
+                base = rank_scores(first_scores[qi], self_indices[qi])
+                order = reranked_order(base, indices[qi], verifier[qi], k, weight)
+                output[qi, order] = scores
+                output[qi, self_indices[qi]] = 0.0
+            output.flush()
+        finally:
+            del output
+        temporary.replace(path)
+    return np.load(path, mmap_mode="r", allow_pickle=False)
+
 
 def main():
-    tracker=PhaseTracker(METHOD_ID,total=7)
-    with tracker.phase('Load config and validate S6/validation artifacts'):
-        p=argparse.ArgumentParser(); p.add_argument('--config',default=str(DEFAULT_CONFIG)); args=p.parse_args(); cfg=load_yaml(resolve(args.config)); config_path=resolve(args.config)
-        mg=resolve(cfg['data']['gallery_manifest']); mq=resolve(cfg['data']['query_manifest']); vg=resolve(cfg['rerank']['validation']['gallery_manifest']); vq=resolve(cfg['rerank']['validation']['query_manifest']); ensure_val(mg,mq,vg,vq)
-        main,vr,vt,a,gallery,queries,val_gallery,val_queries=s6_sources(cfg,mg,mq,vg,vq); val=prepare_val_s6(cfg,vr,vt,a,(len(val_queries),len(val_gallery)))
-        device=torch.device(str(cfg['runtime']['device'])); checkpoint,marker=validate_qwen(cfg); maxk=max(int(x) for x in cfg['rerank']['top_k_grid'])
-        if maxk>len(val_gallery) or maxk>len(gallery): raise ValueError('top-K exceeds gallery size')
-        tracker.log(f'S6_alpha={a:.2f} max_K={maxk} main={main.shape} val={val.shape}')
-    with tracker.phase('Verify validation top-K candidates with Qwen'):
-        vi,vs=qwen_verify_cache(cfg,val_gallery,val_queries,val,resolve(cfg['cache']['validation_first_stage_scores']),vg,vq,checkpoint,marker,resolve(cfg['cache']['validation_verifier']),maxk,device)
-    with tracker.phase('Select top-K and fusion weight on validation Full-mAP'):
-        k,w,sel=select_params(cfg,val,vi,vs,val_gallery,val_queries); tracker.log(f'selected_K={k} first_stage_weight={w:.2f} val_Full-mAP={sel["selected_full_map"]:.6f}')
-    with tracker.phase('Verify main top-K candidates with Qwen'):
-        mi,ms=qwen_verify_cache(cfg,gallery,queries,main,resolve(cfg['first_stage']['scores']),mg,mq,checkpoint,marker,resolve(cfg['cache']['main_verifier']),k,device)
-    with tracker.phase('Construct rank-safe complete full-gallery scores'):
-        od=resolve(cfg['output']['dir']); od.mkdir(parents=True,exist_ok=True); scores=write_final(main,mi,ms,k,w,od/'scores.npy'); validate_scores(scores,main.shape,'final scores')
-    with tracker.phase('Validate ranking invariants'):
-        for qi in range(min(32,len(queries))):
-            base=np.argsort(-np.asarray(main[qi]),kind='stable'); final=np.argsort(-np.asarray(scores[qi]),kind='stable')
-            if set(base[:k])!=set(final[:k]): raise RuntimeError('Top-K membership invariant violated')
-            if not np.array_equal(base[k:],final[k:]): raise RuntimeError('Outside-top-K order invariant violated')
-        tracker.log('top-K membership preserved; outside-top-K order preserved')
-    with tracker.phase('Write run metadata'):
-        od=resolve(cfg['output']['dir']); payload={'method':cfg['method'],'display_name':cfg['display_name'],'group':cfg['group'],'cpr_supervision':cfg['cpr_supervision'],'adapter_version':ADAPTER_VERSION,'first_stage_method':cfg['first_stage']['method'],'verifier':{'repo_id':cfg['verifier']['repo_id'],'revision':cfg['verifier']['revision']},'selected_top_k':k,'selected_first_stage_weight':w,'selection':rel(resolve(cfg['rerank']['result'])),'score_semantics':'strictly_descending_rank_surrogate','outside_top_k_order_preserved':True,'query_image_removed_inside_method':False,'config':rel(config_path),'num_queries':len(queries),'num_gallery':len(gallery),'scores':rel(od/'scores.npy'),'higher_is_better':True}; write_json(od/'run.json',payload); tracker.log(f'scores={rel(od/"scores.npy")}')
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG))
+    config_path = resolve(parser.parse_args().config)
+    cfg = load_yaml(config_path)
+    tracker = PhaseTracker(METHOD_ID, total=6)
+    with tracker.phase("Load test and validate S6 sources"):
+        test_gallery_path = resolve(cfg["data"]["gallery_manifest"])
+        test_query_path = resolve(cfg["data"]["query_manifest"])
+        val_gallery_path = resolve(cfg["rerank"]["validation"]["gallery_manifest"])
+        val_query_path = resolve(cfg["rerank"]["validation"]["query_manifest"])
+        validation_fingerprint = verify_tuning_manifests(
+            ROOT, test_gallery_path, test_query_path, val_gallery_path, val_query_path
+        )
+        test_scores, reid, text, alpha, gallery, queries, val_gallery, val_queries, first_stage = s6_sources(
+            cfg, test_gallery_path, test_query_path, val_gallery_path, val_query_path
+        )
+        val_scores = prepare_val_s6(cfg, reid, text, alpha, (len(val_queries), len(val_gallery)))
+        device = torch.device(cfg["runtime"]["device"])
+        checkpoint, marker = validate_qwen(cfg)
+        ks = [int(k) for k in cfg["rerank"]["top_k_grid"]]
+        if not ks or min(ks) < 1 or max(ks) >= min(len(val_gallery), len(gallery)):
+            raise ValueError("Rerank top-K must fit both non-self galleries")
+
+    with tracker.phase("Verify validation top-K candidates"):
+        val_indices, val_verifier = qwen_verify_cache(
+            cfg, val_gallery, val_queries, val_scores,
+            resolve(cfg["cache"]["validation_first_stage_scores"]), val_gallery_path, val_query_path,
+            checkpoint, marker, resolve(cfg["cache"]["validation_verifier"]), max(ks), device,
+        )
+    with tracker.phase("Select top-K and fusion weight on validation Full-mAP"):
+        k, weight, selection = select_params(
+            cfg, val_scores, val_indices, val_verifier, val_gallery, val_queries, validation_fingerprint
+        )
+        tracker.log(f"selected_K={k} weight={weight:.2f} val_Full-mAP={selection['selected_full_map']:.6f}")
+
+    with tracker.phase("Verify test top-K candidates with frozen settings"):
+        indices, verifier = qwen_verify_cache(
+            cfg, gallery, queries, test_scores,
+            resolve(cfg["first_stage"]["scores"]), test_gallery_path, test_query_path,
+            checkpoint, marker, resolve(cfg["cache"]["main_verifier"]), k, device,
+        )
+    with tracker.phase("Write complete test rankings"):
+        output = resolve(cfg["output"]["dir"])
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "run.json").unlink(missing_ok=True)
+        gallery_ids = gallery_index(gallery)
+        self_indices = [gallery_ids[query["image_id"]] for query in queries]
+        scores = write_final(test_scores, indices, verifier, self_indices, k, weight, output / "scores.npy")
+        validate_scores(scores, test_scores.shape, "final test scores")
+
+    with tracker.phase("Write run metadata"):
+        atomic_json(output / "run.json", {
+            "method": cfg["method"],
+            "display_name": cfg["display_name"],
+            "group": cfg["group"],
+            "cpr_supervision": cfg["cpr_supervision"],
+            "adapter_version": ADAPTER_VERSION,
+            "first_stage_method": cfg["first_stage"]["method"],
+            "scene_clip_sha256": first_stage["scene_clip_sha256"],
+            "shared_person_protocol": first_stage["shared_person_protocol"],
+            "verifier": {key: cfg["verifier"][key] for key in ("repo_id", "revision")},
+            "selected_top_k": k,
+            "selected_first_stage_weight": weight,
+            "selection": rel(resolve(cfg["rerank"]["result"])),
+            "validation_fingerprint": validation_fingerprint,
+            "data_fingerprint": manifest_fingerprint(ROOT),
+            "score_semantics": "strictly_descending_rank_surrogate",
+            "outside_top_k_order_preserved": True,
+            "query_image_excluded_from_shortlist": True,
+            "config": rel(config_path),
+            "num_queries": len(queries),
+            "num_gallery": len(gallery),
+            "scores": rel(output / "scores.npy"),
+            "higher_is_better": True,
+        })
     tracker.finish()
-if __name__=='__main__': main()
+
+
+if __name__ == "__main__":
+    main()
