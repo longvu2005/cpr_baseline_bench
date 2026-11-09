@@ -128,7 +128,9 @@ def test_hf_letterbox_globals_and_rcr_cache_parity_with_real_weights(
     rows = [{"image_id": ids[i], "path": str(paths[i])} for i in (2, 0)]
     copied, proof = read_scene_globals(cache / "index.pt", rows, canonical_hash(ids))
     np.testing.assert_allclose(copied, expected[[2, 0]], rtol=1e-5, atol=1e-5)
-    assert proof["native_global_features_only"] and proof["image_content_verified"]
+    # RCR's own builder writes no image digests; reuse must still work.
+    assert proof["native_global_features_only"]
+    assert proof["image_binding"] == "rcr_gallery_order"
     monkeypatch.setenv("CPR_RCR_SCENE_CACHE", str(cache))
     monkeypatch.setenv("CPR_SCENE_CACHE_ROOT", str(tmp_path / "shared"))
     gm = tmp_path / "gallery.jsonl"

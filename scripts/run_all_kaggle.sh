@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-: "${CPR_RCR_REPO:?Set the RCR checkout path}"
 : "${RCR_FINAL_DIR:?Set the complete final export path}"
 : "${RCR_IMAGE_ROOT:?Set the full RGB image root}"
 : "${RCR_DETECTION_CACHE:?Set the original RCR detection directory/index}"
@@ -25,23 +24,20 @@ python validate_data.py
 python -c 'from cpr_baselines.scene_runtime import prepare_runtime;prepare_runtime()'
 export CPR_SCENE_CLIP_PYTHON="$PWD/.baseline_venvs/shared_clip/bin/python"
 "$CPR_SCENE_CLIP_PYTHON" -m cpr_baselines.scene_worker --prepare checkpoints/clip/hf-vit-base-patch32
-has_provenance() {
-    "$CPR_SCENE_CLIP_PYTHON" -c 'import sys,torch;from pathlib import Path;p=Path(sys.argv[1]);p=p/"index.pt" if p.is_dir() else p;x=torch.load(p,map_location="cpu",weights_only=True,mmap=True);raise SystemExit(0 if isinstance(x.get("image_content_sha256"),list) and len(x["image_content_sha256"])==len(x["image_ids"]) else 1)' "$1"
-}
-verify=()
+# Original RCR indexes are read directly; they need no verified copy.
 export CPR_RCR_DETECTION_CACHE="$RCR_DETECTION_CACHE"
-if ! has_provenance "$RCR_DETECTION_CACHE"; then
-    verify+=(--detections "$RCR_DETECTION_CACHE")
-    export CPR_RCR_DETECTION_CACHE="$PWD/cache/verified_rcr/detections"
-fi
 if [[ -n "${RCR_SCENE_CACHE:-}" ]]; then
     export CPR_RCR_SCENE_CACHE="$RCR_SCENE_CACHE"
-    if ! has_provenance "$RCR_SCENE_CACHE"; then
+fi
+# Optional audit: rerun Grounding DINO/CLIP on every image and write proven copies.
+if [[ "${CPR_VERIFY_RCR_CACHES:-0}" == 1 ]]; then
+    : "${CPR_RCR_REPO:?Set the RCR checkout path for verification}"
+    verify=(--detections "$RCR_DETECTION_CACHE")
+    export CPR_RCR_DETECTION_CACHE="$PWD/cache/verified_rcr/detections"
+    if [[ -n "${RCR_SCENE_CACHE:-}" ]]; then
         verify+=(--scene "$RCR_SCENE_CACHE")
         export CPR_RCR_SCENE_CACHE="$PWD/cache/verified_rcr/scene"
     fi
-fi
-if ((${#verify[@]})); then
     "$CPR_SCENE_CLIP_PYTHON" scripts/verify_rcr_cache_provenance.py --rcr-repo "$CPR_RCR_REPO" \
         --rcr-final-dir "$RCR_FINAL_DIR" --image-root "$RCR_IMAGE_ROOT" \
         --output "$PWD/cache/verified_rcr" --device cuda "${verify[@]}"

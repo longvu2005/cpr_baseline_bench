@@ -1,12 +1,60 @@
 # Audit 29/29 baseline đối chiếu RCR
 
-Nguồn: baseline `65a7c373b98ece2fb632242d13f2ea0cdddd4de6`; RCR
-`2fe92766d5158f8dd87297d3bc4cb6280b8ed63b`, ngày 2026-11-09.
-Các cột “trước sửa” mô tả đúng hai revision này. Giữ nguyên 29 method IDs,
-tên hiển thị và bố cục nhóm. “Đồng bộ” dưới đây nói về code/adapter;
-không có phương pháp nào đã chạy full native final benchmark trong môi trường này.
+Rà soát hiện tại: baseline `5f7a9d395f5c98aa16ac8e3f07fe57cdc5f8dfe9`, RCR
+`2fe92766d5158f8dd87297d3bc4cb6280b8ed63b` (không sửa RCR), ngày 2026-11-09.
+Phần "Lần rà soát trước" bên dưới mô tả lần đồng bộ từ `65a7c37` và vẫn đúng,
+trừ các điểm được sửa ở đây. Giữ nguyên 29 method IDs, tên hiển thị và nhóm.
+Không phương pháp nào được chạy full native trên final data trong môi trường này.
 
-## Những khác biệt trước khi sửa
+## Kiểm chứng trực tiếp với RCR (lần này)
+
+| Hạng mục | Cách kiểm | Kết quả |
+| --- | --- | --- |
+| Import val/test | `prepare_data` so với `load_rcr_data`, `split_samples`, `split_image_ids`, `required_identity_ids`, `sample_selection_texts` trên toàn bộ final | Khớp tuyệt đối: thứ tự gallery/query, Full positives chiếu theo split, ID required, case, instruction, selection text; val 1,799/5,684, test 2,307/7,868 |
+| Định tuyến text theo Subject | `modify_text` so với `subject_changes` của RCR FAFA trên 4,106 queries | 0 khác biệt; 160 val và 339 test giữ nguyên mệnh đề quan hệ |
+| Evaluator | `evaluate_scores` so với `evaluate_rankings` của RCR, điểm nguyên có nhiều tie | Sai lệch tối đa 3.5e-18; Macro-Full-mAP bằng trung bình đều các case có mặt |
+| Subject selection/GROUP | `localize_queries` so với `choose_boxes`+`select_subject_members` của RCR, có ảnh 8 người, ảnh rỗng, thiếu candidate, DUAL, cap 5 | Khớp box/fallback từng member; mutation đảo tie-break bị bắt |
+| Partial SetMatch | `aggregate_people` so với RCR với K=1..10, N=0..8, tie và penalty native | Khớp bit-for-bit |
+| Native algorithms | 118 thân hàm được bảo vệ trong 27 file | Không đổi, trên Python 3.12 và 3.13 |
+
+## Lỗi tìm thấy và đã sửa (lần này)
+
+1. **Không tái sử dụng được cache RCR gốc.** `read_scene_globals` và nhánh
+   detection bắt buộc trường `image_content_sha256`, nhưng `build_cache`/
+   `build_detection_cache` của RCR không ghi trường này. Với `cache/scene/index.pt`
+   và `cache/detections/index.pt` thật, mọi person method và mọi scene method dùng
+   `--rcr-scene-cache` đều dừng. Kịch bản Kaggle buộc chạy lại Grounding DINO và
+   CLIP trên toàn bộ 37,107 ảnh để tạo bản "verified", với revision detector khác
+   RCR (RCR không pin revision), nên có thể thất bại hoặc tạo box khác Proposed.
+   Sửa: đọc index gốc theo đúng hợp đồng của RCR FAFA/Proposed (cache_id, thứ tự
+   gallery, cấu hình, kích thước từng ảnh; byte ảnh hiện tại vào fingerprint). Scene
+   globals còn được kiểm bằng cách encode lại 16 ảnh chọn theo SHA256 của ID
+   (không dùng nhãn), yêu cầu cosine >= 0.999. Digest vẫn được kiểm khi có.
+   Bản audit đầy đủ chuyển thành tùy chọn `CPR_VERIFY_RCR_CACHES=1`.
+   `RESULT_PROTOCOL` tăng lên v6 để kết quả cũ phải chạy lại.
+2. **Hướng dẫn Kaggle lỗi thời.** Tài liệu yêu cầu checkout `65a7c37` rồi apply
+   patch đã nằm sẵn trong HEAD, cùng một patch RCR không có trong repo nào. Đã
+   viết lại: clone HEAD, dùng RCR không sửa.
+3. **Kiểm tra chữ ký native phụ thuộc phiên bản Python.** Python 3.13 đổi mặc định
+   `ast.dump`, làm test báo sai rằng `load_word4per` thay đổi. Sửa test, giữ digest.
+4. **CPU suite không chạy sạch khi thiếu torch** dù `requirements-dev.txt` nói
+   không cần torch: 6 test import torch trực tiếp. Nay chúng skip có lý do.
+5. **Test ghi đè kết quả thật.** Hai test chạy `run_baseline.py --all` với pipeline
+   giả, ghi trạng thái "completed" giả vào `runs/batch_status.json` (đầu vào của
+   `check_publication.py`) và xóa `runs/<S9|S11>/run.json`. Chạy test sau một batch
+   Kaggle sẽ phá kết quả. Nay hai test dùng thư mục tạm.
+6. **Rác trong repo:** `.vscode/` (task tự chạy `find … -delete` khi mở thư mục),
+   `checkpoints/lincir/prepared.json` và `config.json` sinh ra khi chuẩn bị (va chạm
+   với `stage_checkpoint_mount.py` khi mount có bản khác), khóa
+   `cache.gallery_features` không còn được đọc trong config S1–S4.
+
+Không thay đổi: encoder, weights, preprocessing native, tokenizer, composition,
+pairwise score, unmatched penalty, lưới tuning, cap 5 và thresholds của selector.
+Cap 5 giữ theo RCR FAFA; val chỉ có 1/1,799 query có Subject 6 identities.
+
+## Lần rà soát trước (từ `65a7c37`)
+
+### Những khác biệt trước khi sửa
 
 - Scene CLIP do benchmark sở hữu vẫn dùng OpenAI B/32 và center crop, khác
   HF B/32 letterbox của Proposed. Khác biệt lan qua S6–S9 và S11, không chỉ S1–S4.
@@ -35,7 +83,7 @@ bảng chỉ nêu phần riêng của từng phương pháp.
 
 | # | Method ID không đổi | Trước sửa: khác RCR/rủi ro chính | Sau sửa và phần giữ nguyên | Trạng thái/bằng chứng còn thiếu |
 | --- | --- | --- | --- | --- |
-| S1 | `clip_image` | OpenAI center crop khác Proposed; cache riêng | Chung frozen HF B/32 letterbox; đọc globals RCR nếu proven; cosine giữ nguyên | C, R; actual pretrained image/cache parity đã qua, chưa full test inference |
+| S1 | `clip_image` | OpenAI center crop khác Proposed; cache riêng | Chung frozen HF B/32 letterbox; đọc trực tiếp globals RCR (spot-check); cosine giữ nguyên | C, R; actual pretrained image/cache parity đã qua, chưa full test inference |
 | S2 | `clip_text` | OpenAI tokenizer/loader, scene gallery khác Proposed | Chung HF native tokenizer/EOS/right padding 77 và raw global projection | C, R; actual pretrained text parity đã qua |
 | S3 | `clip_early_fusion` | Gallery/text encoder khác Proposed | HF chung; normalized early composition giữ nguyên; 21 weights chọn val Full-mAP | C, R; fusion/evaluator contracts qua; cần val selection + full test thật |
 | S4 | `clip_late_fusion` | Encoder khác Proposed | HF chung; z-score bỏ reference; 21 weights chọn val Full-mAP | C, R; cần val selection + full test thật |

@@ -133,15 +133,32 @@ def _rcr_source(gallery_manifest):
             raise ValueError("Reimport the complete RCR final data with prepare_data.py")
         if provenance["gallery_ids_sha256"] != expected:
             raise ValueError("RCR detection gallery IDs/order differ from the imported final dataset")
-    hashes = index.get("image_content_sha256")
-    if not isinstance(hashes, list) or len(hashes) != len(index["image_ids"]):
-        raise ValueError("RCR detection index lacks build-time image digests; verify legacy tensors or rebuild with the paired patch")
-    mapping = dict(zip(index["image_ids"], hashes, strict=True))
-    for row in load_jsonl(manifest):
-        if mapping.get(row["image_id"]) != sha256_file(image_path(row)):
-            raise ValueError("RCR detections were built from different image bytes")
-    provenance["image_content_verified"] = True
+    provenance["image_binding"] = bind_rcr_images(
+        index["image_ids"], index.get("image_content_sha256"), load_jsonl(manifest))
     return index, provenance
+
+
+def bind_rcr_images(image_ids, hashes, rows):
+    """Bind RCR boxes to the current split images.
+
+    RCR's builder stores ordered IDs and original sizes, not image digests; its
+    FAFA and Proposed readers trust those immutable IDs. The same contract is
+    used here: every row must be indexed, and projection checks each size.
+    Current bytes enter the fingerprint separately. Digests written by a
+    patched builder are verified when present.
+    """
+    known = set(image_ids)
+    if any(row["image_id"] not in known for row in rows):
+        raise ValueError("A split image is absent from the RCR detection index")
+    if hashes is None:
+        return "rcr_ids_and_image_sizes"
+    if not isinstance(hashes, list) or len(hashes) != len(image_ids):
+        raise ValueError("Invalid build-time image digests in the RCR detection index")
+    mapping = dict(zip(image_ids, hashes, strict=True))
+    for row in rows:
+        if mapping[row["image_id"]] != sha256_file(image_path(row)):
+            raise ValueError("RCR detections were built from different image bytes")
+    return "build_time_sha256"
 
 
 def _detection_fingerprint(gallery_manifest, cfg, index, provenance):

@@ -32,7 +32,12 @@ from .scene_protocol import (
 )
 from .scene_runtime import scene_python
 from .provenance import execution_identity, probe_runtime
-from .scene_cache import scene_index_path, read_scene_globals
+from .scene_cache import (
+    read_scene_globals,
+    scene_index_path,
+    spot_check_globals,
+    spot_check_rows,
+)
 
 
 def scene_identity(checkpoint=None):
@@ -176,6 +181,13 @@ def gallery_features(model, preprocess, rows, cache, runtime, device, fingerprin
             metadata = read_json(ROOT / "data/manifest.json") or {}
             values, provenance = read_scene_globals(
                 source, rows, metadata.get("rcr_gallery_ids_sha256")
+            )
+            # Re-encode a few public images with the same worker; this binds an
+            # index that has no build-time digests to the current pixels/pipeline.
+            checked = spot_check_rows(rows)
+            provenance["spot_check"] = spot_check_globals(
+                values[checked],
+                model.images([rows[i]["path"] for i in checked], batch),
             )
         path = stage.directory / "gallery.npy"
         with atomic_file(path) as handle:

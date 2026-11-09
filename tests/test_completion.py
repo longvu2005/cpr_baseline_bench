@@ -264,6 +264,7 @@ def test_publication_check_cannot_treat_synthetic_metrics_as_native(
 def test_instruct_validation_glue_freezes_val_and_ignores_test_labels(
     tmp_path, monkeypatch, write_benchmark_views
 ):
+    pytest.importorskip("torch")
     import importlib.util
     from pathlib import Path
     import yaml
@@ -493,7 +494,7 @@ def test_wiser_wrapper_preserves_native_prompts_outputs_and_warm_cache(tmp_path)
 def test_legacy_cache_verification_rejects_mismatch_before_binding_images(tmp_path):
     from pathlib import Path
     import runpy
-    import torch
+    torch = pytest.importorskip("torch")
     from PIL import Image
 
     root = Path(__file__).resolve().parents[1]

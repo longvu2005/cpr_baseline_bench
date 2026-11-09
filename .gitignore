@@ -24,6 +24,10 @@ tables/
 # Local gallery images
 /data/gallery
 
+# Editor settings
+.vscode/
+.idea/
+
 # Python
 __pycache__/
 *.pyc
@@ -63,3 +67,4 @@ checkpoints/clip/.clip-prepare/
 .baseline_venvs/
 
 checkpoints/clip/hf-vit-base-patch32/
+checkpoints/lincir/hf/

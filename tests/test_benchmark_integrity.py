@@ -161,11 +161,16 @@ def test_evaluation_binds_scores_and_rejects_row_order_changes(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize('all_methods', [False, True])
-def test_checkpoint_unavailable_is_nonzero(monkeypatch, all_methods):
+def test_checkpoint_unavailable_is_nonzero(monkeypatch, tmp_path, all_methods):
     monkeypatch.setattr('sys.argv', ['run_baseline.py', '--all'] if all_methods
                         else ['run_baseline.py', 'clip_image'])
     monkeypatch.setattr(run_baseline, 'check_table_builder', lambda: None)
     monkeypatch.setattr(run_baseline, 'run_pipeline', lambda *_: False)
+    # --all writes batch status and removes blocked dependents' run.json under
+    # ROOT; never let a test touch real results in the checkout.
+    methods = run_baseline.discover_methods()
+    monkeypatch.setattr(run_baseline, 'discover_methods', lambda: methods)
+    monkeypatch.setattr(run_baseline, 'ROOT', tmp_path)
     with pytest.raises(SystemExit) as error:
         run_baseline.main()
     assert error.value.code != 0

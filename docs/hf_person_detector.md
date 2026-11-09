@@ -88,8 +88,9 @@ interactive GroundingDINO imports; it does not construct a person detector.
 
 Use Python 3.10-3.12 for the pinned Torch 2.5.1 / native FAFA dependencies.
 From the repository root, use the current [Kaggle workflow](kaggle.md) or
-pass the RCR detection cache explicitly. Official runs require verified source
-image digests; a legacy index must first be numerically verified or rebuilt.
+pass the RCR detection cache explicitly. The original RCR index is read as is,
+bound by its `cache_id`, gallery order and image sizes (digests are checked when
+present); see [Kaggle workflow](kaggle.md#get-the-code).
 The runner prepares `.baseline_venvs/shared_clip` for scene CLIP and the shared
 selector. It consumes RCR's detector index without constructing a detector.
 The standalone worker below remains a diagnostic path only. Native

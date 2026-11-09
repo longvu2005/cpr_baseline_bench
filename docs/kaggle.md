@@ -5,47 +5,38 @@ and the complete finalized RGB images and original RCR detection index. Native
 weights and very large snapshots can remain in read-only `/kaggle/input`.
 No substitute checkpoint/model is generated if any dependency is missing.
 
-## Apply the complete patch
+## Get the code
 
-The delivered baseline patch is based on commit
-`65a7c373b98ece2fb632242d13f2ea0cdddd4de6`; its RCR companion is based on
-`2fe92766d5158f8dd87297d3bc4cb6280b8ed63b`. The package provides a complete patch and a follow-up patch. On the unchanged
-base commit, apply only `baseline_completion.patch`. If the previous
-`CPR_RCR_Completion.zip` baseline patch is already applied, apply only
-`baseline_followup.patch`; it is checked against that exact previous artifact.
-Do not apply both. The RCR companion is unchanged and need not be applied twice.
-Do not reset an existing working tree with uncommitted work.
-
-After attaching the delivery as a Kaggle dataset, adjust `PATCH_DIR` to its actual
-folder. Run this Bash cell once:
+The repository already contains every baseline change; no patch is applied.
+RCR is used unmodified: the baselines read its original
+`cache/detections/index.pt` and, optionally, `cache/scene/index.pt`.
 
 ```bash
 %%bash
 set -euo pipefail
-PATCH_DIR=/kaggle/input/cpr-rcr-completion/CPR_RCR_Completion
-
 git clone https://github.com/longvu2005/cpr_baseline_bench.git /kaggle/working/cpr_baseline_bench
-cd /kaggle/working/cpr_baseline_bench
-git checkout 65a7c373b98ece2fb632242d13f2ea0cdddd4de6
-git apply --check "$PATCH_DIR/baseline_completion.patch"
-git apply "$PATCH_DIR/baseline_completion.patch"
-
+# Only needed for the optional cache audit and the cross-repo parity tests.
 git clone https://github.com/longvu2005/referential-composition-retrieval.git /kaggle/working/rcr
-git -C /kaggle/working/rcr checkout 2fe92766d5158f8dd87297d3bc4cb6280b8ed63b
-git -C /kaggle/working/rcr apply --check "$PATCH_DIR/rcr_cache_provenance.patch"
-git -C /kaggle/working/rcr apply "$PATCH_DIR/rcr_cache_provenance.patch"
 ```
 
-The RCR patch adds build-time image digests; it changes no Proposed model,
-loss, optimizer or retrieval formula. A legacy detection/scene index must first
-be numerically verified against actual frozen model forwards or rebuilt. The
-workflow below verifies all original tensors into a separate proven index when
-needed, preserving original tensors and cache IDs. The original RCR caches,
-FAFA shards, supervision and trained checkpoints are not edited by this verifier.
-A verification mismatch stops the run; use the correct images/environment or
-rebuild the affected cache and dependencies rather than adding hashes by hand.
-The scene verification copy contains the globals index for baseline reuse;
-keep using the original full scene cache (including feature shards) for Proposed.
+RCR's cache builders store ordered image IDs, original image sizes and the
+encoder/detector configuration, but no image digests. The baselines use the
+same contract as RCR FAFA and Proposed:
+
+- Detections: the content `cache_id`, gallery order against the imported final
+  export, detector settings and every split image size are checked. The current
+  image bytes are hashed into each run's fingerprint.
+- Scene globals: layout, pinned HF model/revision, 224 letterbox, gallery order
+  and index SHA256 are checked. Sixteen images, chosen by the SHA256 of their ID,
+  are re-encoded through the shared worker; every cosine must be at least 0.999.
+  A different image, crop or preprocessing fails this check.
+
+An index that does carry `image_content_sha256` (written by a patched builder or by
+the audit below) has those digests verified as well.
+`scripts/verify_rcr_cache_provenance.py` is an optional full audit that reruns
+Grounding DINO/CLIP on every image; enable it with `CPR_VERIFY_RCR_CACHES=1`. RCR
+loads Grounding DINO without a pinned revision, whereas the audit uses this repo's
+pinned revision, so a box mismatch there can reflect a different snapshot.
 
 ## Required external assets
 
@@ -87,14 +78,13 @@ resolved response model and exact response JSON are retained as experiment evide
 ## Complete execution
 
 Replace only the dataset path values with the mounted folders actually present.
-`RCR_IMAGE_ROOT` must contain the original `train/`, `val/`, `test/` subdirectories;
-the verifier needs every image in the full original cache. `RCR_SCENE_CACHE` is
-optional: omit its export to encode gallery scenes with the same frozen HF pipeline.
+`RCR_IMAGE_ROOT` must contain the original `train/`, `val/`, `test/` subdirectories.
+`RCR_SCENE_CACHE` is optional: omit its export to encode gallery scenes with the
+same frozen HF pipeline.
 
 ```bash
 %%bash
 set -euo pipefail
-export CPR_RCR_REPO=/kaggle/working/rcr
 export RCR_FINAL_DIR=/kaggle/input/rcr-final/dataset/data/final
 export RCR_IMAGE_ROOT=/kaggle/input/rcr-images/images
 export RCR_DETECTION_CACHE=/kaggle/input/rcr-proposed-cache/cache/detections
@@ -108,7 +98,7 @@ bash scripts/run_all_kaggle.sh
 ```
 
 The script imports exact val/test manifests, validates images, prepares shared HF
-CLIP, verifies legacy indexes when needed, then runs all 29 in dependency order.
+CLIP, reads the RCR indexes directly, then runs all 29 in dependency order.
 S9 requires successful S5 and S8 in the batch; S11 requires S6. Failure/unavailability
 is recorded and propagates to dependents; remaining methods still run. Exit status
 is nonzero if any method fails or publication artifacts are incomplete. No test
@@ -140,7 +130,11 @@ python scripts/check_publication.py
 
 ## Direct parity tests
 
-The offline unit suite needs `requirements-dev.txt`. Real component checks also
+The offline unit suite needs `requirements-dev.txt`. With only `CPR_TEST_RCR_REPO`
+set, `tests/test_rcr_protocol_parity.py` also compares, without torch, the
+complete val/test import, Subject text routing, metrics, Subject membership
+(GROUP, DUAL, shortages, the 5-member cap) and Partial SetMatch with the RCR
+checkout's own functions. Real component checks also
 need Torch/Transformers/OpenAI CLIP, both pinned CLIP assets, a prepared selector
 tokenizer and an RCR checkout. Opt-in missing assets fail rather than becoming a pass:
 

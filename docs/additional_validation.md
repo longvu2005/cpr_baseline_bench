@@ -1,8 +1,33 @@
 # Validation evidence and limits
 
-Audit date: 2026-11-09. Baseline base commit
-`65a7c373b98ece2fb632242d13f2ea0cdddd4de6`; RCR base
-`2fe92766d5158f8dd87297d3bc4cb6280b8ed63b`.
+## Current revision (2026-11-09)
+
+Baseline base `5f7a9d395f5c98aa16ac8e3f07fe57cdc5f8dfe9`, unmodified RCR
+`2fe92766d5158f8dd87297d3bc4cb6280b8ed63b`. Python 3.13.18, NumPy 2.5, SciPy
+1.18; no torch/transformers and no package installs were available here.
+
+| Check | Result | Scope |
+| --- | --- | --- |
+| CPU suite, no RCR checkout | 310 passed, 28 skipped | Skips need torch or opt-in pretrained assets; real `runs/` artifacts are left untouched |
+| CPU suite with `CPR_TEST_RCR_REPO` | 318 passed, 20 skipped | Adds torch-free parity in `test_rcr_protocol_parity.py` |
+| Final import vs RCR loader | Exact | All val/test queries and gallery rows, positives, required IDs, selection text |
+| Subject text routing vs RCR FAFA | Exact on 4,106 queries | `modify_text` / `subject_changes` |
+| Evaluator vs RCR | Max difference 3.5e-18 | Complete val/test with tied integer scores |
+| Subject selection vs RCR FAFA | Exact; mutation detected | GROUP saturating cap 5, DUAL, empty and short references, seeded stand-in features |
+| Partial SetMatch vs RCR | Bit-identical | K=1..10, N=0..8, ties, cosine and native penalties |
+| Native algorithm signatures | 118/118 unchanged | Python 3.12 and 3.13 |
+| Original RCR index binding | Passed contracts | Indexes without digests accepted; digests verified when present; spot-check rejects a different image/preprocessing |
+
+The skipped torch tests (HF letterbox/text parity with real weights, packed
+detector projection, Instruct-ReID glue, S9 proxy cache, cache audit) were not run
+here; run them on Kaggle as described in [kaggle.md](kaggle.md#direct-parity-tests).
+Stand-in selector features test the selection rule, not CLIP accuracy.
+
+## Previous revision (from `65a7c37`)
+
+The table below was recorded in a different environment (Python 3.12, Torch 2.6
+CPU) for the previous revision and the RCR companion patch, which this revision
+no longer needs. It was not rerun here.
 
 | Check | Result | Evidence scope |
 | --- | --- | --- |

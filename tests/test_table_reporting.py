@@ -74,7 +74,7 @@ def shared_provenance(root):
                  "gallery_manifest_sha256": fingerprint["gallery_sha256"],
                  "gallery_image_content_sha256": "a" * 64,
                  "protocol": {"backend": "rcr_detection_cache", "threshold": 0.30, "text_threshold": 0.25},
-                 "rcr_cache": {"layout": "person-detections-v1", "image_content_verified": True, "index_sha256": "1" * 64,
+                 "rcr_cache": {"layout": "person-detections-v1", "image_binding": "rcr_ids_and_image_sizes", "index_sha256": "1" * 64,
                                "cache_id": "2" * 64, "gallery_ids_sha256": "3" * 64}}
     boxes = "b" * 64
     return {"version": PROTOCOL_VERSION, "detections_fingerprint": detection,
@@ -146,8 +146,11 @@ def test_missing_reporting_module_fails_before_gallery_or_model_work(reporting_r
     assert not (reporting_repo / "tables").exists()
 
 
-def test_all_mode_checks_reporting_once_before_starting_methods(monkeypatch):
+def test_all_mode_checks_reporting_once_before_starting_methods(monkeypatch, tmp_path):
     methods = run_baseline.discover_methods()
+    # Keep the batch status write away from real results in the checkout.
+    monkeypatch.setattr(run_baseline, "discover_methods", lambda: methods)
+    monkeypatch.setattr(run_baseline, "ROOT", tmp_path)
     events = []
     monkeypatch.setattr(sys, "argv", ["run_baseline.py", "--all", "--skip-install"])
     monkeypatch.setattr(run_baseline, "check_table_builder", lambda: events.append("check"))

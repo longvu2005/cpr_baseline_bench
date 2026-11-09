@@ -389,7 +389,7 @@ def parse_args() -> argparse.Namespace:
         "--rcr-detection-cache", type=Path,
         help="RCR cache/detections directory or its index.pt for person baselines.",
     )
-    parser.add_argument("--rcr-scene-cache", type=Path, help="Verified native RCR scene index for global CLIP reuse")
+    parser.add_argument("--rcr-scene-cache", type=Path, help="Original RCR cache/scene directory or index.pt for native CLIP global reuse")
     modes.add_argument("--preflight", action="store_true", help="Report native prerequisites without installing or running models")
     modes.add_argument("--all", action="store_true", help="Run all discovered methods in dependency order.")
     modes.add_argument("--tables-only", action="store_true",

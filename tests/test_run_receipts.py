@@ -103,6 +103,7 @@ def load_method(relative, name):
 def test_s9_val_proxy_cache_revalidates_generator_images_and_rcr_globals(
     tmp_path, monkeypatch
 ):
+    pytest.importorskip("torch")
     import contextlib
 
     s9 = load_method("methods/simple/09_reid_qwen_proxy/run.py", "s9_receipt_contract")

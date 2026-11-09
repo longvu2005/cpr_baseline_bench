@@ -48,6 +48,11 @@ S7 embeds the Qwen rewrite and S8 embeds the generated proxy. S9 reuses the
 S8 scores and S11 reranks the aligned S6 shortlist. Published native encoders
 and S10's person-crop ViT-L/14 remain method-specific.
 
+With `--rcr-scene-cache` (or `CPR_RCR_SCENE_CACHE`), gallery globals are read
+directly from RCR's `cache/scene/index.pt` in split-gallery order; sixteen
+label-free images are re-encoded to confirm the pipeline (cosine >= 0.999).
+Query texts, rewrites and generated images are always encoded by the same worker.
+
 S3 and S4 select the RCR fusion weight grid on val by Full-mAP. S4 standardizes
 each score branch over the split gallery with the reference image excluded.
 
@@ -68,7 +73,9 @@ build it once from the RCR root in its Proposed environment.
 - As in RCR FAFA, accepted boxes carry an eligibility marker of `1.0`. Images
   without boxes get one flagged full-image fallback. Query localization adds
   full-image slots only when there are too few candidates for the Subject slots.
-- The benchmark reads the RCR index and reuses its boxes across person methods.
+- The benchmark reads the original RCR index and reuses its boxes across person
+  methods. As in RCR, an index without image digests is bound by its content ID,
+  gallery order and per-image sizes; current image bytes enter every run fingerprint.
   See the [legacy detector notes](hf_person_detector.md) for diagnostic runs.
 
 ## Subject localization and GROUP
@@ -91,6 +98,12 @@ Each Subject has at most `5` members, including its anchor. Consider extras
 in stable descending similarity order; competing Subjects use highest
 similarity, then Subject order. A predicted person belongs to at most one
 Subject. Fallbacks do not become extra members.
+
+The cap and thresholds are RCR FAFA's fixed values and are kept for parity. In
+val, one of 1,799 queries has a Subject with more than five annotated identities
+(six, GROUP); test has one as well, which is not used for any decision. A
+different cap would have to be chosen on val from the recorded
+`predicted_member_count_histogram` and then applied to every person method.
 
 INDIVIDUAL, GROUP, DUAL and RELATIONAL use this same rule. A single Subject
 can yield several components. Each native person encoder processes every

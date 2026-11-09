@@ -28,6 +28,9 @@ PERSON_METHODS = frozenset({
 
 TEXTFREE_DIAGNOSTIC_METHOD = "groundingdino_clipreid_set_textfree_diagnostic"
 
+# How shared RCR caches are bound to current images (see detection.bind_rcr_images).
+IMAGE_BINDINGS = frozenset({"rcr_ids_and_image_sizes", "build_time_sha256"})
+
 
 RCR_CLIP_NAME = "ViT-B/32"
 RCR_CLIP_SHA256 = "40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af"
@@ -49,7 +52,7 @@ def rcr_detection_source(provenance):
         return None
     source = fingerprint.get("rcr_cache")
     if (not isinstance(source, dict) or source.get("layout") != RCR_DETECTION_LAYOUT
-            or source.get("image_content_verified") is not True
+            or source.get("image_binding") not in IMAGE_BINDINGS
             or any(not isinstance(source.get(key), str) or not re.fullmatch(r"[0-9a-f]{64}", source[key])
                    for key in ("index_sha256", "cache_id", "gallery_ids_sha256"))):
         return None
@@ -76,7 +79,9 @@ def require_score_artifact(run, path):
         raise RuntimeError("Source scores differ from their completed run; rerun the source baseline")
 
 
-RESULT_PROTOCOL = "rcr-final-hfscene-person-v5-val-unmatched"
+# v6: genuine RCR scene/detection indexes are read directly (no forced verified
+# copy). Results from earlier protocols must be rerun, not relabelled.
+RESULT_PROTOCOL = "rcr-final-hfscene-person-v6-direct-rcr-caches"
 
 
 def current_implementation(run, root):

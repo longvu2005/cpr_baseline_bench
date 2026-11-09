@@ -22,6 +22,7 @@ def rcr_import(monkeypatch):
 
 
 def test_subject_memberships_and_partial_matching_match_rcr():
+    pytest.importorskip("torch")  # RCR's FAFA adapter imports it.
     from rcr.baselines.fafa_adapter import select_subject_members as expected_members
     from rcr.baselines.fafa_matching import partial_setmatch as expected_score
     from cpr_person.localization import select_subject_members
@@ -70,6 +71,7 @@ def test_crop_and_stored_pixel_orientation_match_rcr(tmp_path):
 
 
 def test_complete_final_splits_and_evaluator_match_rcr(tmp_path):
+    pytest.importorskip("torch")  # RCR's evaluator module imports it.
     import prepare_data
     from benchmark_data import load_jsonl, split_paths
     from cpr_baselines.common import public_inputs
@@ -168,7 +170,7 @@ def test_packed_detection_cache_projects_identical_rcr_fafa_geometry(
     tmp_path, monkeypatch
 ):
     import json
-    import torch
+    torch = pytest.importorskip("torch")
     from rcr.common import detection
     from rcr.baselines.fafa_detector import candidates_from_cache
     from cpr_person.detection import get_detections
@@ -207,4 +209,4 @@ def test_packed_detection_cache_projects_identical_rcr_fafa_geometry(
             {"box": list(c.box), "score": c.score, "fallback": c.fallback}
             for c in actual
         ] == wanted
-    assert got.fingerprint["rcr_cache"]["image_content_verified"]
+    assert got.fingerprint["rcr_cache"]["image_binding"] == "rcr_ids_and_image_sizes"

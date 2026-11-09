@@ -1,10 +1,48 @@
-"""Read proven native RCR globals in exact split-gallery order."""
+"""Read native RCR globals in exact split-gallery order.
 
+RCR's ``build_cache`` writes ordered image IDs and native globals, but no image
+digests. Such an index is bound by its gallery order, encoder config and SHA256,
+plus a label-free re-encoding spot-check. Digests are verified when present.
+"""
+
+import hashlib
 import os
 from pathlib import Path
 
+import numpy as np
+
 from cpr_person.cache import ROOT, canonical_hash, sha256_file
 from .scene_protocol import MODEL, REVISION
+
+SPOT_CHECK_IMAGES = 16
+SPOT_CHECK_MIN_COSINE = 0.999
+
+
+def spot_check_rows(gallery, count=SPOT_CHECK_IMAGES):
+    """Deterministic, label-free sample: lowest SHA256 of the image ID."""
+    keys = sorted(
+        range(len(gallery)),
+        key=lambda i: hashlib.sha256(gallery[i]["image_id"].encode()).hexdigest(),
+    )
+    return sorted(keys[: min(int(count), len(gallery))])
+
+
+def spot_check_globals(cached, encoded, threshold=SPOT_CHECK_MIN_COSINE):
+    """Compare cached and freshly encoded globals by cosine; raise on mismatch."""
+    a, b = np.asarray(cached, np.float64), np.asarray(encoded, np.float64)
+    if a.shape != b.shape or a.ndim != 2 or not len(a):
+        raise ValueError("Scene spot-check shapes differ")
+    a /= np.linalg.norm(a, axis=1, keepdims=True)
+    b /= np.linalg.norm(b, axis=1, keepdims=True)
+    cosine = (a * b).sum(axis=1)
+    if not np.isfinite(cosine).all() or cosine.min() < threshold:
+        raise ValueError(
+            "RCR scene globals differ from the shared HF letterbox pipeline on these "
+            f"images (min cosine {cosine.min():.6f} < {threshold}); the index was built "
+            "from different images or preprocessing. Rebuild it or omit CPR_RCR_SCENE_CACHE."
+        )
+    return {"num_images": len(a), "min_cosine": float(cosine.min()),
+            "threshold": threshold, "selection": "lowest_sha256_image_id"}
 
 
 def scene_index_path():
@@ -42,10 +80,8 @@ def read_scene_globals(path, gallery, full_gallery_ids_sha256=None):
         and canonical_hash(ids) != full_gallery_ids_sha256
     ):
         raise ValueError("Scene cache differs from the full final gallery")
-    if not isinstance(hashes, list) or len(hashes) != len(ids):
-        raise ValueError(
-            "Missing build-time image digests; verify legacy tensors or rebuild with the paired RCR patch"
-        )
+    if hashes is not None and (not isinstance(hashes, list) or len(hashes) != len(ids)):
+        raise ValueError("Invalid build-time image digests in the scene index")
     positions = {image_id: i for i, image_id in enumerate(ids)}
     selected = []
     for row in gallery:
@@ -53,7 +89,7 @@ def read_scene_globals(path, gallery, full_gallery_ids_sha256=None):
             raise ValueError("Missing split image in RCR scene cache")
         i = positions[row["image_id"]]
         path_image = Path(row["path"])
-        if hashes[i] != sha256_file(
+        if hashes is not None and hashes[i] != sha256_file(
             path_image if path_image.is_absolute() else ROOT / path_image
         ):
             raise ValueError("Scene cache was built from different image bytes")
@@ -79,6 +115,6 @@ def read_scene_globals(path, gallery, full_gallery_ids_sha256=None):
     return result, {
         "index_sha256": digest,
         "cache_id": index["cache_id"],
-        "image_content_verified": True,
+        "image_binding": "build_time_sha256" if hashes is not None else "rcr_gallery_order",
         "native_global_features_only": True,
     }

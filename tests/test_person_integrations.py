@@ -3,6 +3,7 @@ import ast
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -232,13 +233,20 @@ def test_requirement_and_dependency_paths_exist():
         walk(yaml.safe_load(p.read_text()))
 
 
+def native_signature(node):
+    # Digests were recorded with Python <=3.12 ast.dump; 3.13 omits empty fields
+    # unless show_empty=True. Keep one digest across supported interpreters.
+    options = {"show_empty": True} if sys.version_info >= (3, 13) else {}
+    return hashlib.sha256(ast.dump(node, **options).encode()).hexdigest()
+
+
 def test_native_encoders_composition_and_scores_remain_unchanged():
     signatures=json.loads((ROOT/"tests/native_architecture_signatures.json").read_text())
     for path,names in signatures.items():
         tree=ast.parse((ROOT/path).read_text())
         for name,digest in names.items():
             node=next(n for n in tree.body if getattr(n,"name",None)==name)
-            assert hashlib.sha256(ast.dump(node).encode()).hexdigest()==digest,(path,name)
+            assert native_signature(node)==digest,(path,name)
 
 
 def test_proxy_branch_cannot_reuse_scores_from_different_manifests(toy_protocol, monkeypatch):

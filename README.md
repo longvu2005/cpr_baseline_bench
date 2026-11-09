@@ -34,11 +34,14 @@ the notebook's global environment. See [method protocols and dependencies](docs/
 and [additional scene/caption methods](docs/additional_baselines.md).
 
 Person methods consume the same RCR Grounding DINO Tiny index. Set its path
-with `--rcr-detection-cache` or `CPR_RCR_DETECTION_CACHE`. They share the CLIP
-Subject selector and Partial SetMatch. Scene methods use their native encoders;
-S1–S4, S6–S9 and S11 use the pinned frozen Hugging Face ViT-B/32 from
-RCR Proposed, including letterbox preprocessing and native text globals. The
-shared person selector retains RCR FAFA's separate OpenAI ViT-B/32 pipeline.
+with `--rcr-detection-cache` or `CPR_RCR_DETECTION_CACHE`. Optionally pass RCR's
+`cache/scene` with `--rcr-scene-cache` to reuse its native CLIP gallery globals.
+Both original RCR indexes are read as is; no patched or re-verified copy is
+needed. Person methods share the CLIP Subject selector and Partial SetMatch.
+Scene methods use their native encoders; S1–S4, S6–S9 and S11 use the pinned
+frozen Hugging Face ViT-B/32 from RCR Proposed, including letterbox
+preprocessing and native text globals. The shared person selector retains RCR
+FAFA's separate OpenAI ViT-B/32 pipeline.
 See [the 29-method audit](docs/audit_29.md) and [Kaggle execution](docs/kaggle.md).
 
 S9 needs completed S5 and S8 source runs. S11 needs completed S6. The configured
@@ -98,8 +101,11 @@ python -m pyflakes .
 ```
 
 CPU tests validate contracts, matching, leakage boundaries, cache invalidation,
-artifact consistency and reporting. Native pretrained GPU inference requires
-real model assets and gallery images; passing CPU tests does not certify accuracy.
+artifact consistency and reporting. With `CPR_TEST_RCR_REPO=/path/to/rcr`, they
+also compare the val/test import, text routing, Subject membership, Partial
+SetMatch and metrics with that RCR checkout's own functions, without torch.
+Native pretrained GPU inference requires real model assets and gallery images;
+passing CPU tests does not certify accuracy.
 See [validation scope](docs/additional_validation.md).
 
 For a new method, follow [the integration guide](docs/adding_baselines.md).
