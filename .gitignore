@@ -1,5 +1,5 @@
 # Raw experiment outputs
-cache/shared/
+cache/
 runs/*
 !runs/.gitkeep
 
@@ -47,6 +47,10 @@ __MACOSX/
 checkpoints/word4per/word4per_cuhk_pedes_stage2_configs.yaml
 
 # Prepared runtime caches / markers
+checkpoints/**/prepared.json
+checkpoints/**/runtime_assets_ready.json
+checkpoints/**/.cache/
+checkpoints/groundingdino/hf-cache/
 checkpoints/fafa/runtime_cache/
 checkpoints/fafa/runtime_assets_ready.json
 checkpoints/groundingdino/runtime_cache/

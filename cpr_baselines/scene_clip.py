@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yaml
 
-from benchmark_data import load_jsonl
+from benchmark_data import manifest_image_digest
 from benchmark_progress import progress_bar
 from cpr_person.cache import ROOT, StageCache, atomic_file, cache_lock, resolve, sha256_file
 from cpr_person.clip_model import prepare_openai_clip
@@ -14,16 +14,12 @@ from cpr_person.protocol import RCR_CLIP_NAME
 
 
 def gallery_fingerprint(checkpoint: Path, gallery_manifest: Path, model_name: str) -> dict:
-    image_files = []
-    for row in load_jsonl(gallery_manifest):
-        stat = (ROOT / row["path"]).stat()
-        image_files.append([stat.st_size, stat.st_mtime_ns])
     return {
-        "schema": "rcr-openai-clip-gallery-v1",
+        "schema": "rcr-openai-clip-gallery-v2",
         "model_name": model_name,
         "checkpoint_sha256": sha256_file(checkpoint),
         "gallery_manifest_sha256": sha256_file(gallery_manifest),
-        "image_files": image_files,
+        "gallery_image_content_sha256": manifest_image_digest(ROOT, gallery_manifest),
     }
 
 
@@ -62,7 +58,9 @@ def gallery_features(model, preprocess, rows, cache, runtime, device, fingerprin
             try:
                 # Torch can wrap this copy-on-write map without modifying the sealed cache.
                 features = np.load(path, mmap_mode="c", allow_pickle=False)
-                if features.shape == expected and features.dtype == np.float32:
+                if (features.shape == expected and features.dtype == np.float32
+                        and all(np.isfinite(features[start:start + 4096]).all()
+                                for start in range(0, len(features), 4096))):
                     print(f"Using CLIP gallery cache: {path}", flush=True)
                     return features, path, True
             except (OSError, ValueError, EOFError):

@@ -141,7 +141,9 @@ def build_stage_caches(cfg, gallery_path, queries_path, output, person):
     ckpt = cfg["checkpoint"]
     encoder = {"schema": "official-fafa-shared-crops-v1", "source": cfg["source"]["commit"],
                "checkpoint": checkpoint_identity(resolve_config_path(ckpt["path"])),
-               "model": ckpt}
+               "model": ckpt,
+               "encoding_runtime": {k: v for k, v in cfg.get("runtime", {}).items()
+                                    if not k.startswith("score") and "chunk" not in k and k != "num_workers"}}
     stage("gallery_features", {**encoder, "detections": keys["detections"],
           "dtype": cfg.get("runtime", {}).get("gallery_feature_dtype", "float16")})
     stage("query_features", {**encoder, "localization": keys["localization"]})

@@ -1,6 +1,6 @@
 method: searle_xl
 display_name: SEARLE-XL
-group: Published / SOTA Baselines
+group: Published Baselines
 cpr_supervision: 'No'
 backend: searle
 assets:

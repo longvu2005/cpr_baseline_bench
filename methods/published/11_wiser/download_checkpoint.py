@@ -126,16 +126,28 @@ def snapshot_download(py: Path, repo_id: str, revision: str, local_dir: Path) ->
     local_dir.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps({"repo_id": repo_id, "revision": revision, "local_dir": str(local_dir)})
     code = r"""
-import json
+import hashlib, json
+from pathlib import Path
 from huggingface_hub import HfApi, snapshot_download
 cfg = json.loads(__PAYLOAD__)
 sha = str(HfApi().model_info(cfg["repo_id"], revision=cfg["revision"]).sha)
 path = snapshot_download(repo_id=cfg["repo_id"], revision=sha, local_dir=cfg["local_dir"])
-print(json.dumps({"sha": sha, "path": path}))
+files = []
+for item in sorted(Path(path).rglob("*")):
+    if not item.is_file() or ".cache" in item.relative_to(path).parts:
+        continue
+    digest = hashlib.sha256()
+    with item.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    files.append({"path": str(item.relative_to(path)), "size": item.stat().st_size,
+                  "sha256": digest.hexdigest()})
+print(json.dumps({"sha": sha, "path": path, "files": files}))
 """.replace("__PAYLOAD__", repr(payload))
     raw = output([str(py), "-c", code])
     result = json.loads(raw.splitlines()[-1])
-    return {"repo_id": repo_id, "resolved_revision": result["sha"], "path": rel(Path(result["path"]))}
+    return {"repo_id": repo_id, "resolved_revision": result["sha"],
+            "path": rel(Path(result["path"])), "files": result["files"]}
 
 
 def main() -> None:
@@ -166,7 +178,21 @@ def main() -> None:
         wiser_py, str(verifier["repo_id"]), str(verifier["revision"]), resolve(str(verifier["local_dir"]))
     )
 
-    print("[5/5] Smoke-test imports and write prepared marker")
+    print("[5/5] Prepare OpenCLIP/LAVIS weights, verify imports and write marker")
+    clip_payload = repr(json.dumps(cfg["models"]["clip"]))
+    run([str(wiser_py), "-c", (
+        "import json,open_clip; from pathlib import Path; "
+        f"cfg=json.loads({clip_payload}); "
+        "open_clip.create_model_and_transforms(cfg['name'], pretrained=cfg['pretrained'], "
+        "cache_dir=str(Path(cfg['cache_dir']).resolve()))"
+    )])
+    cap_payload = repr(json.dumps(cfg["models"]["captioner"]))
+    run([str(caption_py), "-c", (
+        "import json,lavis; "
+        f"cfg=json.loads({cap_payload}); "
+        "lavis.models.load_model_and_preprocess(name=cfg['name'], "
+        "model_type=cfg['model_type'], is_eval=True, device='cuda')"
+    )])
     probe = r"""
 import json, torch, transformers, open_clip
 from qwen_vl_utils import process_vision_info
@@ -188,7 +214,7 @@ print(json.dumps({"torch": torch.__version__, "transformers": transformers.__ver
         "runtime": runtime,
         "caption_transformers": caption_probe.splitlines()[-1],
         "assets": {"bagel": bagel_asset, "verifier": verifier_asset},
-        "note": "OpenCLIP and LAVIS model weights are lazily cached on first inference/caption run.",
+        "note": "OpenCLIP and LAVIS weights prepared before inference; HF inference uses offline mode.",
     })
     print(f"Prepared WISER marker -> {rel(marker)}")
 

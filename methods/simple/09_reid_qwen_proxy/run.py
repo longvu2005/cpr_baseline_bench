@@ -37,6 +37,7 @@ if str(ROOT) not in sys.path:
 
 from evaluate import full_map
 from cpr_person.validation import verify_tuning_manifests
+from benchmark_data import manifest_image_digest
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 from cpr_person.adapter import matching_metadata, manifest_identity
@@ -139,6 +140,7 @@ def validate_score_matrix(scores: np.ndarray, shape: tuple[int, int], label: str
 
 
 def load_source_scores(*, scores_path: Path, run_path: Path, expected_method: str, shape: tuple[int, int], label: str) -> np.ndarray:
+    from cpr_person.protocol import require_score_artifact
     if not scores_path.is_file():
         raise FileNotFoundError(
             f"Missing {label} source scores: {rel(scores_path)}. "
@@ -154,6 +156,7 @@ def load_source_scores(*, scores_path: Path, run_path: Path, expected_method: st
         raise ValueError(
             f"{label} run.json mismatch: expected method {expected_method!r}, got {None if run is None else run.get('method')!r}"
         )
+    require_score_artifact(run, scores_path)
     scores = np.load(scores_path, mmap_mode="r", allow_pickle=False)
     validate_score_matrix(scores, shape, label)
     return scores
@@ -166,9 +169,11 @@ def branch_score_fingerprint(*, kind: str, config_path: Path, gallery_manifest: 
         "kind": kind,
         "config_sha256": sha256_file(config_path),
         "gallery_manifest_sha256": sha256_file(gallery_manifest),
+        "gallery_image_content_sha256": manifest_image_digest(ROOT, gallery_manifest),
         "query_manifest_sha256": sha256_file(query_manifest),
         "extras": extras,
     }
+
 
 
 def load_cached_scores(path: Path, expected_meta: dict[str, Any], shape: tuple[int, int], label: str) -> np.ndarray | None:
@@ -217,9 +222,9 @@ def build_gallery_index(gallery: Sequence[dict[str, Any]]) -> dict[Any, int]:
 def select_alpha(*, cfg: dict[str, Any], config_path: Path, val_gallery_manifest: Path, val_query_manifest: Path, val_reid_scores: np.ndarray, val_proxy_scores: np.ndarray, gallery: Sequence[dict[str, Any]], queries: Sequence[dict[str, Any]]) -> tuple[float, dict[str, Any]]:
     selection = cfg["fusion"]["alpha_selection"]
     result_path = resolve_path(str(selection["result"]))
-    grid = [float(x) for x in selection["grid"]]
-    if not grid:
-        raise ValueError("alpha_selection.grid must not be empty")
+    grid = sorted({float(x) for x in selection["grid"]})
+    if not grid or any(not 0.0 <= value <= 1.0 for value in grid):
+        raise ValueError("alpha_selection.grid must be nonempty and in [0, 1]")
     tie_break = str(selection.get("tie_break", "smallest_alpha"))
     if tie_break != "smallest_alpha":
         raise ValueError("Only tie_break=smallest_alpha is supported")
@@ -239,7 +244,7 @@ def select_alpha(*, cfg: dict[str, Any], config_path: Path, val_gallery_manifest
     current = read_json(result_path)
     if current is not None:
         core = {k: current.get(k) for k in expected}
-        if core == expected and isinstance(current.get("best_alpha"), (int, float)):
+        if core == expected and current.get("best_alpha") in grid:
             return float(current["best_alpha"]), current
 
     rows: list[dict[str, Any]] = []

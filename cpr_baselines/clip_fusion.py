@@ -4,8 +4,8 @@ from pathlib import Path
 
 import numpy as np
 
-from benchmark_data import load_jsonl, split_paths, verify_manifest
-from cpr_person.cache import atomic_json, canonical_hash, read_json, sha256_file
+from benchmark_data import gallery_image_digest, load_jsonl, split_paths, verify_manifest
+from cpr_person.cache import atomic_json, read_json, sha256_file
 from evaluate import full_map
 
 
@@ -62,13 +62,13 @@ def tune_clip_fusion(root, cfg, output, device, encode_validation, *, epsilon=No
     if not grid or any(not 0.0 <= weight <= 1.0 for weight in grid):
         raise ValueError("tuning.image_weights must be nonempty and in [0, 1]")
     # Same images and model must define both the val feature cache and lock.
-    image_stats = [(root / row["path"]).stat() for row in gallery]
-    image_signature = canonical_hash([(stat.st_size, stat.st_mtime_ns) for stat in image_stats])
+    image_signature = gallery_image_digest(root, gallery)
     fingerprint = {
-        "schema": "clip-fusion-rcr-val-v2",
+        "schema": "clip-fusion-rcr-val-v3",
         "method": cfg["method"],
         "checkpoint_sha256": sha256_file(root / cfg["model"]["checkpoint"]),
         "encoder_device": device.type,
+        "runtime": cfg["runtime"],
         "validation_fingerprint": validation,
         "validation_image_signature": image_signature,
         "image_weights": grid,

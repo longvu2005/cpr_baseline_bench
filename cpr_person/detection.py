@@ -13,6 +13,7 @@ import numpy as np
 import yaml
 from PIL import Image
 
+from benchmark_data import gallery_image_digest
 from . import PROTOCOL_VERSION
 from .cache import ROOT, StageCache, atomic_file, cache_lock, read_json, resolve, sha256_file
 from .rcr_cache import read_rcr_index, rcr_index_path
@@ -157,13 +158,9 @@ def _detection_fingerprint(gallery_manifest, cfg, index, provenance):
             "text_threshold", "runtime_versions", "attention_backend",
         )}
     gallery = [json.loads(line) for line in Path(gallery_manifest).read_text().splitlines() if line.strip()]
-    images_digest = hashlib.sha256()
-    for row in gallery:
-        images_digest.update(json.dumps([row["image_id"], row["path"], sha256_file(image_path(row))],
-                                        separators=(",", ":")).encode())
     fingerprint = {
         "adapter_version": PROTOCOL_VERSION, "gallery_manifest_sha256": sha256_file(gallery_manifest),
-        "gallery_image_content_sha256": images_digest.hexdigest(), "image": cfg["image"],
+        "gallery_image_content_sha256": gallery_image_digest(ROOT, gallery), "image": cfg["image"],
         "processing": processing, "protocol": detector,
     }
     if provenance is not None:

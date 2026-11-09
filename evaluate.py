@@ -11,9 +11,10 @@ from statistics import fmean
 
 import numpy as np
 
-from benchmark_data import CASE_TYPES, DATA_PROTOCOL, load_jsonl, split_paths, verify_manifest
+from benchmark_data import (CASE_TYPES, DATA_PROTOCOL, gallery_image_digest,
+                            load_jsonl, split_paths, verify_manifest)
 from benchmark_progress import PhaseTracker, progress_bar
-from cpr_person.cache import atomic_json
+from cpr_person.cache import atomic_json, canonical_hash, sha256_file
 from cpr_person.protocol import require_aligned_run
 
 ROOT = Path(__file__).resolve().parent
@@ -80,6 +81,16 @@ def full_map(scores, gallery, queries):
     )
 
 
+def validate_run_order(run, gallery, queries):
+    for key, rows, id_key in (("gallery_image_ids", gallery, "image_id"),
+                              ("query_ids", queries, "query_id")):
+        if key in run and run[key] != [row[id_key] for row in rows]:
+            raise ValueError(f"run.json {key} differ from canonical manifest ordering")
+    for key, count in (("num_gallery", len(gallery)), ("num_queries", len(queries))):
+        if key in run and run[key] != count:
+            raise ValueError(f"run.json {key} differs from the complete split")
+
+
 def evaluate_scores(scores, gallery, queries):
     validate_score_matrix(scores, (len(queries), len(gallery)))
     gallery_index = {row["image_id"]: i for i, row in enumerate(gallery)}
@@ -141,11 +152,22 @@ def main():
     if run.get("split", "test") != "test" or run.get("data_fingerprint") != test["fingerprint"]:
         raise ValueError("Scores do not match the current test manifests. Rerun inference.")
     require_aligned_run(run, method)
+    validate_run_order(run, gallery, queries)
+    image_digest = run.get("shared_person_protocol", {}).get("detections_fingerprint", {}).get(
+        "gallery_image_content_sha256", run.get("image_provenance", {}).get("gallery_image_content_sha256"))
+    if image_digest != gallery_image_digest(ROOT, gallery):
+        raise ValueError("Run image provenance is missing or differs from current image bytes. Rerun inference.")
     validation = run.get("validation_fingerprint")
     if validation is not None or run.get("cpr_supervision") == "Val only":
         if validation != verify_manifest(ROOT, "val")["fingerprint"]:
             raise ValueError("Selection does not match the current validation split. Rerun tuning.")
-    scores = np.load(directory / "scores.npy", mmap_mode="r", allow_pickle=False)
+    scores_path = directory / "scores.npy"
+    score_digest = sha256_file(scores_path)
+    if run.get("scores_sha256", score_digest) != score_digest:
+        raise ValueError("Score bytes differ from run.json. Rerun inference.")
+    scores = np.load(scores_path, mmap_mode="r", allow_pickle=False)
+    evaluated_run = {**run, "split": "test", "data_protocol": DATA_PROTOCOL,
+                     "scores_sha256": score_digest}
 
     tracker.advance("Compute ID, Full and macro metrics")
     metrics = {
@@ -153,16 +175,22 @@ def main():
         "split": "test",
         "data_protocol": DATA_PROTOCOL,
         "data_fingerprint": test["fingerprint"],
+        "run_metadata_sha256": canonical_hash(evaluated_run),
+        "scores_sha256": score_digest,
         **evaluate_scores(scores, gallery, queries),
     }
     if verify_manifest(ROOT, "test") != test:
         raise RuntimeError("Test manifests changed during evaluation")
     if validation is not None and verify_manifest(ROOT, "val")["fingerprint"] != validation:
         raise RuntimeError("Validation manifests changed during evaluation")
+    if sha256_file(scores_path) != score_digest:
+        raise RuntimeError("Scores changed during evaluation")
+    if json.loads((directory / "run.json").read_text(encoding="utf-8")) != run:
+        raise RuntimeError("Run metadata changed during evaluation")
     tracker.advance("Write test metrics and evaluated run metadata")
     output = OUTPUTS_DIR / method
     (output / "metrics.json").unlink(missing_ok=True)
-    atomic_json(output / "run.json", {**run, "split": "test", "data_protocol": DATA_PROTOCOL})
+    atomic_json(output / "run.json", evaluated_run)
     atomic_json(output / "metrics.json", metrics)
     print(json.dumps(metrics, indent=2, ensure_ascii=False), flush=True)
     tracker.finish()

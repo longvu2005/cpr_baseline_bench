@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from benchmark_data import manifest_image_digest
 from benchmark_data import ensure_gallery_layout  # noqa: E402
 from benchmark_data import manifest_file_fingerprint
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
@@ -380,6 +381,7 @@ def feature_cache_meta(
         "adapter_version": ADAPTER_VERSION,
         "config_sha256": sha256_file(config_path),
         "gallery_manifest_sha256": sha256_file(gallery_manifest),
+        "gallery_image_content_sha256": manifest_image_digest(ROOT, gallery_manifest),
         "checkpoint_sha256": checkpoint_sha256,
         "source_commits": {
             name: str(cfg["source"][name]["commit"])
@@ -392,6 +394,7 @@ def feature_cache_meta(
         payload["query_manifest_sha256"] = sha256_file(query_manifest)
         payload["composition"] = cfg["composition"]
     return payload
+
 
 
 def make_encoder(model, params, jax, embedding_key: str):
@@ -698,6 +701,7 @@ def main() -> None:
         payload = {
             "method": cfg["method"],
             "data_fingerprint": data_fingerprint,
+            "image_provenance": {"gallery_image_content_sha256": manifest_image_digest(ROOT, gallery_manifest)},
             "display_name": cfg["display_name"],
             "group": cfg["group"],
             "cpr_supervision": cfg["cpr_supervision"],

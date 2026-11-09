@@ -384,6 +384,8 @@ def gallery_feature_fingerprint(
         "config_bert_sha256": sha256_file(config_bert),
         "gallery_manifest_sha256": sha256_file(gallery_manifest),
         "gallery_instruction": str(cfg["instruction_adapter"]["gallery_instruction"]),
+        "encoding_runtime": {k: v for k, v in cfg["runtime"].items()
+                             if not k.startswith("score") and "chunk" not in k and k != "num_workers"},
         "model": cfg["model"],
     }
 
@@ -494,6 +496,8 @@ def query_feature_fingerprint(
         "bert_weight_sha256": sha256_file(bert_weight),
         "config_bert_sha256": sha256_file(config_bert),
         "instruction_adapter": cfg["instruction_adapter"],
+        "encoding_runtime": {k: v for k, v in cfg["runtime"].items()
+                             if not k.startswith("score") and "chunk" not in k and k != "num_workers"},
         "localization_hash": canonical_hash(compact_localization),
         "model": cfg["model"],
     }

@@ -1,6 +1,6 @@
 method: imagine_seek
 display_name: Imagine and Seek (LDRE-L + IP-CIR, mounted-assets streaming CPR adapter)
-group: Published / SOTA Baselines
+group: Published Baselines
 cpr_supervision: 'No'
 
 paper:
@@ -100,26 +100,26 @@ migc:
 
 elite:
   repo_id: ELITE-library/ELITE
-  revision: main
+  revision: 9f563c699684b8b44358b0ab2f5dafd0a5af24b1
   global_filename: checkpoints/global_mapper.pt
   local_filename: checkpoints/local_mapper.pt
   global_mapper: checkpoints/imagine_seek/weights/global_mapper.pt
   local_mapper: checkpoints/imagine_seek/weights/local_mapper.pt
   local_sha256: 56e20d8937aa1c2dd6850ce72a88dda6473ec0ac7a3fb81ffdd560d387eb80e4
   clip_vision_repo_id: openai/clip-vit-large-patch14
-  clip_vision_revision: main
+  clip_vision_revision: 32bd64288804d66eefd0ccbe215aa642df71cc41
   clip_vision_snapshot: checkpoints/imagine_seek/hf/clip-vit-large-patch14
 
 realistic_vision:
   repo_id: aishuu/Realistic_Vision_V6.0_B1VAE
-  revision: main
+  revision: f863c9da7f8a360acea62ae84250b6ed4cc39283
   filename: realisticVisionV60B1_v60B1VAE.safetensors
   path: checkpoints/imagine_seek/weights/realisticVisionV60B1_v60B1VAE.safetensors
   sha256: e5f3cbc5f7669457d3bec1fd492420995fb9a79e735dce438b81af61fd5d77f0
 
 sd15_components:
   repo_id: stable-diffusion-v1-5/stable-diffusion-v1-5
-  revision: main
+  revision: 451f4fe16113bff5a5d2269ed5ad43b0592e9a14
   local_snapshot: checkpoints/imagine_seek/hf/stable-diffusion-v1-5-components
 
 retrieval:

@@ -347,7 +347,11 @@ def validate_score_matrix(scores: np.ndarray, shape: tuple[int, int], label: str
 def select_alpha(*, cfg: dict[str, Any], config_path: Path, val_gallery_manifest: Path, val_query_manifest: Path, val_gallery: Sequence[dict[str, Any]], val_queries: Sequence[dict[str, Any]], prepared_val_queries: list[dict[str, Any]], val_person_features: np.ndarray, val_offsets: np.ndarray, val_localization_sha256: str) -> tuple[float, dict[str, Any]]:
     selection = cfg["composition"]["alpha_selection"]
     result_path = resolve_path(str(selection["result"]))
-    grid = [float(x) for x in selection["grid"]]
+    grid = sorted({float(x) for x in selection["grid"]})
+    if not grid or any(not 0.0 <= value <= 1.0 for value in grid):
+        raise ValueError("alpha_selection.grid must be nonempty and in [0, 1]")
+    if selection["metric"] != "Full-mAP" or selection["tie_break"] != "smallest_alpha":
+        raise ValueError("Expected Full-mAP selection with smallest-alpha tie breaking")
     expected = {
         "schema": ALPHA_SCHEMA,
         "selection_split": "val",
@@ -366,7 +370,7 @@ def select_alpha(*, cfg: dict[str, Any], config_path: Path, val_gallery_manifest
     current = read_json(result_path)
     if current is not None:
         core = {k: current.get(k) for k in expected}
-        if core == expected and isinstance(current.get("best_alpha"), (int, float)):
+        if core == expected and current.get("best_alpha") in grid:
             return float(current["best_alpha"]), current
 
     unmatched_score = float(cfg["setmatch"]["unmatched_score"])

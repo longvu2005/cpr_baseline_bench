@@ -16,6 +16,7 @@ import run_baseline
 from benchmark_data import DATA_PROTOCOL, manifest_fingerprint
 from cpr_person import PROTOCOL_VERSION
 from cpr_person.protocol import PERSON_METHODS, TEXTFREE_DIAGNOSTIC_METHOD
+from cpr_person.cache import canonical_hash
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,7 +31,7 @@ def reporting_repo(tmp_path, monkeypatch, write_benchmark_views):
         target = tmp_path / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / name, target)
-    write_benchmark_views(tmp_path, [{"id": "gallery"}], [{"id": "queries"}])
+    write_benchmark_views(tmp_path, [{"id": "gallery"}], [{"id": "queries"}] * 4)
     monkeypatch.setattr(build_tables, "ROOT", tmp_path)
     monkeypatch.setattr(build_tables, "OUTPUTS_DIR", tmp_path / "outputs")
     monkeypatch.setattr(build_tables, "TABLES_DIR", tmp_path / "tables")
@@ -44,16 +45,21 @@ def write_result(root, method="lincir", provenance=None):
     run = {"method": method, "display_name": "LinCIR" if method == "lincir" else method,
            "group": "Published / SOTA Baselines", "cpr_supervision": "No",
            "higher_is_better": True, "data_fingerprint": fingerprint,
-           "split": "test", "data_protocol": DATA_PROTOCOL}
+           "split": "test", "data_protocol": DATA_PROTOCOL,
+           "image_provenance": {"gallery_image_content_sha256": "a" * 64},
+           "scores_sha256": "f" * 64}
     if provenance is not None:
         run["shared_person_protocol"] = provenance
     metrics = {"method": method, "data_fingerprint": fingerprint,
                "split": "test", "data_protocol": DATA_PROTOCOL,
-               "overall": {"Macro-Full-mAP": 0.25, **{
+               "num_queries": 4, "scores_sha256": run["scores_sha256"],
+               "run_metadata_sha256": canonical_hash(run),
+               "overall": {**{
                    f"{kind}-{metric}": 0.125 for kind in ("ID", "Full")
                    for metric in ("mAP", "R@1", "R@5", "R@10")
-               }},
-               "cases": {case: {"Full-mAP": 0.25, "Full-R@1": 0.5}
+               }, "Full-mAP": 0.25, "Macro-Full-mAP": 0.25},
+               "cases": {case: {"num_queries": 1, "ID-mAP": 0.125, "ID-R@1": 0.125,
+                                "Full-mAP": 0.25, "Full-R@1": 0.5}
                          for case in build_tables.CASE_TYPES}}
     (output / "run.json").write_text(json.dumps(run))
     (output / "metrics.json").write_text(json.dumps(metrics))
@@ -364,3 +370,48 @@ def test_legacy_person_metadata_does_not_block_current_scene_tables(reporting_re
     run = json.loads(path.read_text());run['data_fingerprint'] = {}
     path.write_text(json.dumps(run))
     assert [row['method_id'] for row in build_tables.collect_results()] == ['lincir']
+
+
+def test_metrics_cannot_be_attached_to_a_different_config_run(reporting_repo):
+    output = write_result(reporting_repo)
+    path = output / "run.json"
+    run = json.loads(path.read_text())
+    run["fusion"] = {"alpha": .25}
+    path.write_text(json.dumps(run))
+    with pytest.raises(ValueError, match="not evaluated together"):
+        build_tables.collect_results()
+
+
+def test_unbound_historical_metrics_are_skipped_without_rewriting(reporting_repo):
+    output = write_result(reporting_repo)
+    path = output / "metrics.json"
+    metrics = json.loads(path.read_text())
+    metrics.pop("run_metadata_sha256")
+    path.write_text(json.dumps(metrics))
+    before = path.read_bytes()
+    assert build_tables.collect_results() == []
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("field,value,error", [
+    ("num_queries", 3, "query count"),
+    ("scores_sha256", "e" * 64, "different score bytes"),
+])
+def test_evaluated_score_identity_and_split_counts_are_required(reporting_repo, field, value, error):
+    output = write_result(reporting_repo)
+    path = output / "metrics.json"
+    metrics = json.loads(path.read_text())
+    metrics[field] = value
+    path.write_text(json.dumps(metrics))
+    with pytest.raises(ValueError, match=error):
+        build_tables.collect_results()
+
+
+def test_macro_cannot_be_reported_as_query_weighted_full_map(reporting_repo):
+    output = write_result(reporting_repo)
+    path = output / "metrics.json"
+    metrics = json.loads(path.read_text())
+    metrics["overall"]["Macro-Full-mAP"] = .9
+    path.write_text(json.dumps(metrics))
+    with pytest.raises(ValueError, match="disagrees with case metrics"):
+        build_tables.collect_results()

@@ -78,7 +78,7 @@ def validate_qwen_snapshot(path: Path) -> list[dict[str, Any]]:
         item = path / name
         if not item.is_file() or item.stat().st_size <= 0:
             raise RuntimeError(f"Missing/incomplete Qwen artifact: {rel(item)}")
-        inventory.append({"path": name, "size": int(item.stat().st_size)})
+        inventory.append({"path": name, "size": int(item.stat().st_size), "sha256": sha256_file(item)})
     return inventory
 
 

@@ -31,6 +31,7 @@ if str(ROOT) not in sys.path:
 from benchmark_data import manifest_file_fingerprint
 from cpr_baselines.scene_clip import gallery_features as read_clip_gallery, gallery_fingerprint as clip_gallery_cache_fingerprint
 from cpr_person.clip_model import load_openai_clip, verify_rcr_scene_clip
+from benchmark_data import manifest_image_digest
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
@@ -157,7 +158,8 @@ def validate_generator_artifacts(cfg: dict[str, Any]) -> tuple[Path, Path, dict[
             raise RuntimeError("Malformed generator marker file entry")
         path = checkpoint_dir / str(item.get("path", ""))
         size = item.get("size")
-        if not path.is_file() or not isinstance(size, int) or path.stat().st_size != size:
+        if (not path.is_file() or not isinstance(size, int) or path.stat().st_size != size
+                or item.get("sha256") != sha256_file(path)):
             raise RuntimeError(
                 f"Generator snapshot is incomplete/stale at {rel(path)}; rerun checkpoint preparation"
             )
@@ -190,6 +192,7 @@ def edit_fingerprint(
         "adapter_version": ADAPTER_VERSION,
         "config_sha256": sha256_file(config_path),
         "gallery_manifest_sha256": sha256_file(gallery_manifest),
+        "gallery_image_content_sha256": manifest_image_digest(ROOT, gallery_manifest),
         "query_manifest_sha256": sha256_file(query_manifest),
         "generator_marker_sha256": sha256_file(generator_marker),
         "repo_id": str(gen["repo_id"]),
@@ -201,6 +204,7 @@ def edit_fingerprint(
         "generation": gen["generation"],
         "output": gen.get("output", {}),
     }
+
 
 
 def edit_meta_path(manifest_path: Path) -> Path:
@@ -238,6 +242,8 @@ def load_edit_cache(
             return None
         path = resolve_path(edited_path)
         if not path.is_file():
+            return None
+        if row.get("edited_image_sha256") != sha256_file(path):
             return None
         paths.append(path)
     print(f"Using edited-image cache: {rel(manifest_path)}", flush=True)
@@ -319,6 +325,8 @@ def query_feature_cache_fingerprint(config_path: Path, edited_manifest_path: Pat
         "adapter_version": ADAPTER_VERSION,
         "config_sha256": sha256_file(config_path),
         "edited_manifest_sha256": sha256_file(edited_manifest_path),
+        "edited_images_sha256": [sha256_file(resolve_path(row["edited_image"]))
+                                 for row in load_jsonl(edited_manifest_path)],
         "clip_checkpoint_sha256": sha256_file(clip_checkpoint),
         "query_manifest_sha256": sha256_file(query_manifest),
     }
@@ -336,7 +344,8 @@ def clip_query_image_features(model, preprocess, edited_paths, cache, runtime, d
             cached_fingerprint = json.loads(meta_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             cached_fingerprint = None
-        if x.shape == expected_shape and cached_fingerprint == cache_fingerprint:
+        if (x.shape == expected_shape and cached_fingerprint == cache_fingerprint
+                and np.isfinite(x).all()):
             print(f"Using edited-query feature cache: {rel(cache)}", flush=True)
             return x, cache
         print(f"Ignoring stale/incompatible edited-query feature cache: {rel(cache)}", flush=True)
@@ -432,6 +441,7 @@ def generate_or_load_edited_queries(
             save_format = str(cfg["generator"].get("output", {}).get("image_format", "PNG")).upper()
             edited.save(out_path, format=save_format)
             row = {
+                "edited_image_sha256": sha256_file(out_path),
                 "query_id": query["query_id"],
                 "image_id": query["image_id"],
                 "edited_image": rel(out_path),
@@ -540,6 +550,7 @@ def main() -> None:
             "method": cfg["method"],
             "scene_clip_sha256": actual_sha,
             "data_fingerprint": data_fingerprint,
+            "image_provenance": {"gallery_image_content_sha256": manifest_image_digest(ROOT, gallery_manifest)},
             "display_name": cfg["display_name"],
             "group": cfg["group"],
             "cpr_supervision": cfg["cpr_supervision"],

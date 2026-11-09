@@ -30,6 +30,11 @@ Empty cases have blank cells. Values in the CSVs are percentages.
 
 - Metrics must use the RCR test protocol and match the current test
   gallery/query hashes. Tuned runs must also match the current val fingerprint.
+- Evaluation records the score-file SHA256 and a canonical digest of the evaluated
+  run metadata in metrics.json. Tables reject mismatched pairs, invalid metric
+  values, inconsistent case counts and incorrect macro/query-weighted aggregates.
+  Unbound historical metrics are skipped; run the current inference/evaluation
+  pipeline to regenerate trustworthy artifacts.
 - Method IDs must agree between the directory, metrics and adjacent run metadata.
   The inference metadata records the manifests used to score the test set.
 - Legacy person results and benchmark scene CLIP results from older checkpoints
@@ -38,7 +43,7 @@ Empty cases have blank cells. Values in the CSVs are percentages.
   for gallery image bytes, projected boxes and selected memberships.
 - Localization must link back to the same detection fingerprint and array digest.
   Across person runs, detector geometry and selected memberships must agree.
-  Image-content hashes must agree across runs that record them, including scene
+  Image-content hashes are required and must agree across scene and person
   methods. These are consistency checks on recorded provenance, not a new model
   forward or a fresh scan of gallery image files.
 - The separate text-free diagnostic is excluded from the primary table.

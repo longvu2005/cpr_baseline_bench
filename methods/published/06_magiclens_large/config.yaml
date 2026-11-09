@@ -1,6 +1,6 @@
 method: magiclens_large
 display_name: MagicLens Large
-group: Published / SOTA Baselines
+group: Published Baselines
 cpr_supervision: 'No'
 
 paper:

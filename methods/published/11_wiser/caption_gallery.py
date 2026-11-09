@@ -7,8 +7,12 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
+
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 import torch
 import yaml
@@ -19,6 +23,9 @@ import lavis
 ROOT = Path(__file__).resolve().parents[3]
 METHOD_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG = METHOD_DIR / "config.yaml"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from cache_protocol import namespace_caches
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -77,6 +84,7 @@ def main() -> None:
     args = parser.parse_args()
     config_path = resolve(args.config)
     cfg = load_yaml(config_path)
+    cfg, image_digest = namespace_caches(cfg, ROOT)
 
     gallery_manifest = resolve(str(cfg["data"]["gallery_manifest"]))
     output = resolve(str(cfg["cache"]["captions"]))
@@ -85,6 +93,7 @@ def main() -> None:
     expected_meta = {
         "schema": 1,
         "gallery_manifest_sha256": sha256(gallery_manifest),
+        "gallery_image_content_sha256": image_digest,
         "captioner": cfg["models"]["captioner"],
     }
 

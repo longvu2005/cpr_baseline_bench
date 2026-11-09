@@ -35,6 +35,7 @@ if str(ROOT) not in sys.path:
 
 from evaluate import full_map
 from cpr_person.validation import verify_tuning_manifests
+from benchmark_data import manifest_image_digest
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 from cpr_baselines.scene_clip import gallery_features, gallery_fingerprint as clip_gallery_fingerprint
@@ -192,8 +193,10 @@ def clip_score_fingerprint(
         "text_field": str(cfg["clip_text"]["text_field"]),
         "checkpoint_sha256": sha256_file(checkpoint),
         "gallery_manifest_sha256": sha256_file(gallery_manifest),
+        "gallery_image_content_sha256": manifest_image_digest(ROOT, gallery_manifest),
         "query_manifest_sha256": sha256_file(query_manifest),
     }
+
 
 
 @torch.no_grad()
@@ -253,28 +256,6 @@ def compute_clip_text_scores(
     scores.flush()
     write_json(meta_path(output_path), fingerprint)
     return scores, False
-
-
-def s5_score_fingerprint(
-    *,
-    s5,
-    s5_cfg_path: Path,
-    gallery_manifest: Path,
-    query_manifest: Path,
-    detection_cache: Path,
-    feature_cache: Path,
-) -> dict[str, Any]:
-    return {
-        "schema": SCORE_CACHE_SCHEMA,
-        "kind": "s5_reid_set_scores",
-        "adapter_version": ADAPTER_VERSION,
-        "s5_adapter_version": str(s5.ADAPTER_VERSION),
-        "s5_config_sha256": sha256_file(s5_cfg_path),
-        "gallery_manifest_sha256": sha256_file(gallery_manifest),
-        "query_manifest_sha256": sha256_file(query_manifest),
-        "detection_meta": read_json(s5.meta_path(detection_cache)),
-        "feature_meta": read_json(s5.meta_path(feature_cache)),
-    }
 
 
 def prepare_s5_scores(*, s5, s5_cfg, s5_cfg_path, gallery_manifest, query_manifest,

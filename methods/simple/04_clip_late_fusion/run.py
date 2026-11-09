@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from cpr_baselines.scene_clip import gallery_features, gallery_fingerprint as build_gallery_cache_fingerprint
 from cpr_person.clip_model import load_openai_clip, verify_rcr_scene_clip
+from benchmark_data import manifest_image_digest
 from benchmark_data import split_paths, verify_manifest
 from cpr_baselines.clip_fusion import late_zscore, tune_clip_fusion
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
@@ -185,6 +186,7 @@ def main():
             "group": "Simple / Obvious Baselines",
             "cpr_supervision": "Val only",
             "data_fingerprint": test_fingerprint,
+            "image_provenance": {"gallery_image_content_sha256": manifest_image_digest(ROOT, split_paths(ROOT)[0])},
             "validation_fingerprint": selection["fingerprint"]["validation_fingerprint"],
             "selection": "tuning.json",
             "model": cfg["model"],

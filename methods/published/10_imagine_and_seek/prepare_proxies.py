@@ -10,7 +10,6 @@ import argparse
 import gc
 import hashlib
 import json
-import math
 import os
 import re
 import subprocess
@@ -28,6 +27,7 @@ DEFAULT_CONFIG = METHOD_DIR / "config.yaml"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
+from benchmark_data import manifest_image_digest
 
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -169,6 +169,8 @@ def caption_fingerprint(cfg: dict[str, Any], query_manifest: Path, marker: dict[
     return stable_hash({
         "schema": 4,
         "query_manifest": sha256_file(query_manifest),
+        "gallery_image_content_sha256": manifest_image_digest(
+            ROOT, resolve_path(cfg["data"]["gallery_manifest"])),
         "captioner": cfg["captioner"],
         "resolved_revision": rev,
     })
@@ -467,6 +469,7 @@ def build_jobs(
             "query_index": qi,
             "image_id": queries[qi].get("image_id"),
             "query_image": rel(image_paths[qi]),
+            "query_image_sha256": sha256_file(image_paths[qi]),
             "original_captions": list(captions[qi]["captions"]),
             "target_captions": list(targets[qi]["captions"]),
             "scene_prompt": layouts[qi]["scene_prompt"],
@@ -532,16 +535,30 @@ def main() -> None:
         elif stage == "qwen":
             with tracker.phase("Generate/resume Qwen32B edited captions and released-format layouts"):
                 if captions is None:
-                    captions = load_jsonl(resolve_path(str(cfg["cache"]["captions"])))
+                    captions = valid_prefix(resolve_path(str(cfg["cache"]["captions"])), queries,
+                                            caption_fingerprint(cfg, query_manifest, marker))
+                    if len(captions) != len(queries):
+                        raise RuntimeError("Dense captions are missing/stale; run --stage captions first")
                 targets, layouts = generate_qwen_outputs(cfg, queries, captions, query_manifest, marker, args.force)
         elif stage == "proxies":
             with tracker.phase("Generate -> CLIP-L encode -> discard five MIGC+ELITE proxies per query"):
                 if captions is None:
-                    captions = load_jsonl(resolve_path(str(cfg["cache"]["captions"])))
+                    captions = valid_prefix(resolve_path(str(cfg["cache"]["captions"])), queries,
+                                            caption_fingerprint(cfg, query_manifest, marker))
+                    if len(captions) != len(queries):
+                        raise RuntimeError("Dense captions are missing/stale; run --stage captions first")
                 if targets is None:
-                    targets = load_jsonl(resolve_path(str(cfg["cache"]["target_captions"])))
+                    fingerprint = qwen_fingerprint(
+                        cfg, query_manifest, resolve_path(cfg["cache"]["captions"]), marker)
+                    targets = valid_prefix(resolve_path(cfg["cache"]["target_captions"]), queries, fingerprint)
+                    if len(targets) != len(queries):
+                        raise RuntimeError("Target captions are missing/stale; run --stage qwen first")
                 if layouts is None:
-                    layouts = load_jsonl(resolve_path(str(cfg["cache"]["layouts"])))
+                    fingerprint = qwen_fingerprint(
+                        cfg, query_manifest, resolve_path(cfg["cache"]["captions"]), marker)
+                    layouts = valid_prefix(resolve_path(cfg["cache"]["layouts"]), queries, fingerprint)
+                    if len(layouts) != len(queries):
+                        raise RuntimeError("Layouts are missing/stale; run --stage qwen first")
                 build_jobs(cfg, queries, images, captions, targets, layouts)
                 worker = METHOD_DIR / "official_proxy_worker.py"
                 subprocess.run([sys.executable, str(worker), "--config", str(config_path), "--stage", "generate"], cwd=str(ROOT), check=True)

@@ -64,3 +64,10 @@ def require_aligned_run(run, method):
         path = rcr_index_path()
         if path is not None and source["index_sha256"] != sha256_file(path):
             raise RuntimeError(f"{method}: scores use a different RCR detection index")
+
+
+def require_score_artifact(run, path):
+    digest = run.get("scores_sha256")
+    if (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or sha256_file(path) != digest):
+        raise RuntimeError("Source scores differ from their completed run; rerun the source baseline")

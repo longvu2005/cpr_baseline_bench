@@ -27,8 +27,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from benchmark_progress import format_duration
-from benchmark_data import DATA_PROTOCOL, describe_gallery_link, ensure_gallery_layout, manifest_fingerprint
-from cpr_person.cache import atomic_json
+from benchmark_data import (DATA_PROTOCOL, describe_gallery_link, ensure_gallery_layout,
+                            manifest_fingerprint, manifest_image_digest, split_paths)
+from cpr_person.cache import atomic_json, sha256_file
 from cpr_person.protocol import PERSON_METHODS, require_aligned_run
 from cpr_person.rcr_cache import RCR_DETECTION_ENV, rcr_index_path
 
@@ -217,7 +218,7 @@ def run_pipeline(
     method: MethodSpec,
     force_checkpoint: bool,
     skip_install: bool,
-) -> None:
+) -> bool:
     from baseline_environment import prepare_method_python
 
     if method.method_id in PERSON_METHODS:
@@ -262,7 +263,7 @@ def run_pipeline(
             print("----------------")
             print("The selected method requires an external checkpoint that is not available.")
             print("Inference/evaluation were not run, and no fallback scores were produced.")
-            return
+            return False
     else:
         print_skip(
             3,
@@ -273,6 +274,8 @@ def run_pipeline(
 
     data_fingerprint = manifest_fingerprint(ROOT)
     validation_fingerprint = manifest_fingerprint(ROOT, "val")
+    test_images = manifest_image_digest(ROOT, split_paths(ROOT, "test")[0])
+    val_images = manifest_image_digest(ROOT, split_paths(ROOT, "val")[0])
     run_path = ROOT / "runs" / method.method_id / "run.json"
     run_path.unlink(missing_ok=True)
     run_step(
@@ -285,15 +288,23 @@ def run_pipeline(
     if (manifest_fingerprint(ROOT) != data_fingerprint
             or manifest_fingerprint(ROOT, "val") != validation_fingerprint):
         raise RuntimeError("RCR manifests changed during inference; rerun this baseline.")
+    if (manifest_image_digest(ROOT, split_paths(ROOT, "test")[0]) != test_images
+            or manifest_image_digest(ROOT, split_paths(ROOT, "val")[0]) != val_images):
+        raise RuntimeError("RCR image bytes changed during inference; rerun this baseline.")
     run = json.loads(run_path.read_text(encoding="utf-8"))
     if run.get("method") != method.method_id:
         raise ValueError(f"Inference wrote mismatched method metadata: {run_path}")
     require_aligned_run(run, method.method_id)
     if run.get("data_fingerprint") != data_fingerprint:
         raise RuntimeError("Inference used a different test dataset")
+    recorded_images = run.get("shared_person_protocol", {}).get("detections_fingerprint", {}).get(
+        "gallery_image_content_sha256", run.get("image_provenance", {}).get("gallery_image_content_sha256"))
+    if recorded_images != test_images:
+        raise RuntimeError("Inference lacks matching gallery image provenance; rerun with the current adapter")
     if run.get("cpr_supervision") == "Val only" and run.get("validation_fingerprint") != validation_fingerprint:
         raise RuntimeError("Tuned inference lacks matching validation provenance")
-    run.update(split="test", data_protocol=DATA_PROTOCOL, data_fingerprint=data_fingerprint)
+    run.update(split="test", data_protocol=DATA_PROTOCOL, data_fingerprint=data_fingerprint,
+               scores_sha256=sha256_file(run_path.with_name("scores.npy")))
     atomic_json(run_path, run)
     run_step(
         5,
@@ -317,6 +328,7 @@ def run_pipeline(
     print(f"outputs/{method.method_id}/run.json")
     print("tables/table1_main.csv")
     print("tables/table2_cases.csv")
+    return True
 
 
 def print_methods(methods: list[MethodSpec]) -> None:
@@ -399,7 +411,8 @@ def main() -> None:
         failures = []
         for method in methods:
             try:
-                run_pipeline(method, args.force_checkpoint, args.skip_install)
+                if run_pipeline(method, args.force_checkpoint, args.skip_install) is False:
+                    failures.append(method.method_id + " (checkpoint unavailable)")
             except (subprocess.CalledProcessError, FileNotFoundError, RuntimeError, ValueError) as error:
                 print(f"FAILED {method.method_id}: {error}", flush=True)
                 failures.append(method.method_id)
@@ -416,7 +429,8 @@ def main() -> None:
         raise SystemExit(str(error)) from error
 
     check_table_builder()
-    run_pipeline(method, args.force_checkpoint, args.skip_install)
+    if run_pipeline(method, args.force_checkpoint, args.skip_install) is False:
+        raise SystemExit(EXTERNAL_CHECKPOINT_UNAVAILABLE)
 
 
 if __name__ == "__main__":

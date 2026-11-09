@@ -1,6 +1,6 @@
 method: bge_vl_mllm_s1
 display_name: BGE-VL-MLLM-S1
-group: Published / SOTA Baselines
+group: Published Baselines
 cpr_supervision: 'No'
 
 paper:

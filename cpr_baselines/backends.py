@@ -1,8 +1,6 @@
 """Frozen model inference; heavy packages are imported only when needed."""
 from __future__ import annotations
 
-import gc
-
 from cpr_person.cache import resolve
 from .common import compose_linear, load_source_file
 
@@ -13,14 +11,6 @@ def dtype_for(cfg, device):
         return torch.float32
     return {"fp16": torch.float16, "bf16": torch.bfloat16,
             "fp32": torch.float32}[cfg["runtime"]["dtype"]]
-
-
-def release_model(model):
-    import torch
-    del model
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
 
 
 class SigLIPCompose:

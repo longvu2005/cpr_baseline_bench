@@ -31,6 +31,7 @@ if str(ROOT) not in sys.path:
 from benchmark_data import manifest_file_fingerprint
 from cpr_baselines.scene_clip import gallery_features, gallery_fingerprint as build_clip_gallery_cache_fingerprint
 from cpr_person.clip_model import load_openai_clip, verify_rcr_scene_clip
+from benchmark_data import manifest_image_digest
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
@@ -159,7 +160,8 @@ def validate_qwen_artifacts(cfg: dict[str, Any]) -> tuple[Path, Path, dict[str, 
             raise RuntimeError("Malformed Qwen marker file entry")
         path = checkpoint_dir / str(item.get("path", ""))
         size = item.get("size")
-        if not path.is_file() or not isinstance(size, int) or path.stat().st_size != size:
+        if (not path.is_file() or not isinstance(size, int) or path.stat().st_size != size
+                or item.get("sha256") != sha256_file(path)):
             raise RuntimeError(
                 f"Qwen snapshot is incomplete/stale at {rel(path)}; rerun checkpoint preparation"
             )
@@ -190,6 +192,7 @@ def rewrite_fingerprint(
         "adapter_version": ADAPTER_VERSION,
         "config_sha256": sha256_file(config_path),
         "gallery_manifest_sha256": sha256_file(gallery_manifest),
+        "gallery_image_content_sha256": manifest_image_digest(ROOT, gallery_manifest),
         "query_manifest_sha256": sha256_file(query_manifest),
         "qwen_marker_sha256": sha256_file(qwen_marker),
         "repo_id": str(mllm["repo_id"]),
@@ -199,6 +202,7 @@ def rewrite_fingerprint(
         "processor": mllm["processor"],
         "generation": mllm["generation"],
     }
+
 
 
 def rewrite_meta_path(cache_path: Path) -> Path:
@@ -621,6 +625,7 @@ def main() -> None:
             "method": METHOD_ID,
             "scene_clip_sha256": actual_clip_hash,
             "data_fingerprint": data_fingerprint,
+            "image_provenance": {"gallery_image_content_sha256": manifest_image_digest(ROOT, gallery_manifest)},
             "display_name": str(cfg["display_name"]),
             "group": str(cfg["group"]),
             "cpr_supervision": str(cfg["cpr_supervision"]),

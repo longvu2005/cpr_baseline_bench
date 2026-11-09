@@ -17,7 +17,6 @@ import json
 import os
 import subprocess
 import sys
-import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +33,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from benchmark_progress import PhaseTracker, byte_progress  # noqa: E402
+from benchmark_progress import PhaseTracker  # noqa: E402
 from cpr_person.adapter import prepare_shared
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 GOOGLE_DRIVE_ID = "1Bf2Ia7zmxx5k3Dj-nRr3CLbAqc_zkM0y"
@@ -71,61 +70,6 @@ def sha256_file(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
         while chunk := handle.read(chunk_size):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def download_with_hash(
-    *,
-    url: str,
-    path: Path,
-    force: bool,
-    expected_sha256: str | None = None,
-    expected_hash_prefix: str | None = None,
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.is_file() and path.stat().st_size > 0 and not force:
-        actual = sha256_file(path)
-        valid = True
-        if expected_sha256 is not None:
-            valid = actual == expected_sha256
-        if expected_hash_prefix is not None:
-            valid = valid and actual.startswith(expected_hash_prefix)
-        if valid:
-            print(f"[skip] {rel(path)} (checksum valid)")
-            return
-        print(f"[warn] {rel(path)} has an invalid checksum; replacing it")
-
-    temp = path.with_suffix(path.suffix + ".part")
-    temp.unlink(missing_ok=True)
-    request = urllib.request.Request(url, headers={"User-Agent": "cpr-baseline-bench/1.0"})
-    digest = hashlib.sha256()
-    print(f"[download] {rel(path)}")
-    try:
-        with urllib.request.urlopen(request) as response, temp.open("wb") as handle:
-            total_header = response.headers.get("Content-Length")
-            total = int(total_header) if total_header else None
-            with byte_progress(desc=f"Download {path.name}", total=total) as bar:
-                while True:
-                    chunk = response.read(8 * 1024 * 1024)
-                    if not chunk:
-                        break
-                    handle.write(chunk)
-                    digest.update(chunk)
-                    bar.update(len(chunk))
-        actual = digest.hexdigest()
-        if expected_sha256 is not None and actual != expected_sha256:
-            raise RuntimeError(
-                f"Checksum mismatch for {rel(path)}: expected {expected_sha256}, got {actual}"
-            )
-        if expected_hash_prefix is not None and not actual.startswith(expected_hash_prefix):
-            raise RuntimeError(
-                f"Checksum prefix mismatch for {rel(path)}: "
-                f"expected {expected_hash_prefix}, got {actual}"
-            )
-        os.replace(temp, path)
-    except Exception:
-        temp.unlink(missing_ok=True)
-        raise
-    print(f"[ok] {rel(path)}")
 
 
 def download_fafa_checkpoint(path: Path, force: bool) -> None:

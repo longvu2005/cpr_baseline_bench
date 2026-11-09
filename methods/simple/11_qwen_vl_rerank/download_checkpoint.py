@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path: sys.path.insert(0,str(ROOT))
 from benchmark_progress import PhaseTracker  # noqa: E402
-S7=ROOT/'methods/simple/07_qwen25vl_rewrite_clip/download_checkpoint.py'
+S7=ROOT/'methods/simple/07_qwen_rewrite_clip/download_checkpoint.py'
 
 def main():
     p=argparse.ArgumentParser(); p.add_argument('--force',action='store_true'); args=p.parse_args()

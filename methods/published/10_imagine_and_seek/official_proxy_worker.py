@@ -480,8 +480,10 @@ def generation_fingerprint(cfg: dict[str, Any], job: dict[str, Any]) -> str:
         "schema": 4,
         "author_commit": cfg["author_source"]["commit"],
         "job": job,
+        "query_image_sha256": sha256_file(resolve_path(job["query_image"])),
         "generation": cfg["migc"]["generation"],
         "reference_mask": cfg["proxy"]["reference_mask"],
+        "prepared_marker_sha256": sha256_file(resolve_path(cfg["migc"]["prepared_marker"])),
     })
 
 

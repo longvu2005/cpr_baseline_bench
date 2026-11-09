@@ -39,6 +39,8 @@ def _bootstrap() -> None:
 
 
 _bootstrap()
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 import gc  # noqa: E402
 import hashlib  # noqa: E402
@@ -63,10 +65,11 @@ if str(ROOT) not in sys.path:
 from benchmark_data import ensure_gallery_layout  # noqa: E402
 from benchmark_data import manifest_file_fingerprint
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
+from cache_protocol import namespace_caches
 
 METHOD_ID = "wiser"
-ADAPTER_VERSION = "2026-08-18-v1-wiser-cpr-full-gallery"
-CACHE_SCHEMA = 1
+ADAPTER_VERSION = "wiser-cpr-nonself-v2"
+CACHE_SCHEMA = 2
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -173,6 +176,19 @@ def validate_prepared(cfg: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
     ).strip()
     if dirty:
         raise RuntimeError(f"Pinned WISER source has tracked modifications:\n{dirty}")
+    for name in ("bagel", "verifier"):
+        asset = marker.get("assets", {}).get(name, {})
+        model_cfg = cfg["models"][name]
+        if (asset.get("repo_id") != model_cfg["repo_id"]
+                or asset.get("resolved_revision") != model_cfg["revision"]
+                or not asset.get("files")):
+            raise RuntimeError(f"Missing/stale prepared WISER {name}; rerun checkpoint preparation")
+        directory = resolve(model_cfg["local_dir"])
+        for info in asset["files"]:
+            path = directory / info["path"]
+            if (not path.is_file() or path.stat().st_size != info["size"]
+                    or sha256(path) != info["sha256"]):
+                raise RuntimeError(f"Prepared WISER asset bytes changed: {path}")
     return checkout, marker
 
 
@@ -275,7 +291,8 @@ def encode_texts(texts: Sequence[str], model, tokenizer, device: torch.device, b
     return np.concatenate(chunks, axis=0).astype(np.float32, copy=False)
 
 
-def full_rank(features: np.ndarray, gallery: np.ndarray, device: torch.device, batch_size: int) -> np.ndarray:
+def full_rank(features: np.ndarray, gallery: np.ndarray, device: torch.device, batch_size: int,
+              self_indices=None) -> np.ndarray:
     q = torch.from_numpy(np.asarray(features)).to(device=device, dtype=torch.float32)
     g = torch.from_numpy(np.asarray(gallery)).to(device=device, dtype=torch.float32)
     out = np.empty((len(features), len(gallery)), dtype=np.int32)
@@ -287,8 +304,18 @@ def full_rank(features: np.ndarray, gallery: np.ndarray, device: torch.device, b
     ):
         end = min(start + batch_size, len(features))
         similarity = q[start:end] @ g.T
-        out[start:end] = torch.argsort(similarity, dim=-1, descending=True).cpu().numpy().astype(np.int32)
+        ranked = torch.argsort(similarity, dim=-1, descending=True, stable=True).cpu().numpy().astype(np.int32)
+        if self_indices is not None:
+            for local, row in enumerate(ranked):
+                reference = int(self_indices[start + local])
+                ranked[local] = np.concatenate([row[row != reference], [reference]])
+        out[start:end] = ranked
     return out
+
+
+def eligible_top(order, self_index, k):
+    order = np.asarray(order)
+    return order[order != self_index][:k]
 
 
 def read_caption_map(path: Path, gallery: Sequence[dict[str, Any]]) -> dict[Any, str]:
@@ -341,7 +368,7 @@ def load_generation_cache(
         if row.get("query_index") != qi or row.get("image_id") != q.get("image_id"):
             return None
         p = resolve(str(row.get("edited_image", "")))
-        if not p.is_file():
+        if not p.is_file() or row.get("edited_image_sha256") != sha256(p):
             return None
     print(f"[cache] {rel(path)}")
     return rows
@@ -386,9 +413,8 @@ def generate_queries(
         source_path = gallery_path(gallery[gindex[source_id]], gindex[source_id])
         qid = q.get("query_id", qi)
         edited_path = out_dir / f"{qi:05d}_{safe_name(qid)}.png"
-        if not edited_path.is_file():
-            edited = bagel.edit_image_no_think(str(source_path), instruction)["image"]
-            edited.save(edited_path)
+        edited = bagel.edit_image_no_think(str(source_path), instruction)["image"]
+        edited.save(edited_path)
         rows.append({
             "query_index": qi,
             "query_id": qid,
@@ -397,6 +423,7 @@ def generate_queries(
             "source_caption": source_caption,
             "modified_caption": modified,
             "edited_image": rel(edited_path),
+            "edited_image_sha256": sha256(edited_path),
         })
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -525,19 +552,21 @@ def verify_candidates(
     for qi, q in enumerate(
         progress_bar(queries, desc=f"WISER verifier loop {loop}", total=len(queries), unit="query")
     ):
-        k_t = min(topk, t_rank.shape[1])
-        k_i = min(topk, i_rank.shape[1])
-        t_ids = [gallery[int(x)]["image_id"] for x in t_rank[qi, :k_t]]
-        i_ids = [gallery[int(x)]["image_id"] for x in i_rank[qi, :k_i]]
+        source_gi = gindex[q["image_id"]]
+        t_top = eligible_top(t_rank[qi], source_gi, topk)
+        i_top = eligible_top(i_rank[qi], source_gi, topk)
+        k_t, k_i = len(t_top), len(i_top)
+        t_ids = [gallery[int(x)]["image_id"] for x in t_top]
+        i_ids = [gallery[int(x)]["image_id"] for x in i_top]
         cached = existing.get(qi)
 
         if cached and cached.get("t_ids") == t_ids and cached.get("i_ids") == i_ids:
             t_scores = [
-                (j + 1, int(t_rank[qi, j]), float(cached["t_conf"][j]))
+                (j + 1, int(t_top[j]), float(cached["t_conf"][j]))
                 for j in range(k_t)
             ]
             i_scores = [
-                (j + 1, int(i_rank[qi, j]), float(cached["i_conf"][j]))
+                (j + 1, int(i_top[j]), float(cached["i_conf"][j]))
                 for j in range(k_i)
             ]
         else:
@@ -546,11 +575,11 @@ def verify_candidates(
             instruction = str(q[text_field])
             t_scores, i_scores = [], []
             for j in range(k_t):
-                gi = int(t_rank[qi, j])
+                gi = int(t_top[j])
                 conf = verifier.score(reference, instruction, gallery_path(gallery[gi], gi))
                 t_scores.append((j + 1, gi, conf))
             for j in range(k_i):
-                gi = int(i_rank[qi, j])
+                gi = int(i_top[j])
                 conf = verifier.score(reference, instruction, gallery_path(gallery[gi], gi))
                 i_scores.append((j + 1, gi, conf))
 
@@ -670,25 +699,28 @@ def get_suggestions(
     existing = {int(r["query_index"]): r for r in load_jsonl(path)} if path.is_file() else {}
     topk = int(cfg["wiser"]["topk_per_path"])
     model = str(cfg["models"]["refiner"]["model"])
+    gindex = build_gallery_index(gallery)
     t_out, i_out, rows = [], [], []
 
     for qi, _q in enumerate(
         progress_bar(queries, desc=f"WISER refine suggestions {loop}", total=len(queries), unit="query")
     ):
+        reference = gindex[queries[qi]["image_id"]]
+        t_caps = [captions[gallery[int(gi)]["image_id"]]
+                  for gi in eligible_top(t_rank[qi], reference, topk)]
+        i_caps = [captions[gallery[int(gi)]["image_id"]]
+                  for gi in eligible_top(i_rank[qi], reference, topk)]
+        input_record = {"generation": generation[qi], "t_captions": t_caps,
+                        "i_captions": i_caps, "t_uncertain": bool(t_uncertain[qi]),
+                        "i_uncertain": bool(i_uncertain[qi])}
         cached = existing.get(qi)
+        if cached is not None and cached.get("inputs") != input_record:
+            cached = None
         if cached is not None:
             ts, ins = str(cached["t2i"]), str(cached["i2i"])
         else:
             source_caption = generation[qi]["source_caption"]
             instruction = generation[qi]["instruction"]
-            t_caps = [
-                captions[gallery[int(gi)]["image_id"]]
-                for gi in t_rank[qi, : min(topk, t_rank.shape[1])]
-            ]
-            i_caps = [
-                captions[gallery[int(gi)]["image_id"]]
-                for gi in i_rank[qi, : min(topk, i_rank.shape[1])]
-            ]
             if t_uncertain[qi]:
                 ts = (
                     client.chat.completions.create(
@@ -719,7 +751,7 @@ def get_suggestions(
 
         t_out.append(ts)
         i_out.append(ins)
-        rows.append({"query_index": qi, "t2i": ts, "i2i": ins})
+        rows.append({"query_index": qi, "inputs": input_record, "t2i": ts, "i2i": ins})
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".part")
         with tmp.open("w", encoding="utf-8") as f:
@@ -774,7 +806,9 @@ def refine_queries(
             combined = f"{instruction.strip('.?, ')} and {suggestion}."
             source_gi = gindex[q["image_id"]]
             source_path = gallery_path(gallery[source_gi], source_gi)
-            target = out_dir / f"{qi:05d}_{safe_name(q.get('query_id', qi))}.png"
+            from cpr_person.cache import canonical_hash
+            edit_key = canonical_hash({"source": sha256(source_path), "instruction": combined})
+            target = out_dir / f"{qi:05d}_{edit_key}.png"
             if not target.is_file():
                 bagel.edit_image_no_think(str(source_path), combined)["image"].save(target)
             images_out.append(target)
@@ -815,7 +849,7 @@ def wiser_candidate_order(
             -(tmap.get(gi, 0.0) + imap.get(gi, 0.0)),
             -max(tmap.get(gi, 0.0), imap.get(gi, 0.0)),
             -tmap.get(gi, 0.0),
-            str(gallery[gi]["image_id"]),
+            gi,
         ),
     )
 
@@ -880,6 +914,8 @@ def main() -> None:
         queries = load_jsonl(query_manifest)
         gindex = build_gallery_index(gallery)
         validate_queries(queries, gindex, str(cfg["adaptation"]["query_text_field"]))
+        cfg, image_digest = namespace_caches(cfg, ROOT)
+        self_indices = [gindex[query["image_id"]] for query in queries]
         device = torch.device(str(cfg["runtime"]["device"]))
         if not torch.cuda.is_available():
             raise RuntimeError("WISER requires CUDA for paper-faithful BAGEL/Qwen inference")
@@ -918,6 +954,7 @@ def main() -> None:
             "schema": CACHE_SCHEMA,
             "adapter": ADAPTER_VERSION,
             "gallery_manifest_sha256": sha256(gallery_manifest),
+            "gallery_image_content_sha256": image_digest,
             "clip": clip_cfg,
         }
         gallery_features = encode_images(
@@ -975,12 +1012,14 @@ def main() -> None:
             np.asarray(gallery_features),
             device,
             int(cfg["runtime"]["score_batch_size"]),
+            self_indices,
         )
         i_rank = full_rank(
             img_features,
             np.asarray(gallery_features),
             device,
             int(cfg["runtime"]["score_batch_size"]),
+            self_indices,
         )
 
         # BAGEL and Qwen2.5-VL are both large. WISER does not require them to be
@@ -1077,12 +1116,14 @@ def main() -> None:
                     np.asarray(gallery_features),
                     device,
                     int(cfg["runtime"]["score_batch_size"]),
+                    self_indices,
                 )
                 i_rank = full_rank(
                     img_features,
                     np.asarray(gallery_features),
                     device,
                     int(cfg["runtime"]["score_batch_size"]),
+                    self_indices,
                 )
                 verifier = WiserVerifier(cfg, device)
                 t_candidates, i_candidates, t_uncertain, i_uncertain = verify_candidates(
@@ -1122,7 +1163,9 @@ def main() -> None:
             "training_free": True,
             "cpr_supervision": "No",
             "higher_is_better": True,
-            "query_image_removed_inside_method": False,
+            "query_image_removed_inside_method": True,
+            "query_image_excluded_from_shortlist": True,
+            "image_provenance": {"gallery_image_content_sha256": image_digest},
             "num_queries": len(queries),
             "num_gallery": len(gallery),
             "scores": rel(scores_path),
@@ -1146,7 +1189,7 @@ def main() -> None:
                     "sum_confidence",
                     "max_path_confidence",
                     "t2i_confidence",
-                    "canonical_image_id",
+                    "gallery_index",
                 ],
             },
             "cpr_adapter_boundary": {

@@ -98,6 +98,22 @@ def test_calibration_refuses_eval_images(toy_protocol,tmp_path):
         tmp_path/"b.json",benchmark_queries=qm,benchmark_gallery=gm)
 
 
+def test_calibration_refuses_renamed_copies_of_eval_images(toy_protocol, tmp_path):
+    import shutil
+    cfg, gallery, queries, gm, qm, *_ = toy_protocol
+    copied = tmp_path / "renamed-external.png"
+    shutil.copyfile(gallery[0]["path"], copied)
+    eg, eq = tmp_path / "eg.jsonl", tmp_path / "eq.jsonl"
+    eg.write_text(json.dumps({"image_id": "external", "path": str(copied)}) + "\n")
+    eq.write_text(json.dumps({"image_id": "external", "subjects": [
+        {"select_text": "different", "modify_text": "different"}]}) + "\n")
+    values = tmp_path / "pairs.npy"
+    np.save(values, np.array([-1., -2.]))
+    with pytest.raises(ValueError, match="benchmark evaluation/validation images"):
+        freeze(values, eq, eg, Path(cfg["detector"]["checkpoint"]), "commit", "external",
+               tmp_path / "calibration.json", benchmark_queries=qm, benchmark_gallery=gm)
+
+
 def test_selector_worker_consumes_the_correct_split_and_writes_verified_cache(toy_protocol,tmp_path,monkeypatch):
     from types import SimpleNamespace
     import cpr_person.selector_worker as worker

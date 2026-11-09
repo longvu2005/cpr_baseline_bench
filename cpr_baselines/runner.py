@@ -148,7 +148,8 @@ def run(cfg):
               else image_digest(gallery))
     fingerprint = {"version": VERSION, "assets": canonical_hash(marker),
                    "gallery": canonical_hash(gallery), "gallery_image_content_sha256": digest,
-                   "backend": cfg["backend"], "environment": environment_metadata(device)}
+                   "backend": cfg["backend"], "composition": cfg.get("composition"),
+                   "environment": environment_metadata(device)}
     if person is not None:
         fingerprint["person_protocol"] = {key: value for key, value in person.metadata().items()
                                           if key.endswith("fingerprint") or key.endswith("sha256") or key == "version"}

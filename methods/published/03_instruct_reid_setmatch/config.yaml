@@ -1,6 +1,6 @@
 method: instruct_reid_setmatch
 display_name: Instruct-ReID + Partial SetMatch
-group: Published / SOTA Baselines
+group: Published Baselines
 cpr_supervision: 'No'
 paper:
   title: 'Instruct-ReID: A Multi-purpose Person Re-identification Task with Instructions'

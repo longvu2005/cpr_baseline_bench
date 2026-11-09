@@ -5,11 +5,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import os
 import shutil
 import subprocess
 import sys
-import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -49,50 +47,6 @@ def sha256_file(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
         while chunk := handle.read(chunk_size):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def download_url(url: str, path: Path, expected_sha256: str, force: bool) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.is_file() and not force:
-        actual = sha256_file(path)
-        if actual == expected_sha256:
-            print(f"[skip] valid {rel(path)}", flush=True)
-            return
-        print(f"[warn] replacing bad checksum: {rel(path)}", flush=True)
-
-    temp = path.with_name(path.name + ".part")
-    temp.unlink(missing_ok=True)
-    request = urllib.request.Request(url, headers={"User-Agent": "cpr-baseline-bench/1.0"})
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response, temp.open("wb") as handle:
-            total_raw = response.headers.get("Content-Length")
-            total = int(total_raw) if total_raw and total_raw.isdigit() else 0
-            done = 0
-            while True:
-                chunk = response.read(8 * 1024 * 1024)
-                if not chunk:
-                    break
-                handle.write(chunk)
-                done += len(chunk)
-                if total:
-                    print(
-                        f"\r  {done / 2**20:,.1f}/{total / 2**20:,.1f} MiB "
-                        f"({100.0 * done / total:5.1f}%)",
-                        end="",
-                        flush=True,
-                    )
-        if total:
-            print(flush=True)
-        actual = sha256_file(temp)
-        if actual != expected_sha256:
-            raise RuntimeError(
-                f"Checksum mismatch for {rel(path)}: expected {expected_sha256}, got {actual}"
-            )
-        os.replace(temp, path)
-    except Exception:
-        temp.unlink(missing_ok=True)
-        raise
-    print(f"[ok] {rel(path)}", flush=True)
 
 
 def tracked_dirty(checkout: Path) -> str:

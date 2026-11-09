@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from benchmark_data import manifest_image_digest
 from benchmark_data import manifest_file_fingerprint
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 from benchmark_data import ensure_gallery_layout  # noqa: E402
@@ -287,6 +288,7 @@ def gallery_fingerprint(cfg: dict[str, Any], config_path: Path, gallery_manifest
         "adapter_version": ADAPTER_VERSION,
         "config_sha256": sha256_file(config_path),
         "gallery_manifest_sha256": sha256_file(gallery_manifest),
+        "gallery_image_content_sha256": manifest_image_digest(ROOT, gallery_manifest),
         "lincir_checkpoint_sha256": sha256_file(checkpoint),
         "clip_model_sha256": sha256_file(snapshot / str(cfg["backbone"]["model_file"])),
         "source_commit": str(cfg["source"]["commit"]),
@@ -295,12 +297,14 @@ def gallery_fingerprint(cfg: dict[str, Any], config_path: Path, gallery_manifest
     }
 
 
+
 def query_fingerprint(cfg: dict[str, Any], config_path: Path, gallery_manifest: Path, query_manifest: Path, checkpoint: Path, snapshot: Path) -> dict[str, Any]:
     return {
         "schema": QUERY_CACHE_SCHEMA,
         "adapter_version": ADAPTER_VERSION,
         "config_sha256": sha256_file(config_path),
         "gallery_manifest_sha256": sha256_file(gallery_manifest),
+        "gallery_image_content_sha256": manifest_image_digest(ROOT, gallery_manifest),
         "query_manifest_sha256": sha256_file(query_manifest),
         "lincir_checkpoint_sha256": sha256_file(checkpoint),
         "clip_model_sha256": sha256_file(snapshot / str(cfg["backbone"]["model_file"])),
@@ -310,6 +314,7 @@ def query_fingerprint(cfg: dict[str, Any], config_path: Path, gallery_manifest: 
         "phi_l2_normalize_input": bool(cfg["phi"]["l2_normalize_input"]),
         "normalize_query": bool(cfg["composition"]["normalize_query"]),
     }
+
 
 
 def build_prompts(cfg: dict[str, Any], queries: Sequence[dict[str, Any]]) -> list[str]:
@@ -569,6 +574,7 @@ def main() -> None:
         payload = {
             "method": cfg["method"],
             "data_fingerprint": data_fingerprint,
+            "image_provenance": {"gallery_image_content_sha256": manifest_image_digest(ROOT, gallery_manifest)},
             "display_name": cfg["display_name"],
             "group": cfg["group"],
             "cpr_supervision": cfg["cpr_supervision"],

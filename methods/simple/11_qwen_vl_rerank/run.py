@@ -10,9 +10,9 @@ import torch
 import yaml
 ROOT=Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path: sys.path.insert(0,str(ROOT))
-from benchmark_data import manifest_fingerprint
+from benchmark_data import manifest_fingerprint, manifest_image_digest
 from cpr_person.cache import atomic_json
-from cpr_person.protocol import require_aligned_run
+from cpr_person.protocol import require_aligned_run, require_score_artifact
 from cpr_person.validation import verify_tuning_manifests
 from evaluate import average_precision, full_relevance, rank_scores
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
@@ -79,9 +79,10 @@ def validate_qwen(cfg):
     data=read_json(m)
     if data is None or data.get('repo_id')!=v['repo_id'] or data.get('revision')!=v['revision']:
         raise RuntimeError('Pinned Qwen prepared marker missing/stale; run checkpoint preparation.')
-    for item in data.get('files',[]):
+    if not data.get('files'): raise RuntimeError('Empty Qwen artifact inventory')
+    for item in data['files']:
         p=d/str(item.get('path',''))
-        if not p.is_file() or p.stat().st_size!=item.get('size'): raise RuntimeError(f'Incomplete Qwen file: {rel(p)}')
+        if not p.is_file() or p.stat().st_size!=item.get('size') or item.get("sha256")!=sha(p): raise RuntimeError(f'Incomplete Qwen file: {rel(p)}')
     return d,m
 def qdtype(n):
     d={'bfloat16':torch.bfloat16,'bf16':torch.bfloat16,'float16':torch.float16,'fp16':torch.float16,'float32':torch.float32}
@@ -105,6 +106,7 @@ def s6_sources(cfg,main_g,main_q,val_g,val_q):
     if not main_scores.is_file() or run is None or run.get('method')!=f['method']:
         raise FileNotFoundError('S11 requires a completed S6 run. Run `python run_baseline.py groundingdino_clipreid_set_text` first.')
     from cpr_person.adapter import require_person_branch
+    require_score_artifact(run, main_scores)
     require_aligned_run(run, f["method"])
     require_person_branch(run, main_g, main_q)
     if alpha is None or not isinstance(alpha.get('selected_alpha'),(int,float)): raise RuntimeError('Missing/stale S6 alpha_selection.json')
@@ -136,7 +138,7 @@ def prepare_val_s6(cfg,vr,vt,a,shape):
     out.flush(); write_json(meta,expected); return np.load(p,mmap_mode='r',allow_pickle=False)
 
 def verifier_fingerprint(cfg,manifest_g,manifest_q,first_stage_path,marker,max_k):
-    v=cfg['verifier']; return {'schema':CACHE_SCHEMA,'adapter':ADAPTER_VERSION,'gallery_sha':sha(manifest_g),'query_sha':sha(manifest_q),'first_stage_sha':sha(first_stage_path),'qwen_marker_sha':sha(marker),'repo_id':v['repo_id'],'revision':v['revision'],'processor':v['processor'],'generation':v['generation'],'prompt':v['prompt_template'],'max_k':int(max_k)}
+    v=cfg['verifier']; return {'schema':CACHE_SCHEMA,'adapter':ADAPTER_VERSION,'gallery_sha':sha(manifest_g),'gallery_image_content_sha256':manifest_image_digest(ROOT,manifest_g),'query_sha':sha(manifest_q),'first_stage_sha':sha(first_stage_path),'qwen_marker_sha':sha(marker),'repo_id':v['repo_id'],'revision':v['revision'],'processor':v['processor'],'generation':v['generation'],'prompt':v['prompt_template'],'max_k':int(max_k)}
 
 @torch.inference_mode()
 def qwen_verify_cache(cfg,gallery,queries,first_scores,first_stage_path,manifest_g,manifest_q,checkpoint,marker,cache_path,max_k,device):

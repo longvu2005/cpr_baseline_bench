@@ -123,8 +123,11 @@ class StageCache:
 
 
 def feature_config_hash(path):
-    """Exclude execution and SetMatch settings from expensive native embeddings."""
+    """Keep encoder settings and precision; exclude SetMatch and score chunking."""
     import yaml
     cfg = yaml.safe_load(Path(path).read_text())
-    return canonical_hash({k: v for k, v in cfg.items()
-                           if k not in {"setmatch", "runtime", "output", "cache", "display_name", "group"}})
+    encoder = {k: v for k, v in cfg.items()
+               if k not in {"setmatch", "runtime", "output", "cache", "display_name", "group"}}
+    encoder["encoding_runtime"] = {k: v for k, v in cfg.get("runtime", {}).items()
+                                   if not k.startswith("score") and "chunk" not in k and k != "num_workers"}
+    return canonical_hash(encoder)

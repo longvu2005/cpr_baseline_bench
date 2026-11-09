@@ -1,6 +1,6 @@
 method: context_i2w
 display_name: Context-I2W
-group: Published / SOTA Baselines
+group: Published Baselines
 cpr_supervision: 'No'
 backend: context_i2w
 assets:

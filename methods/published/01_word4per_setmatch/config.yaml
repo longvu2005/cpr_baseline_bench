@@ -1,6 +1,6 @@
 method: word4per_setmatch
 display_name: Word4Per + Partial SetMatch
-group: Published / SOTA Baselines
+group: Published Baselines
 cpr_supervision: 'No'
 paper:
   title: 'Word4Per: Zero-shot Composed Person Retrieval'

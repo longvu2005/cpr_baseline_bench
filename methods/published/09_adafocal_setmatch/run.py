@@ -17,7 +17,6 @@ import importlib.util
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import types
@@ -161,15 +160,10 @@ def ensure_clean_pinned_source(cfg: dict[str, Any]) -> Path:
     source = cfg["official_source"]
     checkout = resolve_path(str(source["local_checkout"]))
     expected = str(source["commit"])
-    repository = str(source["repository"])
-
     if not checkout.exists():
-        if not bool(source.get("auto_clone", True)):
-            raise FileNotFoundError(f"Missing official OACIR checkout: {rel(checkout)}")
-        if shutil.which("git") is None:
-            raise RuntimeError("git is required to clone the official OACIR source")
-        checkout.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["git", "clone", repository, str(checkout)], check=True)
+        raise FileNotFoundError(
+            f"Missing official OACIR checkout: {rel(checkout)}; run download_checkpoint.py first"
+        )
 
     if not (checkout / ".git").is_dir():
         raise RuntimeError(f"Official OACIR path is not a git checkout: {rel(checkout)}")
@@ -185,13 +179,10 @@ def ensure_clean_pinned_source(cfg: dict[str, Any]) -> Path:
         ["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True
     ).strip()
     if actual != expected:
-        subprocess.run(["git", "-C", str(checkout), "fetch", "origin", expected], check=True)
-        subprocess.run(["git", "-C", str(checkout), "checkout", "--detach", expected], check=True)
-        actual = subprocess.check_output(
-            ["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True
-        ).strip()
-    if actual != expected:
-        raise RuntimeError(f"OACIR source commit mismatch: expected {expected}, got {actual}")
+        raise RuntimeError(
+            f"OACIR source commit mismatch: expected {expected}, got {actual}; "
+            "run download_checkpoint.py to prepare the pinned source"
+        )
 
     required = [
         checkout / "data_utils.py",

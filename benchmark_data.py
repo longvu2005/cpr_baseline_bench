@@ -51,6 +51,24 @@ def manifest_file_fingerprint(gallery_path: Path, query_path: Path) -> dict[str,
     return result
 
 
+def gallery_image_digest(repo_root: Path, gallery_rows: Sequence[dict[str, Any]]) -> str:
+    """Hash ordered image IDs, portable paths and actual bytes across all methods."""
+    from cpr_person.cache import sha256_file
+
+    digest = hashlib.sha256()
+    for row in gallery_rows:
+        path = Path(row["path"])
+        path = path if path.is_absolute() else repo_root / path
+        digest.update(json.dumps(
+            [row["image_id"], row["path"], sha256_file(path)], separators=(",", ":")
+        ).encode())
+    return digest.hexdigest()
+
+
+def manifest_image_digest(repo_root: Path, gallery_manifest: Path) -> str:
+    return gallery_image_digest(repo_root, load_jsonl(gallery_manifest))
+
+
 def verify_manifest(repo_root: Path, split: str) -> dict:
     """Accept only a complete split published by prepare_data.py."""
     try:

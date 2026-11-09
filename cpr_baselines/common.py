@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import importlib.util
-import hashlib
 import json
 import os
 import random
@@ -13,7 +12,8 @@ import numpy as np
 import yaml
 
 from benchmark_progress import progress_bar
-from cpr_person.cache import StageCache, sha256_file
+from benchmark_data import gallery_image_digest
+from cpr_person.cache import ROOT, StageCache
 from cpr_person.detection import image_path, read_rgb
 from . import VERSION
 
@@ -69,13 +69,7 @@ def query_text(query, field="text"):
 
 
 def image_digest(gallery):
-    # Include image bytes, not just paths or timestamps (a mounted dataset may
-    # change without changing any manifest). Keep manifest order in the digest.
-    digest = hashlib.sha256()
-    for row in progress_bar(gallery, desc="Fingerprint images", unit="image"):
-        digest.update(json.dumps([row["image_id"], row["path"], sha256_file(image_path(row))],
-                                 separators=(",", ":")).encode())
-    return digest.hexdigest()
+    return gallery_image_digest(ROOT, progress_bar(gallery, desc="Fingerprint images", unit="image"))
 
 
 def normalized(features):

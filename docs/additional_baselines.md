@@ -1,8 +1,7 @@
 # Seven additional CIR baselines
 
-The supplied list contains seven named methods. All seven are implemented;
-an eighth method has not been invented. Base repository commit:
-`ca00427fbb13e3ad68cc0449c6e4202557641588`.
+These adapters complement the native scene and shared-person methods in
+[the main protocol](baselines.md).
 
 | Method ID | Folder | Representation | Protocol |
 | --- | --- | --- | --- |
@@ -11,20 +10,15 @@ an eighth method has not been invented. Base repository commit:
 | `context_i2w` | `methods/published/13_context_i2w` | Official context mapper, patch tokens and custom tokenizer | Whole scene |
 | `fti4cir` | `methods/published/14_fti4cir` | Official IMG2TEXT, subject/attribute pseudo-tokens | Whole scene |
 | `qwen_caption_to_caption` | `methods/simple/13_qwen_caption_to_caption` | Qwen scene captions, target rewrite, MPNet cosine | Whole scene |
-| `structured_caption_retrieval` | `methods/simple/14_structured_caption_retrieval` | Person captions with shared Partial SetMatch | Shared HF person v2 |
+| `structured_caption_retrieval` | `methods/simple/14_structured_caption_retrieval` | Person captions with shared Partial SetMatch | Shared RCR boxes |
 | `gme_qwen2_vl_2b` | `methods/simple/15_gme_qwen2_vl_2b` | Official fused image/instruction vs image-only embedding | Whole scene |
 
 Published CIR methods retain their native scene architectures. Structured
 Caption Retrieval is the explicit person adaptation. Its shared detector/selector
 cache is prepared in a separate interpreter, before Qwen dependencies. See
-[HF detector setup](hf_person_detector.md).
+[RCR detection setup](baselines.md#detection-and-crop-convention).
 
 ## Apply and run
-
-Extract the complete update ZIP **at the root of the existing checkout**.
-It preserves paths and contains code/config/docs/tests, not images, weights,
-caches or old outputs. Review local edits before overwriting files listed in
-`UPDATE_MANIFEST.json`.
 
 ```bash
 python run_baseline.py --list
@@ -45,10 +39,6 @@ The runner installs dependencies, prepares actual assets, performs inference,
 then uses the existing evaluator and table builder. Direct method scripts
 accept `--config` and require preparation first. Every run writes
 `runs/<method>/scores.npy` and `run.json`.
-
-The by-folder archive contains one method ZIP per folder and
-`shared_code.zip`. Extract the shared ZIP and all seven method ZIPs at the same
-repository root. All additions require the common `cpr_baselines/` package.
 
 ## Grounding and dependency handling
 
@@ -86,7 +76,7 @@ To use a read-only mount for the projected boxes and memberships, set
   analytic cosine lower-bound penalty -1; extra gallery people are allowed.
 - New scene runs record the same image-byte digest as person runs. Tables reject
   different recorded image bytes and different actual person boxes/memberships.
-  Existing scene results without an image digest are not retroactively verified.
+  Scene results without an image digest are rejected; rerun them with the current adapter.
 - Metadata records prompts, pixel/token budgets, revisions, SHA-256 values,
   runtime/package versions, row ordering and shared-person provenance.
   Backbone sizes and compute costs still differ.

@@ -1,6 +1,6 @@
 method: pic2word
 display_name: Pic2Word
-group: Published / SOTA Baselines
+group: Published Baselines
 cpr_supervision: 'No'
 
 paper:

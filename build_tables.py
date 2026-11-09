@@ -3,6 +3,7 @@
 import argparse
 import csv
 import json
+import math
 import re
 from pathlib import Path
 
@@ -52,7 +53,49 @@ def format_metric(value):
     if value is None:
         return ""
 
-    return f"{100.0 * float(value):.2f}"
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
+        raise ValueError(f"Retrieval metric must be finite and in [0, 1], got {value!r}")
+    return f"{100.0 * value:.2f}"
+
+
+def validate_evaluated_result(run, metrics, split_info):
+    method = run["method"]
+    if run.get("higher_is_better") is not True:
+        raise ValueError(f"Expected descending-score run metadata: {method}")
+    if metrics["run_metadata_sha256"] != canonical_hash(run):
+        raise ValueError(f"Metrics and run metadata were not evaluated together: {method}")
+    digest = metrics.get("scores_sha256")
+    if (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or digest != run.get("scores_sha256")):
+        raise ValueError(f"Metrics and run metadata refer to different score bytes: {method}")
+    count = split_info["num_queries"]
+    if metrics.get("num_queries") != count or run.get("num_queries", count) != count:
+        raise ValueError(f"Evaluated query count differs from the complete test split: {method}")
+    if run.get("num_gallery", split_info["num_gallery"]) != split_info["num_gallery"]:
+        raise ValueError(f"Evaluated gallery count differs from the complete test split: {method}")
+    overall = metrics.get("overall", {})
+    for key in MAIN_COLUMNS[3:]:
+        if key not in overall:
+            raise ValueError(f"Missing overall metric {key}: {method}")
+        format_metric(overall[key])
+    cases = metrics.get("cases", {})
+    if not cases or not set(cases) <= set(CASE_TYPES):
+        raise ValueError(f"Missing or unknown cases: {method}")
+    if sum(case.get("num_queries", 0) for case in cases.values()) != count:
+        raise ValueError(f"Case counts differ from the complete test split: {method}")
+    for case, values in cases.items():
+        expected = split_info.get("case_counts", {}).get(case)
+        if values.get("num_queries", 0) < 1 or (expected is not None and values["num_queries"] != expected):
+            raise ValueError(f"Invalid {case} query count: {method}")
+        for key in CASE_METRICS:
+            if key not in values:
+                raise ValueError(f"Missing {case} metric {key}: {method}")
+            format_metric(values[key])
+    macro = sum(case["Full-mAP"] for case in cases.values()) / len(cases)
+    weighted = sum(case["Full-mAP"] * case["num_queries"] for case in cases.values()) / count
+    if (not math.isclose(macro, overall["Macro-Full-mAP"], abs_tol=1e-12)
+            or not math.isclose(weighted, overall["Full-mAP"], abs_tol=1e-12)):
+        raise ValueError(f"Overall Full-mAP disagrees with case metrics: {method}")
 
 
 def validate_person_provenance(provenance, current_data, method_id):
@@ -90,7 +133,8 @@ def collect_results():
     if not OUTPUTS_DIR.is_dir():
         return results
 
-    current_data = verify_manifest(ROOT, "test")["fingerprint"]
+    split_info = verify_manifest(ROOT, "test")
+    current_data = split_info["fingerprint"]
 
     for method_dir in sorted(OUTPUTS_DIR.iterdir()):
         if not method_dir.is_dir():
@@ -144,6 +188,10 @@ def collect_results():
             )
         if run.get("data_fingerprint") != metrics["data_fingerprint"]:
             raise RuntimeError(f"Run metadata does not match the evaluated manifests: {run_method}")
+        if "run_metadata_sha256" not in metrics:
+            print(f"Skipping unbound metrics: {run_method}; rerun evaluate.py --method {run_method}.")
+            continue
+        validate_evaluated_result(run, metrics, split_info)
 
         if run.get("split") != "test" or run.get("data_protocol") != DATA_PROTOCOL:
             raise RuntimeError(f"Run is outside the RCR test protocol: {run_method}")
@@ -161,10 +209,11 @@ def collect_results():
         images = (provenance["detections_fingerprint"]["gallery_image_content_sha256"]
                   if method_id in PERSON_METHODS
                   else run.get("image_provenance", {}).get("gallery_image_content_sha256"))
-        if images:
-            if image_signature is not None and images != image_signature:
-                raise RuntimeError("Runs use different gallery image bytes; rerun them on the same image files before comparing.")
-            image_signature = images
+        if not isinstance(images, str) or not re.fullmatch(r"[0-9a-f]{64}", images):
+            raise RuntimeError(f"Missing/invalid gallery image bytes checksum: {method_id}; rerun inference.")
+        if image_signature is not None and images != image_signature:
+            raise RuntimeError("Runs use different gallery image bytes; rerun them on the same image files before comparing.")
+        image_signature = images
         if method_id in PERSON_METHODS:
             signature = (canonical_hash(provenance["detections_fingerprint"]), provenance["detection_array_sha256"])
             if person_detection_signature is not None and signature != person_detection_signature:
@@ -193,6 +242,9 @@ def collect_results():
             or metrics.get("cpr_supervision")
             or ""
         )
+        protocol_label = "Shared RCR boxes" if method_id in PERSON_METHODS else "Native scene v1"
+        if method_id == "instruct_reid_setmatch" and not run.get("setmatch", {}).get("calibration_provenance"):
+            protocol_label += "; uncalibrated unmatched"
 
         results.append(
             {
@@ -200,7 +252,7 @@ def collect_results():
                 "method": method,
                 "group": group,
                 "supervision": supervision,
-                "protocol": "Shared RCR boxes" if method_id in PERSON_METHODS else "Native scene v1",
+                "protocol": protocol_label,
                 "metrics": metrics,
             }
         )

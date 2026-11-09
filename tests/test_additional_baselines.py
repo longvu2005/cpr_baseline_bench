@@ -247,6 +247,7 @@ def test_fusion_scene_adapter_evaluates_multiple_positives(toy_protocol, tmp_pat
     assert score.shape == (1,3) and np.isfinite(score).all()
     assert score[0,0] == 0  # Raw reference entry is finite and preserved.
     atomic_json(out/'run.json',{'method':'siglip2_compose','higher_is_better':True,
+                              'image_provenance': {'gallery_image_content_sha256': common.image_digest(g)},
                               'data_fingerprint':manifest_fingerprint(tmp_path)})
     for key,value in {'ROOT':tmp_path,'RUNS_DIR':tmp_path/'runs','OUTPUTS_DIR':tmp_path/'outputs'}.items():
         monkeypatch.setattr(evaluate,key,value)

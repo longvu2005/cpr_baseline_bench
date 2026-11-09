@@ -1,6 +1,6 @@
 method: basic_setmatch
 display_name: BASIC + Partial SetMatch
-group: Published / SOTA Baselines
+group: Published Baselines
 cpr_supervision: 'No'
 paper:
   title: Instance-Level Composed Image Retrieval

@@ -56,8 +56,10 @@ def sha256_file(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
 
 def inventory_files(root: Path) -> list[dict[str, Any]]:
     files: list[dict[str, Any]] = []
-    for path in sorted(p for p in root.rglob("*") if p.is_file()):
-        files.append({"path": str(path.relative_to(root)), "size": int(path.stat().st_size)})
+    for path in sorted(p for p in root.rglob("*") if p.is_file()
+                       and ".cache" not in p.relative_to(root).parts):
+        files.append({"path": str(path.relative_to(root)), "size": int(path.stat().st_size),
+                      "sha256": sha256_file(path)})
     return files
 
 
@@ -67,7 +69,8 @@ def inventory_matches(root: Path, files: list[dict[str, Any]]) -> bool:
     for item in files:
         path = root / str(item.get("path", ""))
         size = item.get("size")
-        if not path.is_file() or not isinstance(size, int) or path.stat().st_size != size:
+        if (not path.is_file() or not isinstance(size, int) or path.stat().st_size != size
+                or item.get("sha256") != sha256_file(path)):
             return False
     return True
 
@@ -107,7 +110,7 @@ def prepare_generator(cfg: dict[str, Any], force: bool) -> None:
         revision=revision,
         local_dir=str(checkpoint_dir),
         local_dir_use_symlinks=False,
-        resume_download=True,
+        force_download=force,
     )
     files = inventory_files(checkpoint_dir)
     if not files:

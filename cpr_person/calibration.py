@@ -14,21 +14,39 @@ def load_rows(path):
     return [json.loads(line) for line in resolve(path).read_text().splitlines() if line.strip()]
 
 
+def protected_manifests(queries, gallery):
+    pairs = [(resolve(queries), resolve(gallery))]
+    if pairs[0][1] == resolve("data/test/gallery.jsonl"):
+        val_queries, val_gallery = resolve("data/val/queries.jsonl"), resolve("data/val/gallery.jsonl")
+        if val_queries.is_file() and val_gallery.is_file():
+            pairs.append((val_queries, val_gallery))
+    return pairs
+
+
+def image_hashes(gallery):
+    return {sha256_file(resolve(row["path"])) for row in load_rows(gallery)}
+
+
 def freeze(scores_path, query_manifest, gallery_manifest, checkpoint, source_commit, dataset_id,
            output, *, benchmark_queries="data/test/queries.jsonl", benchmark_gallery="data/test/gallery.jsonl", quantile=.01):
-    ensure_separate_queries(benchmark_queries, query_manifest)
+    protected = protected_manifests(benchmark_queries, benchmark_gallery)
+    for queries, _ in protected:
+        ensure_separate_queries(queries, query_manifest)
     if not dataset_id.strip() or not 0<=quantile<=1:
         raise ValueError("Need an external dataset ID and a quantile in [0,1]")
     source_gallery=load_rows(gallery_manifest)
     # Portable public references + real paths reject a renamed manifest over
     # the same evaluation images. No benchmark positive/identity labels enter.
     refs={str(resolve(row["path"])) for row in source_gallery}
-    if refs & {str(resolve(row["path"])) for row in load_rows(benchmark_gallery)}:
-        raise ValueError("Calibration gallery contains benchmark evaluation images")
+    hashes = image_hashes(gallery_manifest)
+    for _, gallery in protected:
+        if (refs & {str(resolve(row["path"])) for row in load_rows(gallery)}
+                or hashes & image_hashes(gallery)):
+            raise ValueError("Calibration gallery contains benchmark evaluation/validation images")
     values=np.load(resolve(scores_path),allow_pickle=False)
     if not values.size or not np.isfinite(values).all() or np.any(values>1e-5):
         raise ValueError("Expected finite native negative-squared-Euclidean scores of noncorresponding pairs")
-    artifact={"schema":"external-instruct-unmatched-v1","dataset_id":dataset_id,
+    artifact={"schema":"external-instruct-unmatched-v2","dataset_id":dataset_id,
         "pairwise_metric":"negative_squared_euclidean", "unmatched_score":float(np.quantile(values,quantile)),
         "quantile":float(quantile),"noncorresponding_pairs_attested":True,
         "source_commit":source_commit,"checkpoint_sha256":sha256_file(resolve(checkpoint)),
@@ -36,7 +54,8 @@ def freeze(scores_path, query_manifest, gallery_manifest, checkpoint, source_com
         "query_manifest_sha256":sha256_file(resolve(query_manifest)),
         "gallery_manifest_sha256":sha256_file(resolve(gallery_manifest)),
         "public_query_signatures":sorted(public_query_signature(q) for q in load_rows(query_manifest)),
-        "gallery_real_paths":sorted(refs),"evaluation_labels_used":False}
+        "gallery_real_paths":sorted(refs), "gallery_image_sha256s": sorted(hashes),
+        "evaluation_labels_used":False}
     atomic_json(resolve(output),artifact)
     return artifact
 
@@ -46,16 +65,18 @@ def apply_instruct_calibration(cfg, checkpoint, query_manifest, gallery_manifest
     if not path:
         return
     artifact=read_json(resolve(path))
-    if (not isinstance(artifact,dict) or artifact.get("schema")!="external-instruct-unmatched-v1"
+    if (not isinstance(artifact,dict) or artifact.get("schema")!="external-instruct-unmatched-v2"
             or artifact.get("checkpoint_sha256")!=sha256_file(checkpoint)
             or artifact.get("source_commit")!=cfg["source"]["commit"]
             or artifact.get("pairwise_metric")!="negative_squared_euclidean"
             or artifact.get("evaluation_labels_used") is not False
             or artifact.get("noncorresponding_pairs_attested") is not True):
         raise ValueError("Incompatible external Instruct-ReID unmatched calibration")
-    if ({public_query_signature(q) for q in load_rows(query_manifest)} & set(artifact["public_query_signatures"])
-            or {str(resolve(g["path"])) for g in load_rows(gallery_manifest)} & set(artifact["gallery_real_paths"])):
-        raise ValueError("Calibration inputs overlap the current evaluation inputs")
+    for queries, gallery in protected_manifests(query_manifest, gallery_manifest):
+        if ({public_query_signature(q) for q in load_rows(queries)} & set(artifact["public_query_signatures"])
+                or {str(resolve(g["path"])) for g in load_rows(gallery)} & set(artifact["gallery_real_paths"])
+                or image_hashes(gallery) & set(artifact["gallery_image_sha256s"])):
+            raise ValueError("Calibration inputs overlap the current evaluation/validation inputs")
     value=float(artifact["unmatched_score"])
     if not np.isfinite(value) or value>0:
         raise ValueError("Invalid native distance-space unmatched score")

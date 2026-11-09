@@ -24,7 +24,9 @@ The WISER release only ranks the verified union of two top-50 branches. The benc
    `(min(t2i_rank, i2i_rank), t2i_rank+i2i_rank, t2i_rank, gallery_index)`;
 3. the complete order is converted to monotonic float32 rank scores.
 
-The root evaluator still removes the exact query image itself.
+The reference is excluded before both top-50 verifier shortlists and refinement
+feedback. Stable base-score ties use gallery order. The complete score matrix
+still contains a finite reference column, which the evaluator removes.
 
 ## Two isolated environments
 
@@ -42,7 +44,12 @@ export OPENAI_API_KEY='...'
 python run_baseline.py wiser
 ```
 
-The first run downloads/caches large public assets and gallery captions. Expensive generation and verifier artifacts are cached for resume.
+Checkpoint preparation downloads the model assets and prepares OpenCLIP/LAVIS
+weights before inference. Expensive captions, edits, verifier outputs and
+refinement responses are cached under a namespace covering image bytes,
+ordered manifests, config, prepared models and adapter code. Changed inputs
+cannot reuse files merely because the query index is the same. HF inference
+uses offline mode. The GPT-4o refiner uses its configured external API.
 
 ## Outputs
 

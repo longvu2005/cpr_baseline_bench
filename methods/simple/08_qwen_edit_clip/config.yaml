@@ -5,7 +5,7 @@ cpr_supervision: 'No'
 
 generator:
   repo_id: Qwen/Qwen-Image-Edit-2509
-  revision: main
+  revision: d3968ef930e841f4c73640fb8afa3b306a78167e
   checkpoint_dir: checkpoints/qwen/Qwen-Image-Edit-2509
   prepared_marker: checkpoints/qwen/Qwen-Image-Edit-2509.prepared.json
   pipeline_class: QwenImageEditPlusPipeline

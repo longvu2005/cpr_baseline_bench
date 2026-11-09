@@ -66,7 +66,7 @@ from torchvision.transforms import CenterCrop, Compose, InterpolationMode, Norma
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from benchmark_data import manifest_file_fingerprint
+from benchmark_data import manifest_file_fingerprint, manifest_image_digest
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 os.environ["HF_HUB_OFFLINE"] = "1"
@@ -424,6 +424,7 @@ def main() -> None:
         gallery_meta = {
             "schema": FEATURE_SCHEMA, "adapter": ADAPTER_VERSION,
             "manifest_sha256": sha256_file(gallery_manifest), "clip_sha256": clip_sha,
+            "gallery_image_content_sha256": manifest_image_digest(ROOT, gallery_manifest),
             "preprocess": "targetpad_1.25",
         }
         gallery_features = encode_images(
@@ -498,6 +499,7 @@ def main() -> None:
         payload = {
             "method": cfg["method"],
             "data_fingerprint": data_fingerprint,
+            "image_provenance": {"gallery_image_content_sha256": gallery_meta["gallery_image_content_sha256"]},
             "display_name": cfg["display_name"],
             "group": cfg["group"],
             "paper": cfg["paper"],
