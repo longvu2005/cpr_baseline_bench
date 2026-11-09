@@ -38,13 +38,13 @@ with `--rcr-detection-cache` or `CPR_RCR_DETECTION_CACHE`. Optionally pass RCR's
 `cache/scene` with `--rcr-scene-cache` to reuse its native CLIP gallery globals.
 Both original RCR indexes are read as is; no patched or re-verified copy is
 needed. Person methods share the CLIP Subject selector and Partial SetMatch.
-Scene methods use their native encoders; S1–S4, S6–S9 and S11 use the pinned
+Scene methods use their native encoders; clip_image–clip_late_fusion, groundingdino_clipreid_set_text–reid_set_qwen_edit_proxy and retrieve_qwen25vl_rerank use the pinned
 frozen Hugging Face ViT-B/32 from RCR Proposed, including letterbox
 preprocessing and native text globals. The shared person selector retains RCR
 FAFA's separate OpenAI ViT-B/32 pipeline.
 See [the 29-method audit](docs/audit_29.md) and [Kaggle execution](docs/kaggle.md).
 
-S9 needs completed S5 and S8 source runs. S11 needs completed S6. The configured
+reid_set_qwen_edit_proxy needs completed groundingdino_clipreid_set and qwen_image_edit_clip source runs. retrieve_qwen25vl_rerank needs completed groundingdino_clipreid_set_text. The configured
 order used by `--all` places these sources before their dependents:
 
 ```bash

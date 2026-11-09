@@ -19,7 +19,7 @@ Baseline base `5f7a9d395f5c98aa16ac8e3f07fe57cdc5f8dfe9`, unmodified RCR
 | Original RCR index binding | Passed contracts | Indexes without digests accepted; digests verified when present; spot-check rejects a different image/preprocessing |
 
 The skipped torch tests (HF letterbox/text parity with real weights, packed
-detector projection, Instruct-ReID glue, S9 proxy cache, cache audit) were not run
+detector projection, Instruct-ReID glue, reid_set_qwen_edit_proxy proxy cache, cache audit) were not run
 here; run them on Kaggle as described in [kaggle.md](kaggle.md#direct-parity-tests).
 Stand-in selector features test the selection rule, not CLIP accuracy.
 
@@ -33,9 +33,9 @@ no longer needs. It was not rerun here.
 | --- | --- | --- |
 | Baseline complete opt-in suite | 323 passed, 3 skipped | Unit/integration contracts, all method routes, actual CLIP components, full-split evaluator parity; see logs delivered with patch |
 | RCR suite with companion patch | 431 passed | Existing RCR coverage plus image-provenance cache regressions |
-| Native algorithm signatures | 118 protected nodes in 27 files | 25 method entrypoints plus native backend/published providers retain selected original encoder/tokenizer/composition/scoring bodies; S1–S4 intentionally use the new shared HF provider |
+| Native algorithm signatures | 118 protected nodes in 27 files | 25 method entrypoints plus native backend/published providers retain selected original encoder/tokenizer/composition/scoring bodies; clip_image–clip_late_fusion intentionally use the new shared HF provider |
 | Actual frozen HF image forward | Passed | Odd aspect ratios; exact RCR letterbox tensors; raw pretrained globals match RCR ImageEncoder; proven RCR cache/global reuse and warm cache |
-| Owned CLIP fixture pipeline | Passed for S1–S4 | Actual pinned HF model inference, official evaluation and table subprocesses on isolated fixture val/test; environment preparation substituted; no final-data benchmark claim |
+| Owned CLIP fixture pipeline | Passed for clip_image–clip_late_fusion | Actual pinned HF model inference, official evaluation and table subprocesses on isolated fixture val/test; environment preparation substituted; no final-data benchmark claim |
 | All 29 metadata writers | Passed | Every direct/shared result writer records actual runtime identity; missing/malformed runtime is rejected before completed execution receipts |
 | Actual frozen HF text forward | Passed | CLIPTokenizerFast/native EOS/right padding/77-token truncation; RCR native TextEncoder globals; altering a learned context projection does not affect globals; actual subprocess facade |
 | Actual OpenAI B/32 selector | Passed | Same official weight SHA, native preprocessing/tokenization/crop features as RCR; actual isolated selector worker and warm cache with fixture geometry |
@@ -44,7 +44,7 @@ no longer needs. It was not rerun here.
 | Instruct validation selection | Passed contracts | Native distance math/scale, exact affine reaggregation, frozen val selection/cache and test-label perturbation isolation; heavy native encoder substituted only in glue test |
 | Word4Per reproduction admission | Passed contracts | Weight/config/source/Stage-1 receipt binding, external image inventory, byte-identical renamed overlap rejection |
 | WISER provenance | Passed contracts | Native prompts/request options/output handling preserved in wrapper tests, cached response integrity, resolved model drift rejection, actual module state hash sensitivity; no paid API call |
-| Dependency/cache safety | Passed | S6 score keys bind gallery source; S9 validates generator marker, edited image bytes and source scene index even on warm score cache; Source config/checkpoint/code drift rejection, readonly weight mount with writable metadata, stale result/manifest/image checks, S5/S8→S9 and S6→S11 guards |
+| Dependency/cache safety | Passed | groundingdino_clipreid_set_text score keys bind gallery source; reid_set_qwen_edit_proxy validates generator marker, edited image bytes and source scene index even on warm score cache; Source config/checkpoint/code drift rejection, readonly weight mount with writable metadata, stale result/manifest/image checks, groundingdino_clipreid_set/qwen_image_edit_clip→reid_set_qwen_edit_proxy and groundingdino_clipreid_set_text→retrieve_qwen25vl_rerank guards |
 | Method discovery/reporting/lint | Passed | 29 IDs unchanged; `python -S build_tables.py --check`; compilation, pyflakes, `bash -n`, `git diff --check` |
 | Patch application | Passed | Both patches checked/applied to fresh clean worktrees at their exact base commits; modified/new file bytes compared with delivered source |
 
@@ -65,7 +65,7 @@ No pretrained assets are included in the patch. Fixture images and fixture
 geometry are explicitly distinct from the actual final RGB gallery and native
 Grounding DINO outputs. Synthetic rankings establish evaluator agreement only.
 
-S1–S4 additionally completed isolated fixture pipeline checks with actual HF weights.
+clip_image–clip_late_fusion additionally completed isolated fixture pipeline checks with actual HF weights.
 Their diagnostic metrics are not benchmark accuracy; they are excluded from the
 reported final-data verification count.
 

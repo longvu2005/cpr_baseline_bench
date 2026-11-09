@@ -118,7 +118,7 @@ def test_s11_reorders_only_the_eligible_top_k(tmp_path, monkeypatch):
 
     # The rerank writer is pure NumPy. Only the model-facing verifier needs torch.
     monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(inference_mode=lambda: lambda fn: fn))
-    path = Path(__file__).resolve().parents[1] / "methods/simple/11_qwen_vl_rerank/run.py"
+    path = Path(__file__).resolve().parents[1] / "methods/simple/qwen_vl_rerank/run.py"
     spec = importlib.util.spec_from_file_location("test_s11_rcr", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

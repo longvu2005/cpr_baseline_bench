@@ -273,7 +273,7 @@ def test_instruct_validation_glue_freezes_val_and_ignores_test_labels(
     from benchmark_data import manifest_fingerprint
 
     root = Path(__file__).resolve().parents[1]
-    path = root / "methods/published/03_instruct_reid_setmatch/run.py"
+    path = root / "methods/published/instruct_reid_setmatch/run.py"
     spec = importlib.util.spec_from_file_location("native_instruct_contract", path)
     native = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(native)
@@ -393,7 +393,7 @@ def test_wiser_wrapper_preserves_native_prompts_outputs_and_warm_cache(tmp_path)
     import ast
     from pathlib import Path
 
-    path = Path(__file__).resolve().parents[1] / "methods/published/11_wiser/run.py"
+    path = Path(__file__).resolve().parents[1] / "methods/published/wiser/run.py"
     tree = ast.parse(path.read_text())
     names = {
         "build_gallery_index",

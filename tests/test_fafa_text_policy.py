@@ -8,7 +8,7 @@ import yaml
 
 from cpr_person.fafa_text import apply_fafa_text_policy, resolve_fafa_text_policy
 
-CONFIG = Path(__file__).resolve().parents[1] / "methods/published/02_fafa_setmatch/config.yaml"
+CONFIG = Path(__file__).resolve().parents[1] / "methods/published/fafa_setmatch/config.yaml"
 
 
 def test_cpr_config_128_and_max_sum_mean():

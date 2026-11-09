@@ -72,12 +72,12 @@ values directly comparable. No pretrained numerical parity is claimed here.
 | `basic_setmatch` | `load_person_context` | No |
 | `adafocal_setmatch` | `load_person_context` | No |
 | `groundingdino_clipreid_set` | `load_person_context` / shared cache guard | No |
-| `groundingdino_clipreid_set_text` | S5 `prepare_person_branch` | No |
-| `reid_set_qwen_edit_proxy` | S5 branch; own Qwen proxy stays native | No |
+| `groundingdino_clipreid_set_text` | groundingdino_clipreid_set `prepare_person_branch` | No |
+| `reid_set_qwen_edit_proxy` | groundingdino_clipreid_set branch; own Qwen proxy stays native | No |
 | `per_person_clip_compose_setmatch` | `load_person_context` | No |
 | `structured_caption_retrieval` | Shared preflight; caption runtime cache-only | No |
-| `retrieve_qwen25vl_rerank` | Completed S6 scores; checks protocol version | No |
-| S5 text-free diagnostic | Same detections, no selector | No |
+| `retrieve_qwen25vl_rerank` | Completed groundingdino_clipreid_set_text scores; checks protocol version | No |
+| groundingdino_clipreid_set text-free diagnostic | Same detections, no selector | No |
 | All other scene baselines | Native scene inference, no shared detector | No |
 
 The registry is centralized in `cpr_person.protocol.PERSON_METHODS`, also
@@ -96,7 +96,7 @@ selector. It consumes RCR's detector index without constructing a detector.
 The standalone worker below remains a diagnostic path only. Native
 FAFA remains pinned to Transformers 4.39.3 and max_txt_len/max_words 128.
 The shared consumer requirements no longer include Transformers. AdaFocal keeps
-its formerly inherited native 4.39.3 pin explicitly; S9 keeps native 4.50.3.
+its formerly inherited native 4.39.3 pin explicitly; reid_set_qwen_edit_proxy keeps native 4.50.3.
 Pinned OpenAI CLIP needs pkg_resources during setup; the environment manager
 installs setuptools<81/wheel into the target venv and builds without isolation.
 It never installs those method requirements into the parent notebook environment.
@@ -146,8 +146,8 @@ Old Swin-T caches are **not reusable**. Keep them for historical reproducibility
 normal runs write a new key. Rebuild detection and Subject localization once.
 Downstream native features/component scores carry detection identity/array hashes
 and localization identity, so affected methods regenerate their features/scores.
-Scene-only embeddings are unaffected. S6/S9/S11 inherited results need their
-new-protocol S5/S6 source runs. Historical evaluated mAP values are not rewritten.
+Scene-only embeddings are unaffected. groundingdino_clipreid_set_text/reid_set_qwen_edit_proxy/retrieve_qwen25vl_rerank inherited results need their
+new-protocol groundingdino_clipreid_set/groundingdino_clipreid_set_text source runs. Historical evaluated mAP values are not rewritten.
 
 Atomic data/sidecar writes, OS locks, mounted read roots, checksum validation and
 ordered checksummed journals remain. The one-image forward means a resumed run

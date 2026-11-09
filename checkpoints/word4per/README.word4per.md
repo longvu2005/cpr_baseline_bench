@@ -22,7 +22,7 @@ The matching Stage-2 `configs.yaml` must come from the same reproduced experimen
 Checkpoint preparation/validation is handled by:
 
 ```text
-methods/published/01_word4per_setmatch/download_checkpoint.py
+methods/published/word4per_setmatch/download_checkpoint.py
 ```
 
 Because no documented official final Stage-2 download is available, that script validates the reproduced artifacts and the documented Stage-2 recipe, then prepares the pinned official source and public auxiliary CLIP/detector weights. It fails clearly when the reproduced pair is missing rather than pretending to download an official final checkpoint.

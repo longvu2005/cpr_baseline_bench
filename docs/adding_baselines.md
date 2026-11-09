@@ -21,11 +21,11 @@ Then inspect the closest existing method:
 
 ```text
 Simple method:
-methods/simple/01_clip_image/
+methods/simple/clip_image/
 
 Published method:
-methods/published/01_word4per_setmatch/
-methods/published/02_fafa_setmatch/
+methods/published/word4per_setmatch/
+methods/published/fafa_setmatch/
 ```
 
 For a published baseline, also inspect the paper, official repository, official inference path, training/checkpoint protocol, and released checkpoint status when available.
@@ -39,13 +39,13 @@ Prefer adapting the official implementation instead of reimplementing the method
 Use:
 
 ```text
-methods/simple/<NN_method_name>/
+methods/simple/<method_name>/
 ```
 
 or:
 
 ```text
-methods/published/<NN_method_name>/
+methods/published/<method_name>/
 ```
 
 Required files for every runnable method:
@@ -66,7 +66,7 @@ README.md                # required for published or non-trivial adapters
 Example:
 
 ```text
-methods/published/03_new_method/
+methods/published/new_method/
 ├── config.yaml
 ├── requirements.txt
 ├── download_checkpoint.py
@@ -317,7 +317,7 @@ tables/table1_main.csv
 tables/table2_cases.csv
 ```
 
-Add the new method to `method_order` in `build_tables.py` when explicit table ordering is required.
+The tables sort methods alphabetically within groups; no manual ordering registration is needed.
 
 ---
 
@@ -351,7 +351,7 @@ A baseline integration is complete only when:
 [ ] model-dependent caches are invalidated when their inputs change
 [ ] evaluate.py succeeds
 [ ] build_tables.py succeeds
-[ ] final tables contain the method in the intended order/group
+[ ] final tables contain the method under its intended group
 [ ] `python run_baseline.py <method_id>` is the normal end-to-end command
 ```
 
@@ -362,7 +362,7 @@ A baseline integration is complete only when:
 For a published method called `example_method`:
 
 ```text
-methods/published/03_example_method/
+methods/published/example_method/
 ├── config.yaml
 ├── requirements.txt
 ├── download_checkpoint.py
@@ -380,9 +380,9 @@ Internally the runner performs:
 
 ```text
 validate/repair gallery and validate manifests
-→ python -m pip install -r methods/published/03_example_method/requirements.txt
-→ methods/published/03_example_method/download_checkpoint.py
-→ methods/published/03_example_method/run.py
+→ python -m pip install -r methods/published/example_method/requirements.txt
+→ methods/published/example_method/download_checkpoint.py
+→ methods/published/example_method/run.py
 → evaluate.py --method example_method
 → build_tables.py
 ```

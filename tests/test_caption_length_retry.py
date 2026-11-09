@@ -13,7 +13,7 @@ from cpr_person.cache import StageCache
 def config():
     from pathlib import Path
     root = Path(__file__).resolve().parents[1]
-    path = root / "methods/simple/13_qwen_caption_to_caption/config.yaml"
+    path = root / "methods/simple/qwen_caption_to_caption/config.yaml"
     return yaml.safe_load(path.read_text())
 
 

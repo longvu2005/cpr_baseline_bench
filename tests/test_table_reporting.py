@@ -132,13 +132,13 @@ def test_tables_only_reuses_metrics_without_method_discovery_or_inference(report
 
 
 def test_missing_reporting_module_fails_before_gallery_or_model_work(reporting_repo):
-    method = reporting_repo / "methods" / "published" / "05_lincir"
+    method = reporting_repo / "methods" / "published" / "lincir"
     method.mkdir(parents=True)
     (method / "config.yaml").write_text("method: lincir\n")
     (method / "requirements.txt").write_text("")
     (method / "run.py").write_text("raise AssertionError('inference must not run')\n")
     (reporting_repo / "cpr_person" / "protocol.py").unlink()
-    completed = cli(reporting_repo, "run_baseline.py", "05_lincir", "--skip-install")
+    completed = cli(reporting_repo, "run_baseline.py", "lincir", "--skip-install")
     assert completed.returncode != 0
     assert "No module named 'cpr_person.protocol'" in completed.stderr
     assert "Validate gallery data" not in completed.stdout

@@ -412,41 +412,8 @@ def main():
             "No evaluated results match the current manifests. Run a baseline first."
         )
 
-    group_order = {
-        "Simple / Obvious Baselines": 0,
-        "Published / SOTA Baselines": 1,
-        # Backward-compatible alias for older run.json files.
-        "Published Baselines": 1,
-        "Proposed": 2,
-    }
-
-    method_order = {
-        "clip_image": 1,
-        "clip_text": 2,
-        "clip_early_fusion": 3,
-        "clip_late_fusion": 4,
-        "word4per_setmatch": 1,
-        "fafa_setmatch": 2,
-        "instruct_reid_setmatch": 3,
-        "pic2word": 4,
-        "lincir": 5,
-        "magiclens_large": 6,
-        "bge_vl_mllm_s1": 7,
-    }
-
-    results.sort(
-        key=lambda x: (
-            group_order.get(
-                x["group"],
-                99,
-            ),
-            method_order.get(
-                x["method_id"],
-                999,
-            ),
-            x["method"].lower(),
-        )
-    )
+    # Stable alphabetical presentation without an explicit method rank.
+    results.sort(key=lambda x: (x["group"], x["method"].casefold(), x["method_id"]))
 
     main_rows = build_main_table(results)
     case_rows = build_case_table(results)

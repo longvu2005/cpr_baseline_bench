@@ -40,7 +40,7 @@ Partial SetMatch denote a benchmark adaptation. The proposed method's learned
 localizer is a method component; sharing detector boxes does not imply identical
 localization or equal training supervision with the proposed model.
 
-Early/late CLIP fusion, S6, S9, S10, S11 and Instruct-ReID select parameters on complete val.
+Early/late CLIP fusion, groundingdino_clipreid_set_text, reid_set_qwen_edit_proxy, per_person_clip_compose_setmatch, retrieve_qwen25vl_rerank and Instruct-ReID select parameters on complete val.
 Other defaults are predeclared. If any predeclared prompt, cap, checkpoint or
 adapter setting was actually chosen using RCR val in earlier experiments,
 report that validation use truthfully. No test metric or example may select

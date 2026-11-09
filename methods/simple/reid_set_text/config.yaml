@@ -1,0 +1,70 @@
+method: groundingdino_clipreid_set_text
+display_name: CLIP-ReID Subject Set + Global CLIP Text
+group: Simple / Obvious Baselines
+cpr_supervision: 'Val only'
+base_set:
+  method: groundingdino_clipreid_set
+  method_dir: methods/simple/reid_set
+  config: methods/simple/reid_set/config.yaml
+clip_text:
+  name: openai/clip-vit-base-patch32
+  checkpoint: checkpoints/clip/hf-vit-base-patch32
+  revision: 3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268
+  text_field: text
+fusion:
+  formula: alpha * reid_set + (1 - alpha) * clip_text
+  score_normalization: none
+  alpha_selection:
+    mode: validation
+    fixed_alpha: 0.5
+    metric: Full-mAP
+    grid:
+    - 0.0
+    - 0.05
+    - 0.1
+    - 0.15
+    - 0.2
+    - 0.25
+    - 0.3
+    - 0.35
+    - 0.4
+    - 0.45
+    - 0.5
+    - 0.55
+    - 0.6
+    - 0.65
+    - 0.7
+    - 0.75
+    - 0.8
+    - 0.85
+    - 0.9
+    - 0.95
+    - 1.0
+    tie_break: smallest_alpha
+    result: runs/groundingdino_clipreid_set_text/alpha_selection.json
+    validation:
+      gallery_manifest: data/val/gallery.jsonl
+      query_manifest: data/val/queries.jsonl
+runtime:
+  device: cuda
+  clip_image_batch_size: 32
+  clip_text_batch_size: 128
+  clip_score_batch_size: 128
+  num_workers: 4
+cache:
+  main:
+    reid_set_scores: runs/groundingdino_clipreid_set_text/cache/main_reid_set_scores.npy
+    clip_gallery_features: runs/clip_image/gallery_features_vit_b32.npy
+    clip_text_scores: runs/groundingdino_clipreid_set_text/cache/main_clip_text_scores.npy
+  validation:
+    detections: runs/groundingdino_clipreid_set_text/cache/val_person_detections.npz
+    reid_features: runs/groundingdino_clipreid_set_text/cache/val_person_features.npy
+    reid_set_scores: runs/groundingdino_clipreid_set_text/cache/val_reid_set_scores.npy
+    clip_gallery_features: runs/groundingdino_clipreid_set_text/cache/val_clip_gallery_features.npy
+    clip_text_scores: runs/groundingdino_clipreid_set_text/cache/val_clip_text_scores.npy
+data:
+  gallery_manifest: data/test/gallery.jsonl
+  query_manifest: data/test/queries.jsonl
+output:
+  dir: runs/groundingdino_clipreid_set_text
+person_protocol: cpr_person/protocol.yaml

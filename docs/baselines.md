@@ -12,48 +12,48 @@ these detection, localization or image aggregation procedures.
 
 | ID / directory | Representation or scoring retained | Shared detection | Shared localization | Partial SetMatch |
 | --- | --- | --- | --- | --- |
-| S1 `clip_image` | Full-image CLIP | No | No | No |
-| S2 `clip_text` | Text to full-image CLIP | No | No | No |
-| S3 `clip_early_fusion` | Global early fusion | No | No | No |
-| S4 `clip_late_fusion` | Global late fusion | No | No | No |
-| S5 `groundingdino_clipreid_set` | Official MSMT17 CLIP-ReID, cosine | Yes | Yes | Yes |
-| S6 `groundingdino_clipreid_set_text` | Adapted S5 + global CLIP text, original fusion | Inherited S5 | Inherited S5 | ReID branch |
-| S7 `qwen25vl_rewrite_clip` | Text rewriting + full-image CLIP | No | No | No |
-| S8 `qwen_image_edit_clip` | Generated full-scene proxy + CLIP | No | No | No |
-| S9 `reid_set_qwen_edit_proxy` | Adapted S5 + original S8 proxy/fusion | Inherited S5 | Inherited S5 | ReID branch |
-| S10 `per_person_clip_compose_setmatch` | Native ViT-L/14 image/text composition, cosine | Yes | Yes, B/32 | Yes |
-| S11 `retrieve_qwen25vl_rerank` | Full-scene VLM reranking | S6 first stage | S6 first stage | First stage only |
-| P1 `word4per_setmatch` | Official Word4Per Stage-2 pseudo-word composition, cosine | Yes | Yes | Yes |
-| P2 `fafa_setmatch` | Official multimodal FAFA, native soft-FDA top-k token mean | Yes | Yes | Yes |
-| P3 `instruct_reid_setmatch` | Official instruction-aware fusion, negative squared Euclidean | Yes | Yes | Yes |
-| P4 `pic2word` | Native full-image composition | No | No | No |
-| P5 `lincir` | Native full-image composition | No | No | No |
-| P6 `magiclens_large` | Native full-image encoder | No | No | No |
-| P7 `bge_vl_mllm_s1` | Native scene/image retrieval | No | No | No |
-| P8 `basic_setmatch` | Official BASIC scorer and parity check | Yes | Yes | Yes |
-| P9 `adafocal_setmatch` | Full-reference context + predicted anchor; native max-token similarity | Yes | Yes | Yes |
-| P10 `imagine_seek` | Native full-scene generation/retrieval | No | No | No |
-| P11 `wiser` | Native scene retrieval | No | No | No |
+| clip_image `clip_image` | Full-image CLIP | No | No | No |
+| clip_text `clip_text` | Text to full-image CLIP | No | No | No |
+| clip_early_fusion `clip_early_fusion` | Global early fusion | No | No | No |
+| clip_late_fusion `clip_late_fusion` | Global late fusion | No | No | No |
+| groundingdino_clipreid_set `groundingdino_clipreid_set` | Official MSMT17 CLIP-ReID, cosine | Yes | Yes | Yes |
+| groundingdino_clipreid_set_text `groundingdino_clipreid_set_text` | Adapted groundingdino_clipreid_set + global CLIP text, original fusion | Inherited groundingdino_clipreid_set | Inherited groundingdino_clipreid_set | ReID branch |
+| qwen25vl_rewrite_clip `qwen25vl_rewrite_clip` | Text rewriting + full-image CLIP | No | No | No |
+| qwen_image_edit_clip `qwen_image_edit_clip` | Generated full-scene proxy + CLIP | No | No | No |
+| reid_set_qwen_edit_proxy `reid_set_qwen_edit_proxy` | Adapted groundingdino_clipreid_set + original qwen_image_edit_clip proxy/fusion | Inherited groundingdino_clipreid_set | Inherited groundingdino_clipreid_set | ReID branch |
+| per_person_clip_compose_setmatch `per_person_clip_compose_setmatch` | Native ViT-L/14 image/text composition, cosine | Yes | Yes, B/32 | Yes |
+| retrieve_qwen25vl_rerank `retrieve_qwen25vl_rerank` | Full-scene VLM reranking | groundingdino_clipreid_set_text first stage | groundingdino_clipreid_set_text first stage | First stage only |
+| word4per_setmatch `word4per_setmatch` | Official Word4Per Stage-2 pseudo-word composition, cosine | Yes | Yes | Yes |
+| fafa_setmatch `fafa_setmatch` | Official multimodal FAFA, native soft-FDA top-k token mean | Yes | Yes | Yes |
+| instruct_reid_setmatch `instruct_reid_setmatch` | Official instruction-aware fusion, negative squared Euclidean | Yes | Yes | Yes |
+| pic2word `pic2word` | Native full-image composition | No | No | No |
+| lincir `lincir` | Native full-image composition | No | No | No |
+| magiclens_large `magiclens_large` | Native full-image encoder | No | No | No |
+| bge_vl_mllm_s1 `bge_vl_mllm_s1` | Native scene/image retrieval | No | No | No |
+| basic_setmatch `basic_setmatch` | Official BASIC scorer and parity check | Yes | Yes | Yes |
+| adafocal_setmatch `adafocal_setmatch` | Full-reference context + predicted anchor; native max-token similarity | Yes | Yes | Yes |
+| imagine_and_seek `imagine_seek` | Native full-scene generation/retrieval | No | No | No |
+| wiser `wiser` | Native scene retrieval | No | No | No |
 
 ## Scene CLIP
 
-S1–S4 and the benchmark CLIP branches of S6–S9 and S11 use RCR Proposed's
+clip_image–clip_late_fusion and the benchmark CLIP branches of groundingdino_clipreid_set_text–reid_set_qwen_edit_proxy and retrieve_qwen25vl_rerank use RCR Proposed's
 frozen Hugging Face `openai/clip-vit-base-patch32`, revision
 `3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268`. Images use stored RGB pixels,
 PIL bicubic black letterbox to 224, then HF normalization without resize/crop.
 Text uses CLIPTokenizerFast with native EOS, right padding and truncation to 77.
 Only native pretrained 512-dimensional globals are used; no learned Proposed
-projection is loaded. Features are L2-normalized before retrieval. S2–S4 and S6 encode the finalized instruction.
-S7 embeds the Qwen rewrite and S8 embeds the generated proxy. S9 reuses the
-S8 scores and S11 reranks the aligned S6 shortlist. Published native encoders
-and S10's person-crop ViT-L/14 remain method-specific.
+projection is loaded. Features are L2-normalized before retrieval. clip_text–clip_late_fusion and groundingdino_clipreid_set_text encode the finalized instruction.
+qwen25vl_rewrite_clip embeds the Qwen rewrite and qwen_image_edit_clip embeds the generated proxy. reid_set_qwen_edit_proxy reuses the
+qwen_image_edit_clip scores and retrieve_qwen25vl_rerank reranks the aligned groundingdino_clipreid_set_text shortlist. Published native encoders
+and per_person_clip_compose_setmatch's person-crop ViT-L/14 remain method-specific.
 
 With `--rcr-scene-cache` (or `CPR_RCR_SCENE_CACHE`), gallery globals are read
 directly from RCR's `cache/scene/index.pt` in split-gallery order; sixteen
 label-free images are re-encoded to confirm the pipeline (cosine >= 0.999).
 Query texts, rewrites and generated images are always encoded by the same worker.
 
-S3 and S4 select the RCR fusion weight grid on val by Full-mAP. S4 standardizes
+clip_early_fusion and clip_late_fusion select the RCR fusion weight grid on val by Full-mAP. clip_late_fusion standardizes
 each score branch over the split gallery with the reference image excluded.
 
 ## Detection and crop convention
@@ -112,12 +112,12 @@ the complete reference image and applies its official anchor transform/mask
 for each selected member. Its existing explicit handling of an anchor removed
 by native TargetPad remains recorded in `invalid_localization_queries`.
 
-**S5 now uses text for localization.** Its public ID is unchanged; display name
+**groundingdino_clipreid_set now uses text for localization.** Its public ID is unchanged; display name
 and metadata explicitly identify the adaptation. Text does not enter its ReID
 encoder or cosine pair score. The separately labeled diagnostic is:
 
 ```bash
-python methods/simple/05_reid_set/run.py --text-free-diagnostic
+python methods/simple/reid_set/run.py --text-free-diagnostic
 ```
 
 That diagnostic uses all reference detections, skips the selector, writes to
@@ -141,8 +141,8 @@ use rectangular Hungarian. Native pair scores are never replaced by FAFA's.
 
 | Methods | Fixed unmatched reference | Source |
 | --- | --- | --- |
-| Word4Per, FAFA, CLIP-ReID, S10, AdaFocal | `-1.0` | Lower bound of normalized cosine, top-k mean cosine or max-token cosine |
-| S6, S9 | S5's `-1.0` before fusion | Same ReID branch; global/proxy fusion remains native |
+| Word4Per, FAFA, CLIP-ReID, per_person_clip_compose_setmatch, AdaFocal | `-1.0` | Lower bound of normalized cosine, top-k mean cosine or max-token cosine |
+| groundingdino_clipreid_set_text, reid_set_qwen_edit_proxy | groundingdino_clipreid_set's `-1.0` before fusion | Same ReID branch; global/proxy fusion remains native |
 | BASIC | Computed once from official external resources | Analytic lower bound of its unchanged polynomial score |
 | Instruct-ReID | Selected on full val | 21 native-distance quantiles; val Full-mAP; smallest-score tie break |
 
@@ -176,7 +176,7 @@ python -m cpr_person.calibration \
 ```
 
 Use native negative-squared-distance scores of externally verified
-noncorresponding pairs. Set `setmatch.unmatched_calibration` in P3 config to
+noncorresponding pairs. Set `setmatch.unmatched_calibration` in instruct_reid_setmatch config to
 that JSON path. Model/checkpoint identity and overlap guards are checked at
 load time. Never generate this reference from CPR evaluation pairs or tune its
 quantile on evaluation results. Calibration provenance is recorded in the run.
@@ -215,7 +215,7 @@ export CPR_CLIP_SELECTOR_CHECKPOINT=/absolute/ViT-B-32.pt
 ```
 
 `CPR_REQUIRE_SHARED_CACHE=1` refuses a missing detection or localization cache.
-S5 additionally retains `--preflight-only` and `--require-detection-cache`.
+groundingdino_clipreid_set additionally retains `--preflight-only` and `--require-detection-cache`.
 
 Inspect actual mounted datasets before selecting paths:
 
@@ -251,7 +251,7 @@ runs inference on the imported test split, evaluates it and builds tables. Word4
 reproduced Stage-2 artifacts described in
 `checkpoints/word4per/README.word4per.md`.
 
-S9 requires completed S5 and S8 source runs on exactly the same manifests:
+reid_set_qwen_edit_proxy requires completed groundingdino_clipreid_set and qwen_image_edit_clip source runs on exactly the same manifests:
 
 ```bash
 python run_baseline.py groundingdino_clipreid_set
@@ -259,8 +259,8 @@ python run_baseline.py qwen_image_edit_clip
 python run_baseline.py reid_set_qwen_edit_proxy
 ```
 
-S6 and S10 default to alpha selection on RCR val. S9 selects alpha on the
-same val split. S11 uses S6's validation-selected alpha and branch scores to
+groundingdino_clipreid_set_text and per_person_clip_compose_setmatch default to alpha selection on RCR val. reid_set_qwen_edit_proxy selects alpha on the
+same val split. retrieve_qwen25vl_rerank uses groundingdino_clipreid_set_text's validation-selected alpha and branch scores to
 select its rerank settings. The selectors require the val manifests from the
 same finalized RCR import as the test manifests.
 
@@ -289,7 +289,7 @@ to select between these protocols.
 
 Smoke uses a temporary 40-scene/4-query subset and checks finite output shape;
 it never evaluates or reports those subset scores as benchmark results.
-S9/S11 are tested through their inherited branches in CPU integration tests;
+reid_set_qwen_edit_proxy/retrieve_qwen25vl_rerank are tested through their inherited branches in CPU integration tests;
 their full native proxy/verifier runs still need their configured source runs.
 
 Every normal run preserves complete gallery/query ordering and the

@@ -7,7 +7,7 @@ Default pipeline:
 
 Examples:
     python run_baseline.py clip_image
-    python run_baseline.py 01_clip_image
+    python run_baseline.py clip_image
     python run_baseline.py fafa_setmatch --rcr-detection-cache /path/to/rcr/cache/detections
     python run_baseline.py clip_image --skip-install
     python run_baseline.py --list
@@ -18,7 +18,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shlex
 import subprocess
 import sys
@@ -38,7 +37,6 @@ METHOD_ROOTS = (
     ROOT / "methods" / "simple",
     ROOT / "methods" / "published",
 )
-NUMERIC_PREFIX_RE = re.compile(r"^\d+_(.+)$")
 EXTERNAL_CHECKPOINT_UNAVAILABLE = 42
 
 
@@ -69,11 +67,7 @@ class MethodSpec:
 
     @property
     def aliases(self) -> tuple[str, ...]:
-        names = {self.method_id, self.directory.name}
-        match = NUMERIC_PREFIX_RE.match(self.directory.name)
-        if match:
-            names.add(match.group(1))
-        return tuple(sorted(names))
+        return tuple(sorted({self.method_id, self.directory.name}))
 
 
 def read_method_id(config_path: Path) -> str:
@@ -377,7 +371,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "method",
         nargs="?",
-        help="Method id or method directory name, e.g. clip_image or 01_clip_image.",
+        help="Method id or method directory name, e.g. clip_image or clip_image.",
     )
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument(

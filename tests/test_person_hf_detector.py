@@ -30,7 +30,7 @@ def test_canonical_rcr_configuration_and_native_dependencies():
         'huggingface_grounding_dino', 'IDEA-Research/grounding-dino-tiny', 'person', .30, .25)
     assert d['revision'] == d['processor_revision'] == 'a2bb814dd30d776dcf7e30523b00659f4f141c71'
     assert not {'nms_iou_threshold', 'min_box_size_px', 'max_persons_per_image', 'box_threshold'} & d.keys()
-    _, native = _requirements_digest(ROOT/'methods/published/02_fafa_setmatch/requirements.txt')
+    _, native = _requirements_digest(ROOT/'methods/published/fafa_setmatch/requirements.txt')
     _, detector = _requirements_digest(ROOT/'cpr_person/detector-requirements.txt')
     assert 'transformers==4.39.3' in native and 'transformers==4.56.2' not in native
     assert 'transformers==4.56.2' in detector and 'transformers==4.39.3' not in detector
@@ -205,7 +205,7 @@ def test_complete_journal_seals_without_model_initialization(toy_protocol,monkey
 
 def test_fafa_query_and_gallery_crop_same_fractional_boxes(toy_protocol):
     cfg,gallery,queries,gm,qm,calls,selector = toy_protocol
-    path = ROOT/'methods/published/02_fafa_setmatch/run.py'
+    path = ROOT/'methods/published/fafa_setmatch/run.py'
     tree = ast.parse(path.read_text())
     nodes = [n for n in tree.body if getattr(n,'name',None) in
              {'PersonCropDataset','GalleryPersonDataset','QueryTargetDataset'}]
@@ -341,7 +341,7 @@ def test_detection_change_invalidates_localization_and_fafa_features(toy_protoco
     second = load_person_context(gallery,queries,gm,qm,'cpu')
     assert first.detections.path != second.detections.path
     assert first.localization.path != second.localization.path
-    build = function('methods/published/02_fafa_setmatch/run.py','build_stage_caches',{
+    build = function('methods/published/fafa_setmatch/run.py','build_stage_caches',{
         'hashlib':hashlib,'json':json,'resolve_config_path':lambda p:Path(p),
         'checkpoint_identity':lambda p:'same-native-checkpoint'})
     native = {'checkpoint':{'path':'unchanged.pt','max_txt_len':128},'source':{'commit':'unchanged'}}

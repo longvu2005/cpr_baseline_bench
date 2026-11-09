@@ -106,13 +106,13 @@ def test_s9_val_proxy_cache_revalidates_generator_images_and_rcr_globals(
     pytest.importorskip("torch")
     import contextlib
 
-    s9 = load_method("methods/simple/09_reid_qwen_proxy/run.py", "s9_receipt_contract")
-    s8 = load_method("methods/simple/08_qwen_edit_clip/run.py", "s8_receipt_contract")
+    s9 = load_method("methods/simple/reid_qwen_proxy/run.py", "s9_receipt_contract")
+    s8 = load_method("methods/simple/qwen_edit_clip/run.py", "s8_receipt_contract")
     cfg = yaml.safe_load(
-        (ROOT / "methods/simple/09_reid_qwen_proxy/config.yaml").read_text()
+        (ROOT / "methods/simple/reid_qwen_proxy/config.yaml").read_text()
     )
     proxy = yaml.safe_load(
-        (ROOT / "methods/simple/08_qwen_edit_clip/config.yaml").read_text()
+        (ROOT / "methods/simple/qwen_edit_clip/config.yaml").read_text()
     )
     cfg["runtime"]["device"] = "cpu"
     folder = tmp_path / "generator"

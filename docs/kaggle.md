@@ -99,7 +99,7 @@ bash scripts/run_all_kaggle.sh
 
 The script imports exact val/test manifests, validates images, prepares shared HF
 CLIP, reads the RCR indexes directly, then runs all 29 in dependency order.
-S9 requires successful S5 and S8 in the batch; S11 requires S6. Failure/unavailability
+reid_set_qwen_edit_proxy requires successful groundingdino_clipreid_set and qwen_image_edit_clip in the batch; retrieve_qwen25vl_rerank requires groundingdino_clipreid_set_text. Failure/unavailability
 is recorded and propagates to dependents; remaining methods still run. Exit status
 is nonzero if any method fails or publication artifacts are incomplete. No test
 accuracy chooses prompts, cap, checkpoints, penalty protocol or method subset.

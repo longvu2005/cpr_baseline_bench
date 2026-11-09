@@ -60,7 +60,7 @@ def test_wiser_verifier_excludes_reference_before_top_k_and_refinement(tmp_path)
     def score(reference, instruction, candidate):
         calls.append(candidate)
         return .9 if candidate.name == 'self' else .2
-    ns = functions('methods/published/11_wiser/run.py',
+    ns = functions('methods/published/wiser/run.py',
                    ['eligible_top', 'verify_candidates'], {
         'verify_cache_path': lambda *_: tmp_path / 'verify.jsonl',
         'gallery_path': lambda row, _: row['path'],
@@ -79,7 +79,7 @@ def test_wiser_verifier_excludes_reference_before_top_k_and_refinement(tmp_path)
 
 
 def test_wiser_cache_namespace_tracks_images_config_and_prepared_models(tmp_path):
-    module = runpy.run_path(str(ROOT / 'methods/published/11_wiser/cache_protocol.py'))
+    module = runpy.run_path(str(ROOT / 'methods/published/wiser/cache_protocol.py'))
     namespace = module['namespace_caches']
     image = tmp_path / 'image'; image.write_bytes(b'old')
     gallery = tmp_path / 'gallery.jsonl'
@@ -179,7 +179,7 @@ def test_checkpoint_unavailable_is_nonzero(monkeypatch, tmp_path, all_methods):
 
 
 def test_s11_checkpoint_dependency_resolves_existing_adapter():
-    module = runpy.run_path(str(ROOT / 'methods/simple/11_qwen_vl_rerank/download_checkpoint.py'))
+    module = runpy.run_path(str(ROOT / 'methods/simple/qwen_vl_rerank/download_checkpoint.py'))
     assert module['S7'].is_file()
 
 

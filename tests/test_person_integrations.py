@@ -35,9 +35,9 @@ def function(path,name,namespace=None):
 
 
 DIRECT={
- "instruct_reid_setmatch":("methods/published/03_instruct_reid_setmatch/run.py","negative_squared_euclidean"),
- "groundingdino_clipreid_set":("methods/simple/05_reid_set/run.py","cosine"),
- "per_person_clip_compose_setmatch":("methods/simple/10_person_compose_setmatch/run.py","cosine"),
+ "instruct_reid_setmatch":("methods/published/instruct_reid_setmatch/run.py","negative_squared_euclidean"),
+ "groundingdino_clipreid_set":("methods/simple/reid_set/run.py","cosine"),
+ "per_person_clip_compose_setmatch":("methods/simple/person_compose_setmatch/run.py","cosine"),
 }
 
 
@@ -60,15 +60,15 @@ def test_basic_and_adafocal_keep_their_pair_scores():
     # Official score spaces are passed through unchanged, including negatives.
     s=np.array([[4.,-3.,-2.],[-7.,3.,-1.]])
     offsets=np.array([0,2,3,3]);expected=aggregate_people(s,offsets,-19)
-    basic=function("methods/published/08_basic_setmatch/run.py","collapse_setmatch")
-    ada=function("methods/published/09_adafocal_setmatch/run.py","aggregate_setmatch")
+    basic=function("methods/published/basic_setmatch/run.py","collapse_setmatch")
+    ada=function("methods/published/adafocal_setmatch/run.py","aggregate_setmatch")
     np.testing.assert_allclose(basic(s,None,None,offsets,-19),expected)
     np.testing.assert_allclose(ada(pair_scores=s,offsets=offsets,unmatched_score=-19),expected)
 
 
 @pytest.mark.parametrize("method",["word4per","fafa"])
 def test_published_component_output_contract(method,tmp_path):
-    directory="01_word4per_setmatch" if method=="word4per" else "02_fafa_setmatch"
+    directory="word4per_setmatch" if method=="word4per" else "fafa_setmatch"
     score=function(f"methods/published/{directory}/run.py","score_all_queries", {
         "flatten_query_features":lambda rows:(np.concatenate(rows),np.r_[0,np.cumsum([len(x) for x in rows])]),
         "atomic_save":lambda path,array:np.save(path,array),
@@ -105,8 +105,8 @@ def test_s5_s6_s9_share_actual_cached_context_and_score_contract(toy_protocol,tm
                          for si,m in person.localization.flat(qi)]) for qi,q in enumerate(queries)]
     bcfg={"setmatch":{"unmatched_score":-1.,"unmatched_score_source":"analytic_cosine_lower_bound"},
           "runtime":{"score_feature_chunk_size":2}}
-    one=function("methods/simple/05_reid_set/run.py","score_one_query")
-    compute=function("methods/simple/05_reid_set/run.py","compute_scores",{"score_one_query":one})
+    one=function("methods/simple/reid_set/run.py","score_one_query")
+    compute=function("methods/simple/reid_set/run.py","compute_scores",{"score_one_query":one})
     def prepare_branch(**kwargs):
         p=load_person_context(gallery,queries,gm,qm,"cpu")
         return p,features,query_sets,{"shared_person_protocol":p.metadata()}
@@ -119,7 +119,7 @@ def test_s5_s6_s9_share_actual_cached_context_and_score_contract(toy_protocol,tm
     got=compute(cfg=bcfg,queries=queries,query_indices=np.array([0,1,0]),features=features,
                 offsets=person.detections.offsets,output_path=output,query_features_list=query_sets)
     assert got.shape==(len(queries),len(gallery)) and np.isfinite(got).all()
-    six=function("methods/simple/06_reid_set_text/run.py","prepare_s5_scores", {
+    six=function("methods/simple/reid_set_text/run.py","prepare_s5_scores", {
         "read_json":read_json,"meta_path":s5.meta_path,
         "write_json":lambda p,x:p.write_text(json.dumps(x)),
         "validate_score_matrix":lambda arr,shape,label:evaluate.validate_score_matrix(arr,shape)})
@@ -133,7 +133,7 @@ def test_s5_s6_s9_share_actual_cached_context_and_score_contract(toy_protocol,tm
         require_person_branch({"shared_person_protocol":person.metadata()},gm,qm)
     with pytest.raises(RuntimeError):require_person_branch({"shared_person_protocol":{}},gm,qm)
     basecfg=tmp_path/"base.yaml";basecfg.write_text(yaml.safe_dump(bcfg))
-    nine=function("methods/simple/09_reid_qwen_proxy/run.py","build_validation_reid_scores", {
+    nine=function("methods/simple/reid_qwen_proxy/run.py","build_validation_reid_scores", {
         "resolve_path":lambda v:Path(v),"load_yaml":lambda p:yaml.safe_load(p.read_text()),"read_json":read_json,
         "load_cached_scores":lambda *args:None,
         "save_scores":lambda path,arr,fp:arr})

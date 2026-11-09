@@ -5,13 +5,13 @@ These adapters complement the native scene and shared-person methods in
 
 | Method ID | Folder | Representation | Protocol |
 | --- | --- | --- | --- |
-| `siglip2_compose` | `methods/simple/12_siglip2_compose` | SigLIP2 image/text fusion, fixed alpha 0.5 | Whole scene |
-| `searle_xl` | `methods/published/12_searle_xl` | Official Phi on raw CLIP features, native pseudo-word encoder | Whole scene |
-| `context_i2w` | `methods/published/13_context_i2w` | Official context mapper, patch tokens and custom tokenizer | Whole scene |
-| `fti4cir` | `methods/published/14_fti4cir` | Official IMG2TEXT, subject/attribute pseudo-tokens | Whole scene |
-| `qwen_caption_to_caption` | `methods/simple/13_qwen_caption_to_caption` | Qwen scene captions, target rewrite, MPNet cosine | Whole scene |
-| `structured_caption_retrieval` | `methods/simple/14_structured_caption_retrieval` | Person captions with shared Partial SetMatch | Shared RCR boxes |
-| `gme_qwen2_vl_2b` | `methods/simple/15_gme_qwen2_vl_2b` | Official fused image/instruction vs image-only embedding | Whole scene |
+| `siglip2_compose` | `methods/simple/siglip2_compose` | SigLIP2 image/text fusion, fixed alpha 0.5 | Whole scene |
+| `searle_xl` | `methods/published/searle_xl` | Official Phi on raw CLIP features, native pseudo-word encoder | Whole scene |
+| `context_i2w` | `methods/published/context_i2w` | Official context mapper, patch tokens and custom tokenizer | Whole scene |
+| `fti4cir` | `methods/published/fti4cir` | Official IMG2TEXT, subject/attribute pseudo-tokens | Whole scene |
+| `qwen_caption_to_caption` | `methods/simple/qwen_caption_to_caption` | Qwen scene captions, target rewrite, MPNet cosine | Whole scene |
+| `structured_caption_retrieval` | `methods/simple/structured_caption_retrieval` | Person captions with shared Partial SetMatch | Shared RCR boxes |
+| `gme_qwen2_vl_2b` | `methods/simple/gme_qwen2_vl_2b` | Official fused image/instruction vs image-only embedding | Whole scene |
 
 Published CIR methods retain their native scene architectures. Structured
 Caption Retrieval is the explicit person adaptation. Its shared detector/selector

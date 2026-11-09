@@ -205,7 +205,7 @@ def test_prepared_asset_validation_rejects_changed_bytes(tmp_path):
 def test_skip_install_preflight_never_installs_packages(monkeypatch):
     import cpr_baselines.person_cache
     script = common.load_source_file('cpr_shared_cache_preflight_test',
-        ROOT/'methods/simple/14_structured_caption_retrieval/prepare_person_cache.py')
+        ROOT/'methods/simple/structured_caption_retrieval/prepare_person_cache.py')
     monkeypatch.setattr('sys.argv', ['prepare_person_cache.py', '--check-only'])
     def missing(*args, **kwargs):
         raise RuntimeError('cache is missing')
