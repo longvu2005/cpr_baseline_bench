@@ -29,6 +29,7 @@ if str(ROOT) not in sys.path:
 
 from benchmark_progress import progress_bar
 
+from cpr_baselines.provenance import execution_identity
 from cpr_person.adapter import load_person_context, matching_metadata, PersonContext, manifest_identity
 from cpr_person.cache import feature_config_hash
 from cpr_person.detection import crop_person as crop_box
@@ -248,6 +249,7 @@ def feature_fingerprint(
 ) -> dict[str, Any]:
     reid_cfg = cfg["reid"]
     payload = {
+        "execution": execution_identity(__file__),
         "schema": FEATURE_CACHE_SCHEMA,
         "adapter_version": ADAPTER_VERSION,
         "feature_config_sha256": feature_config_hash(config_path),
@@ -772,7 +774,7 @@ def main():
     scores = compute_scores(cfg=cfg, queries=queries, query_indices=query_indices, features=features,
         offsets=person.detections.offsets, output_path=output/"scores.npy", query_features_list=query_sets)
     validate_scores(scores, len(queries), len(gallery))
-    run = {"method": method, "display_name": cfg["display_name"] if method==METHOD_ID else "CLIP-ReID all-person text-free diagnostic",
+    run = {"execution": execution_identity(__file__), "method": method, "display_name": cfg["display_name"] if method==METHOD_ID else "CLIP-ReID all-person text-free diagnostic",
            "group": cfg["group"], "cpr_supervision": cfg["cpr_supervision"], "adapter_version": ADAPTER_VERSION,
            "sources": cfg["source"], "reid": cfg["reid"], "setmatch": matching_metadata(cfg, score_space="cosine"),
            "shared_person_protocol": metadata,

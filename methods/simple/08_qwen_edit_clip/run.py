@@ -22,15 +22,16 @@ import numpy as np
 import torch
 import yaml
 from PIL import Image
-from torch.utils.data import DataLoader, Dataset
 
 ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from cpr_baselines.provenance import execution_identity
 from benchmark_data import manifest_file_fingerprint
 from cpr_baselines.scene_clip import gallery_features as read_clip_gallery, gallery_fingerprint as clip_gallery_cache_fingerprint
-from cpr_person.clip_model import load_openai_clip, verify_rcr_scene_clip
+from cpr_baselines.scene_protocol import check_config
+from cpr_baselines.scene_clip import load_scene_clip, verify_scene_clip, scene_identity, image_features as hf_image_features
 from benchmark_data import manifest_image_digest
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
@@ -188,6 +189,8 @@ def edit_fingerprint(
 ) -> dict[str, Any]:
     gen = cfg["generator"]
     return {
+        "execution": execution_identity(__file__),
+        "encoding_runtime": cfg["runtime"],
         "schema": EDIT_CACHE_SCHEMA,
         "adapter_version": ADAPTER_VERSION,
         "config_sha256": sha256_file(config_path),
@@ -301,17 +304,6 @@ def generate_one_image(pipe, image: Image.Image, prompt: str, negative_prompt: s
     return output.convert("RGB")
 
 
-class PathDataset(Dataset):
-    def __init__(self, paths: Sequence[Path], preprocess):
-        self.paths = list(paths)
-        self.preprocess = preprocess
-
-    def __len__(self) -> int:
-        return len(self.paths)
-
-    def __getitem__(self, index: int):
-        with Image.open(self.paths[index]) as image:
-            return self.preprocess(image.convert("RGB"))
 
 
 def clip_gallery_features(model, preprocess, rows, cache, runtime, device, cache_fingerprint):
@@ -321,56 +313,21 @@ def clip_gallery_features(model, preprocess, rows, cache, runtime, device, cache
 
 def query_feature_cache_fingerprint(config_path: Path, edited_manifest_path: Path, clip_checkpoint: Path, query_manifest: Path) -> dict[str, Any]:
     return {
+        "execution": execution_identity(__file__),
         "schema": QUERY_FEATURE_CACHE_SCHEMA,
         "adapter_version": ADAPTER_VERSION,
         "config_sha256": sha256_file(config_path),
         "edited_manifest_sha256": sha256_file(edited_manifest_path),
         "edited_images_sha256": [sha256_file(resolve_path(row["edited_image"]))
                                  for row in load_jsonl(edited_manifest_path)],
-        "clip_checkpoint_sha256": sha256_file(clip_checkpoint),
+        "scene_clip": scene_identity(clip_checkpoint),
         "query_manifest_sha256": sha256_file(query_manifest),
     }
 
 
 @torch.no_grad()
 def clip_query_image_features(model, preprocess, edited_paths, cache, runtime, device, cache_fingerprint):
-    feature_dim = int(model.text_projection.shape[1])
-    expected_shape = (len(edited_paths), feature_dim)
-    meta_path = cache.with_suffix(cache.suffix + ".meta.json")
-
-    if cache.is_file() and meta_path.is_file():
-        x = np.load(cache, mmap_mode="r")
-        try:
-            cached_fingerprint = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            cached_fingerprint = None
-        if (x.shape == expected_shape and cached_fingerprint == cache_fingerprint
-                and np.isfinite(x).all()):
-            print(f"Using edited-query feature cache: {rel(cache)}", flush=True)
-            return x, cache
-        print(f"Ignoring stale/incompatible edited-query feature cache: {rel(cache)}", flush=True)
-    elif cache.is_file():
-        print(f"Ignoring legacy edited-query feature cache without fingerprint: {rel(cache)}", flush=True)
-
-    loader = DataLoader(
-        PathDataset(edited_paths, preprocess),
-        batch_size=runtime["clip_image_batch_size"],
-        shuffle=False,
-        num_workers=runtime["num_workers"],
-        pin_memory=(device.type == "cuda"),
-    )
-    chunks = []
-    for images in progress_bar(loader, desc="Encode edited queries", total=len(loader), unit="batch"):
-        x = model.encode_image(images.to(device)).float()
-        x /= x.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-        chunks.append(x.cpu().numpy())
-    x = np.concatenate(chunks).astype(np.float32)
-    if x.shape != expected_shape:
-        raise ValueError(f"Encoded edited queries have shape {x.shape}, expected {expected_shape}")
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    np.save(cache, x)
-    meta_path.write_text(json.dumps(cache_fingerprint, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return np.load(cache, mmap_mode="r"), cache
+    return hf_image_features(model, edited_paths, int(runtime["clip_image_batch_size"]))
 
 
 def generate_or_load_edited_queries(
@@ -503,13 +460,13 @@ def main() -> None:
         tracker.log(f"edited_queries={len(edited_paths):,} manifest={rel(edited_manifest_path)}")
 
     with tracker.phase("Load CLIP retriever", f"{cfg['retriever']['name']} on {device}"):
-        clip_checkpoint = resolve_path(str(cfg["retriever"]["checkpoint"]))
-        if not clip_checkpoint.is_file():
+        clip_checkpoint = check_config(cfg["retriever"])
+        if not clip_checkpoint.is_dir():
             raise FileNotFoundError(
                 f"Missing CLIP checkpoint: {rel(clip_checkpoint)}. Run download_checkpoint.py first."
             )
-        actual_sha = verify_rcr_scene_clip(clip_checkpoint, cfg["retriever"]["name"])
-        model, preprocess = load_openai_clip(clip_checkpoint, device)
+        actual_sha = verify_scene_clip(clip_checkpoint, cfg["retriever"]["name"])
+        model, preprocess = load_scene_clip(clip_checkpoint, device)
 
     with tracker.phase("Prepare CLIP features"):
         gallery_cache = resolve_path(str(cfg["cache"]["gallery_features"]))
@@ -547,8 +504,10 @@ def main() -> None:
 
     with tracker.phase("Write run metadata and outputs"):
         run = {
+            "execution": execution_identity(__file__),
             "method": cfg["method"],
             "scene_clip_sha256": actual_sha,
+            "scene_clip": scene_identity(clip_checkpoint),
             "data_fingerprint": data_fingerprint,
             "image_provenance": {"gallery_image_content_sha256": manifest_image_digest(ROOT, gallery_manifest)},
             "display_name": cfg["display_name"],

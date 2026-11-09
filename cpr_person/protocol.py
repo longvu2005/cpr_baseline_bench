@@ -5,6 +5,7 @@ build tables without installing person-detector or assignment dependencies.
 """
 
 import re
+from pathlib import Path
 
 from . import PROTOCOL_VERSION
 from .cache import sha256_file
@@ -48,6 +49,7 @@ def rcr_detection_source(provenance):
         return None
     source = fingerprint.get("rcr_cache")
     if (not isinstance(source, dict) or source.get("layout") != RCR_DETECTION_LAYOUT
+            or source.get("image_content_verified") is not True
             or any(not isinstance(source.get(key), str) or not re.fullmatch(r"[0-9a-f]{64}", source[key])
                    for key in ("index_sha256", "cache_id", "gallery_ids_sha256"))):
         return None
@@ -55,8 +57,9 @@ def rcr_detection_source(provenance):
 
 
 def require_aligned_run(run, method):
-    if method in RCR_SCENE_CLIP_METHODS and run.get("scene_clip_sha256") != RCR_CLIP_SHA256:
-        raise RuntimeError(f"{method}: rerun with the RCR OpenAI CLIP ViT-B/32 scene encoder")
+    if method in RCR_SCENE_CLIP_METHODS:
+        from cpr_baselines.scene_protocol import require_scene_run
+        require_scene_run(run)
     if method in PERSON_METHODS:
         source = rcr_detection_source(run.get("shared_person_protocol"))
         if source is None:
@@ -71,3 +74,26 @@ def require_score_artifact(run, path):
     if (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
             or sha256_file(path) != digest):
         raise RuntimeError("Source scores differ from their completed run; rerun the source baseline")
+
+
+RESULT_PROTOCOL = "rcr-final-hfscene-person-v5-val-unmatched"
+
+
+def current_implementation(run, root):
+    files = run.get("implementation")
+    if not isinstance(files, dict) or not files:
+        return False
+    for name, digest in files.items():
+        path = Path(name)
+        if path.is_absolute() or ".." in path.parts or not isinstance(digest, str) or not re.fullmatch("[0-9a-f]{64}", digest):
+            return False
+        if (root/path).is_file() and sha256_file(root/path) != digest:
+            return False
+    config = run.get("config_path")
+    if config is not None:
+        path = Path(config)
+        if path.is_absolute() or ".." in path.parts:
+            return False
+        if (root/path).is_file() and sha256_file(root/path) != run.get("config_sha256"):
+            return False
+    return True

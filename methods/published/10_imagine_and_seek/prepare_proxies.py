@@ -27,6 +27,7 @@ DEFAULT_CONFIG = METHOD_DIR / "config.yaml"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
+from cpr_baselines.provenance import execution_identity
 from benchmark_data import manifest_image_digest
 
 os.environ["HF_HUB_OFFLINE"] = "1"
@@ -167,6 +168,7 @@ def unload(*objects: Any) -> None:
 def caption_fingerprint(cfg: dict[str, Any], query_manifest: Path, marker: dict[str, Any]) -> str:
     rev = marker.get("assets", {}).get("captioner", {}).get("resolved_revision")
     return stable_hash({
+        "execution": execution_identity(__file__),
         "schema": 4,
         "query_manifest": sha256_file(query_manifest),
         "gallery_image_content_sha256": manifest_image_digest(
@@ -236,6 +238,7 @@ def generate_dense_captions(
         while len(captions) < count:
             captions.append(captions[-1])
         rows.append({
+            "execution": execution_identity(__file__),
             "schema": 4, "query_index": qi, "image_id": queries[qi].get("image_id"),
             "captions": captions[:count], "fingerprint": fp,
         })
@@ -315,6 +318,7 @@ def parse_author_layout(text: str) -> dict[str, Any]:
 def qwen_fingerprint(cfg: dict[str, Any], query_manifest: Path, captions_path: Path, marker: dict[str, Any]) -> str:
     rev = marker.get("assets", {}).get("layout_llm", {}).get("resolved_revision")
     return stable_hash({
+        "execution": execution_identity(__file__),
         "schema": 4,
         "query_manifest": sha256_file(query_manifest),
         "captions": sha256_file(captions_path),
@@ -445,10 +449,12 @@ def generate_qwen_outputs(
             int(c["layout_max_new_tokens"]), int(c["parse_retries"]),
         )
         target_rows.append({
+            "execution": execution_identity(__file__),
             "schema": 4, "query_index": qi, "image_id": queries[qi].get("image_id"),
             "captions": targets, "fingerprint": fp,
         })
         layout_rows.append({
+            "execution": execution_identity(__file__),
             "schema": 4, "query_index": qi, "image_id": queries[qi].get("image_id"),
             "modification": modification, **layout, "fingerprint": fp,
         })

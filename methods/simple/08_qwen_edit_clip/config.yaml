@@ -29,9 +29,9 @@ generator:
     image_format: PNG
 
 retriever:
-  name: ViT-B/32
-  checkpoint: checkpoints/clip/ViT-B-32.pt
-  checkpoint_sha256: 40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af
+  name: openai/clip-vit-base-patch32
+  checkpoint: checkpoints/clip/hf-vit-base-patch32
+  revision: 3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268
 
 runtime:
   device: cuda

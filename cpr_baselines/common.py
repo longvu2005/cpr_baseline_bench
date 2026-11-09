@@ -16,6 +16,7 @@ from benchmark_data import gallery_image_digest
 from cpr_person.cache import ROOT, StageCache
 from cpr_person.detection import image_path, read_rgb
 from . import VERSION
+from .provenance import execution_identity
 
 
 def load_config(path):
@@ -132,7 +133,7 @@ def cached_features(cache, filename, rows, make_batch, batch_size):
 
 def feature_cache(stage, fingerprint, runtime):
     # Batch size / device / dtype are relevant for actual neural outputs.
-    return StageCache(stage, {"version": VERSION, **fingerprint, "runtime": runtime},
+    return StageCache(stage, {"version": VERSION, **fingerprint, "runtime": runtime, "execution": execution_identity(__file__)},
                       write_root="cache/additional")
 
 

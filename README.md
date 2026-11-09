@@ -36,7 +36,10 @@ and [additional scene/caption methods](docs/additional_baselines.md).
 Person methods consume the same RCR Grounding DINO Tiny index. Set its path
 with `--rcr-detection-cache` or `CPR_RCR_DETECTION_CACHE`. They share the CLIP
 Subject selector and Partial SetMatch. Scene methods use their native encoders;
-benchmark-owned scene CLIP branches use RCR's OpenAI ViT-B/32.
+S1–S4, S6–S9 and S11 use the pinned frozen Hugging Face ViT-B/32 from
+RCR Proposed, including letterbox preprocessing and native text globals. The
+shared person selector retains RCR FAFA's separate OpenAI ViT-B/32 pipeline.
+See [the 29-method audit](docs/audit_29.md) and [Kaggle execution](docs/kaggle.md).
 
 S9 needs completed S5 and S8 source runs. S11 needs completed S6. The configured
 order used by `--all` places these sources before their dependents:
@@ -46,7 +49,9 @@ python run_baseline.py --all --rcr-detection-cache /path/to/rcr/cache/detections
 ```
 
 An unavailable checkpoint returns a nonzero status and produces no substitute
-scores. Word4Per needs independently reproduced Stage-2 artifacts. Large
+scores. Word4Per needs independently reproduced Stage-2 weights, training config and
+external-data provenance receipt. Instruct-ReID selects its unmatched penalty
+on complete val in native squared-distance space. Large
 editor/VLM methods also need their documented storage and GPU resources.
 
 The runner creates `.baseline_venvs/<method>/` and reuses it while requirements

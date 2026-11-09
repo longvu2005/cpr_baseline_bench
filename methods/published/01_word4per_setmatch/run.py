@@ -32,6 +32,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
+from cpr_baselines.provenance import execution_identity
 from cpr_person.adapter import load_person_context, matching_metadata, manifest_identity
 from cpr_person.cache import feature_config_hash
 from cpr_person.detection import protocol_config, PROTOCOL_PATH
@@ -91,6 +92,7 @@ def checkpoint_identity(path: Path) -> dict[str, Any]:
         "path": rel(path),
         "size": int(stat.st_size),
         "mtime_ns": int(stat.st_mtime_ns),
+        "sha256": sha256_file(path),
     }
 
 
@@ -103,6 +105,7 @@ def build_cache_key(
     checkpoint_paths: Sequence[Path],
 ) -> tuple[str, dict[str, Any]]:
     payload = {
+        "execution": execution_identity(__file__),
         "adapter_version": ADAPTER_VERSION,
         "feature_config_sha256": feature_config_hash(config_path),
         "shared_protocol_sha256": sha256_file(PROTOCOL_PATH),
@@ -685,6 +688,8 @@ def main() -> None:
     selector_for_cache = resolve_config_path(
         str(protocol_config()["selector"]["checkpoint"])
     )
+    from cpr_person.reproduction import admit_word4per
+    reproduction = admit_word4per(cfg, stage2_ckpt_for_cache, stage2_cfg_for_cache)
     cache_key, cache_fingerprint = build_cache_key(
         person=person,
         config_path=config_path,
@@ -807,6 +812,7 @@ def main() -> None:
     )
 
     run = {
+        "execution": execution_identity(__file__),
         "adapter_version": ADAPTER_VERSION,
         "method": method,
         "display_name": cfg.get("display_name", "Word4Per + SetMatch"),
@@ -888,6 +894,7 @@ def main() -> None:
     )
 
     tracker.advance("Write run metadata and final outputs")
+    run["reproduction_provenance"] = reproduction
     run["data_fingerprint"] = manifest_identity(run["shared_person_protocol"])
     run_path = output / "run.json"
     with run_path.open("w", encoding="utf-8") as f:

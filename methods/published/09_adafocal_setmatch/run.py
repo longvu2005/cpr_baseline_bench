@@ -34,6 +34,7 @@ if str(ROOT) not in sys.path:
 
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
+from cpr_baselines.provenance import execution_identity
 from cpr_person.adapter import load_person_context, matching_metadata, manifest_identity
 from cpr_person.cache import feature_config_hash
 from cpr_person.detection import crop_person as crop_box
@@ -807,6 +808,7 @@ def target_feature_fingerprint(
     source_commit: str,
 ) -> dict[str, Any]:
     return {
+        "execution": execution_identity(__file__),
         "schema": TARGET_FEATURE_SCHEMA,
         "adapter_version": ADAPTER_VERSION,
         "feature_config_sha256": feature_config_hash(config_path),
@@ -1276,6 +1278,7 @@ def main() -> None:
 
     with tracker.phase("Write run metadata"):
         run_payload = {
+            "execution": execution_identity(__file__),
             "shared_person_protocol": person.metadata(),
             "method": cfg["method"],
             "display_name": cfg["display_name"],

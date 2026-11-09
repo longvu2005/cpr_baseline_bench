@@ -61,3 +61,5 @@ checkpoints/clip/.clip-prepare/
 
 # Isolated Python environments used by run_baseline.py
 .baseline_venvs/
+
+checkpoints/clip/hf-vit-base-patch32/

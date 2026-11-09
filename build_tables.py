@@ -11,12 +11,13 @@ from benchmark_data import CASE_TYPES, DATA_PROTOCOL, verify_manifest
 from cpr_person import PROTOCOL_VERSION
 from cpr_person.protocol import (
     PERSON_METHODS,
-    RCR_CLIP_SHA256,
+    RESULT_PROTOCOL, current_implementation,
     RCR_SCENE_CLIP_METHODS,
     TEXTFREE_DIAGNOSTIC_METHOD,
     rcr_detection_source,
 )
 from cpr_person.cache import atomic_file, canonical_hash
+from cpr_baselines.scene_protocol import require_scene_run
 
 ROOT = Path(__file__).resolve().parent
 OUTPUTS_DIR = ROOT / "outputs"
@@ -129,6 +130,7 @@ def collect_results():
     person_detection_signature = None
     person_localization_signature = None
     image_signature = None
+    scene_signature = None
 
     if not OUTPUTS_DIR.is_dir():
         return results
@@ -164,11 +166,19 @@ def collect_results():
                 f"expected {run_path.relative_to(ROOT)}"
             )
         run = load_json(run_path)
-        provenance = run.get("shared_person_protocol", {})
-        if (method_dir.name in RCR_SCENE_CLIP_METHODS
-                and run.get("scene_clip_sha256") != RCR_CLIP_SHA256):
-            print(f"Skipping previous CLIP result: {method_dir.name}; rerun with RCR ViT-B/32.")
+        if run.get("result_protocol") != RESULT_PROTOCOL or not current_implementation(run, ROOT):
+            print(f"Skipping previous-pipeline result: {method_dir.name}")
             continue
+        provenance = run.get("shared_person_protocol", {})
+        if method_dir.name in RCR_SCENE_CLIP_METHODS:
+            try:
+                identity = require_scene_run(run)
+            except RuntimeError:
+                print(f"Skipping previous scene CLIP: {method_dir.name}")
+                continue
+            if scene_signature is not None and identity != scene_signature:
+                raise RuntimeError("Scene branches used different HF assets/runtime")
+            scene_signature = identity
         if method_dir.name in PERSON_METHODS and (
                 not isinstance(provenance, dict) or provenance.get("version") != PROTOCOL_VERSION):
             print(f"Skipping legacy/different-protocol result: {method_dir.name}; rerun this baseline.")

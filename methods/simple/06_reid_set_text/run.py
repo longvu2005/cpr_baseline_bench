@@ -24,7 +24,6 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
-import clip
 import numpy as np
 import torch
 import yaml
@@ -34,12 +33,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from evaluate import full_map
+from cpr_baselines.provenance import execution_identity
 from cpr_person.validation import verify_tuning_manifests
 from benchmark_data import manifest_image_digest
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
 from cpr_baselines.scene_clip import gallery_features, gallery_fingerprint as clip_gallery_fingerprint
-from cpr_person.clip_model import load_openai_clip, verify_rcr_scene_clip
+from cpr_baselines.scene_protocol import check_config
+from cpr_baselines.scene_clip import load_scene_clip, verify_scene_clip, scene_identity, text_features as hf_text_features
 from cpr_person.adapter import matching_metadata, manifest_identity
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "groundingdino_clipreid_set_text"
@@ -164,18 +165,7 @@ def prepare_clip_gallery_features(
 
 @torch.no_grad()
 def encode_text(model, texts: Sequence[str], batch_size: int, device: torch.device) -> np.ndarray:
-    chunks: list[np.ndarray] = []
-    for start in progress_bar(
-        range(0, len(texts), batch_size),
-        desc="CLIP encode query text",
-        total=(len(texts) + batch_size - 1) // batch_size,
-        unit="batch",
-    ):
-        tokens = clip.tokenize(list(texts[start : start + batch_size]), truncate=True).to(device)
-        feat = model.encode_text(tokens).float()
-        feat /= feat.norm(dim=1, keepdim=True).clamp_min(1e-12)
-        chunks.append(feat.cpu().numpy())
-    return np.concatenate(chunks, axis=0).astype(np.float32, copy=False)
+    return hf_text_features(model, list(texts), batch_size)
 
 
 def clip_score_fingerprint(
@@ -186,12 +176,15 @@ def clip_score_fingerprint(
     query_manifest: Path,
 ) -> dict[str, Any]:
     return {
+        "execution": execution_identity(__file__),
         "schema": SCORE_CACHE_SCHEMA,
         "kind": "clip_text_scores",
+        "encoding_runtime": cfg["runtime"],
         "adapter_version": ADAPTER_VERSION,
         "model": str(cfg["clip_text"]["name"]),
         "text_field": str(cfg["clip_text"]["text_field"]),
-        "checkpoint_sha256": sha256_file(checkpoint),
+        "scene_clip": scene_identity(checkpoint),
+        "gallery_fingerprint": clip_gallery_fingerprint(checkpoint, gallery_manifest, cfg["clip_text"]["name"]),
         "gallery_manifest_sha256": sha256_file(gallery_manifest),
         "gallery_image_content_sha256": manifest_image_digest(ROOT, gallery_manifest),
         "query_manifest_sha256": sha256_file(query_manifest),
@@ -262,7 +255,7 @@ def prepare_s5_scores(*, s5, s5_cfg, s5_cfg_path, gallery_manifest, query_manife
                       detection_cache, feature_cache, score_cache, device):
     person, features, query_sets, stats = s5.prepare_person_branch(cfg=s5_cfg, config_path=s5_cfg_path,
         gallery_manifest=gallery_manifest, query_manifest=query_manifest, device=device, feature_cache=feature_cache)
-    fingerprint = {"schema": "shared-reid-branch-v1", "native_adapter": s5.ADAPTER_VERSION,
+    fingerprint = {"execution": execution_identity(__file__), "schema": "shared-reid-branch-v1", "native_adapter": s5.ADAPTER_VERSION,
                    "shared": person.metadata()["localization_fingerprint"],
                    "features_meta": read_json(s5.meta_path(feature_cache)), "setmatch": s5_cfg["setmatch"]}
     shape = (len(person.queries), len(person.gallery))
@@ -294,6 +287,7 @@ def alpha_fingerprint(
 ) -> dict[str, Any]:
     selection = cfg["fusion"]["alpha_selection"]
     return {
+        "execution": execution_identity(__file__),
         "schema": ALPHA_SCHEMA,
         "adapter_version": ADAPTER_VERSION,
         "metric": str(selection["metric"]),
@@ -303,7 +297,7 @@ def alpha_fingerprint(
         "s5_config_sha256": sha256_file(s5_cfg_path),
         "validation_gallery_sha256": sha256_file(val_gallery),
         "validation_queries_sha256": sha256_file(val_queries),
-        "clip_checkpoint_sha256": sha256_file(clip_checkpoint),
+        "scene_clip": scene_identity(clip_checkpoint),
         "validation_reid_scores_sha256": sha256_file(
             resolve_path(str(cfg["cache"]["validation"]["reid_set_scores"]))
         ),
@@ -476,13 +470,13 @@ def main() -> None:
         device = device_from(str(cfg["runtime"].get("device", "cuda")))
         if device.type != "cuda":
             raise RuntimeError("S6 requires CUDA because it reuses the pinned S5 CLIP-ReID adapter")
-        clip_checkpoint = resolve_path(str(cfg["clip_text"]["checkpoint"]))
-        if not clip_checkpoint.is_file():
+        clip_checkpoint = check_config(cfg["clip_text"])
+        if not clip_checkpoint.is_dir():
             raise FileNotFoundError(
                 f"Missing CLIP ViT-B/32 checkpoint: {rel(clip_checkpoint)}. "
                 "Run this baseline through run_baseline.py."
             )
-        actual_sha = verify_rcr_scene_clip(clip_checkpoint, cfg["clip_text"]["name"])
+        actual_sha = verify_scene_clip(clip_checkpoint, cfg["clip_text"]["name"])
         output_dir = resolve_path(str(cfg["output"]["dir"]))
         output_dir.mkdir(parents=True, exist_ok=True)
         validation_status = "separate" if alpha_mode == "validation" else "not-required"
@@ -536,8 +530,8 @@ def main() -> None:
         )
         tracker.log(f"main_s5_cache={main_s5_stats}")
 
-    with tracker.phase("Load OpenAI CLIP ViT-B/32"):
-        model, preprocess = load_openai_clip(clip_checkpoint, device)
+    with tracker.phase("Load frozen HF CLIP ViT-B/32"):
+        model, preprocess = load_scene_clip(clip_checkpoint, device)
 
     with tracker.phase("Prepare validation CLIP text branch"):
         if alpha_mode == "validation":
@@ -654,7 +648,9 @@ def main() -> None:
 
     with tracker.phase("Write reproducibility metadata"):
         run = {
+            "execution": execution_identity(__file__),
             "scene_clip_sha256": actual_sha,
+            "scene_clip": scene_identity(clip_checkpoint),
             "shared_person_protocol": main_s5_stats["shared_person_protocol"],
             "setmatch": matching_metadata(s5_cfg, score_space="cosine"),
             "method": METHOD_ID,
@@ -676,7 +672,7 @@ def main() -> None:
                 "clip_text": {
                     "model": str(cfg["clip_text"]["name"]),
                     "checkpoint": rel(clip_checkpoint),
-                    "checkpoint_sha256": sha256_file(clip_checkpoint),
+                    "scene_clip": scene_identity(clip_checkpoint),
                     "text_field": str(cfg["clip_text"]["text_field"]),
                     "gallery_representation": "global full-scene CLIP image embedding",
                 },

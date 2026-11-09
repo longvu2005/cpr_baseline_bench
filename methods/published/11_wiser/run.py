@@ -62,6 +62,8 @@ from openai import OpenAI  # noqa: E402
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+from cpr_baselines.provenance import execution_identity, module_state_sha256
+from cpr_baselines.api_trace import summarize
 from benchmark_data import ensure_gallery_layout  # noqa: E402
 from benchmark_data import manifest_file_fingerprint
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
@@ -344,6 +346,7 @@ def parse_edited_description(response: str, fallback: str) -> str:
 def generation_meta(cfg: dict[str, Any], query_manifest: Path, caption_meta: Path) -> dict[str, Any]:
     marker = read_json(resolve(str(cfg["checkpoint"]["prepared_marker"]))) or {}
     return {
+        "execution": execution_identity(__file__),
         "schema": CACHE_SCHEMA,
         "adapter": ADAPTER_VERSION,
         "query_manifest_sha256": sha256(query_manifest),
@@ -701,6 +704,8 @@ def get_suggestions(
     model = str(cfg["models"]["refiner"]["model"])
     gindex = build_gallery_index(gallery)
     t_out, i_out, rows = [], [], []
+    from cpr_baselines.api_trace import complete, validate_cached
+    identity_path = resolve(str(cfg["cache"]["dir"])) / "refiner_model_identity.json"
 
     for qi, _q in enumerate(
         progress_bar(queries, desc=f"WISER refine suggestions {loop}", total=len(queries), unit="query")
@@ -713,45 +718,39 @@ def get_suggestions(
         input_record = {"generation": generation[qi], "t_captions": t_caps,
                         "i_captions": i_caps, "t_uncertain": bool(t_uncertain[qi]),
                         "i_uncertain": bool(i_uncertain[qi])}
+        prompts = {"t2i": t2i_refine_prompt(generation[qi]["source_caption"], generation[qi]["instruction"], t_caps),
+                   "i2i": i2i_refine_prompt(generation[qi]["source_caption"], generation[qi]["instruction"], i_caps)}
+        uncertain = {"t2i": bool(t_uncertain[qi]), "i2i": bool(i_uncertain[qi])}
         cached = existing.get(qi)
-        if cached is not None and cached.get("inputs") != input_record:
-            cached = None
-        if cached is not None:
-            ts, ins = str(cached["t2i"]), str(cached["i2i"])
+        receipts = {}
+        if cached is not None and cached.get("inputs") == input_record:
+            try:
+                for branch in ("t2i", "i2i"):
+                    if uncertain[branch]:
+                        validate_cached(cached["api_receipts"][branch], model,
+                            [{"role": "user", "content": prompts[branch]}], cached[branch], identity_path)
+                    elif cached[branch] != "Good retrieval, no more loops needed":
+                        raise ValueError("Cached confident-branch suggestion differs")
+                receipts = cached["api_receipts"]
+            except (KeyError, TypeError, ValueError):
+                cached = None
         else:
-            source_caption = generation[qi]["source_caption"]
-            instruction = generation[qi]["instruction"]
-            if t_uncertain[qi]:
-                ts = (
-                    client.chat.completions.create(
-                        model=model,
-                        messages=[{
-                            "role": "user",
-                            "content": t2i_refine_prompt(source_caption, instruction, t_caps),
-                        }],
-                    ).choices[0].message.content
-                    or ""
-                )
-            else:
-                ts = "Good retrieval, no more loops needed"
-
-            if i_uncertain[qi]:
-                ins = (
-                    client.chat.completions.create(
-                        model=model,
-                        messages=[{
-                            "role": "user",
-                            "content": i2i_refine_prompt(source_caption, instruction, i_caps),
-                        }],
-                    ).choices[0].message.content
-                    or ""
-                )
-            else:
-                ins = "Good retrieval, no more loops needed"
+            cached = None
+        values = {}
+        if cached is not None:
+            values = {branch: str(cached[branch]) for branch in ("t2i", "i2i")}
+        else:
+            for branch in ("t2i", "i2i"):
+                if uncertain[branch]:
+                    values[branch], receipts[branch] = complete(client, model,
+                        [{"role": "user", "content": prompts[branch]}], identity_path)
+                else:
+                    values[branch], receipts[branch] = "Good retrieval, no more loops needed", None
+        ts, ins = values["t2i"], values["i2i"]
 
         t_out.append(ts)
         i_out.append(ins)
-        rows.append({"query_index": qi, "inputs": input_record, "t2i": ts, "i2i": ins})
+        rows.append({"query_index": qi, "inputs": input_record, "t2i": ts, "i2i": ins, "api_receipts": receipts})
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".part")
         with tmp.open("w", encoding="utf-8") as f:
@@ -760,6 +759,7 @@ def get_suggestions(
         os.replace(tmp, path)
 
     return t_out, i_out
+
 
 
 def refine_queries(
@@ -951,11 +951,13 @@ def main() -> None:
         clip_model.tokenizer = tokenizer
         gallery_paths = [gallery_path(row, gi) for gi, row in enumerate(gallery)]
         gmeta = {
+            "execution": execution_identity(__file__),
             "schema": CACHE_SCHEMA,
             "adapter": ADAPTER_VERSION,
             "gallery_manifest_sha256": sha256(gallery_manifest),
             "gallery_image_content_sha256": image_digest,
             "clip": clip_cfg,
+            "clip_state_sha256": module_state_sha256(clip_model),
         }
         gallery_features = encode_images(
             gallery_paths,
@@ -1153,6 +1155,7 @@ def main() -> None:
     with tracker.phase("Write transparent run metadata"):
         out_dir = resolve(str(cfg["output"]["dir"]))
         payload = {
+            "execution": execution_identity(__file__),
             "method": cfg["method"],
             "data_fingerprint": data_fingerprint,
             "display_name": cfg["display_name"],
@@ -1162,6 +1165,10 @@ def main() -> None:
             "adapter_version": ADAPTER_VERSION,
             "training_free": True,
             "cpr_supervision": "No",
+            "native_encoder_states": {"clip": gmeta["clip_state_sha256"],
+                "captioner": read_json(resolve(str(cfg["cache"]["captions_meta"]))).get("native_state_sha256")},
+            "refiner_api_trace": summarize(resolve(str(cfg["cache"]["suggestions_dir"])), ROOT),
+            "refiner_api_identity": read_json(resolve(str(cfg["cache"]["dir"])) / "refiner_model_identity.json"),
             "higher_is_better": True,
             "query_image_removed_inside_method": True,
             "query_image_excluded_from_shortlist": True,

@@ -99,7 +99,8 @@ def rcr_detection_index(tmp_path, monkeypatch):
         path.parent.mkdir(exist_ok=True)
         index = {
             "layout": RCR_DETECTION_LAYOUT, "prompt": "person", "detector": RCR_DETECTOR,
-            "image_ids": ids, "image_sizes": torch.tensor([[40, 30]] * len(ids)),
+            "image_ids": ids, "image_content_sha256": [sha256_file(tmp_path/f"{i}.png")
+                if (tmp_path/f"{i}.png").is_file() else "0"*64 for i in ids], "image_sizes": torch.tensor([[40, 30]] * len(ids)),
             "offsets": torch.tensor(offsets),
             "boxes_pixel": torch.tensor(boxes, dtype=torch.float32).reshape(-1, 4),
         }

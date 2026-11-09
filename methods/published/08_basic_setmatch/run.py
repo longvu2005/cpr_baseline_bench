@@ -33,6 +33,7 @@ if str(ROOT) not in sys.path:
 
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
+from cpr_baselines.provenance import execution_identity
 from cpr_person.adapter import load_person_context, matching_metadata, manifest_identity
 from cpr_person.cache import feature_config_hash
 from cpr_person.rcr_cache import rcr_index_path
@@ -377,6 +378,7 @@ def build_cache_key(
     prepared_marker_path: Path,
 ) -> tuple[str, dict[str, Any]]:
     payload = {
+        "execution": execution_identity(__file__),
         "schema": CACHE_SCHEMA,
         "adapter_version": ADAPTER_VERSION,
         "feature_config_sha256": feature_config_hash(config_path),
@@ -862,6 +864,7 @@ def save_run_metadata(
     shared_person_protocol: dict,
 ) -> None:
     payload = {
+        "execution": execution_identity(__file__),
         "method": METHOD_ID,
         "display_name": str(cfg["display_name"]),
         "group": str(cfg["group"]),

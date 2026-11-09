@@ -15,7 +15,7 @@ from benchmark_data import (CASE_TYPES, DATA_PROTOCOL, gallery_image_digest,
                             load_jsonl, split_paths, verify_manifest)
 from benchmark_progress import PhaseTracker, progress_bar
 from cpr_person.cache import atomic_json, canonical_hash, sha256_file
-from cpr_person.protocol import require_aligned_run
+from cpr_person.protocol import RESULT_PROTOCOL, current_implementation, require_aligned_run
 
 ROOT = Path(__file__).resolve().parent
 RUNS_DIR = ROOT / "runs"
@@ -147,6 +147,8 @@ def main():
     gallery, queries = load_jsonl(gallery_path), load_jsonl(query_path)
     directory = RUNS_DIR / method
     run = json.loads((directory / "run.json").read_text(encoding="utf-8"))
+    if run.get("result_protocol") != RESULT_PROTOCOL or not current_implementation(run, ROOT):
+        raise ValueError("Previous/incomplete pipeline; rerun through run_baseline.py")
     if run.get("method") != method or run.get("higher_is_better") is not True:
         raise ValueError("run.json does not identify the requested descending-score method")
     if run.get("split", "test") != "test" or run.get("data_fingerprint") != test["fingerprint"]:

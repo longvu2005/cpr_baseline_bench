@@ -19,7 +19,6 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
-import clip
 import numpy as np
 import torch
 import yaml
@@ -28,9 +27,11 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from cpr_baselines.provenance import execution_identity
 from benchmark_data import manifest_file_fingerprint
 from cpr_baselines.scene_clip import gallery_features, gallery_fingerprint as build_clip_gallery_cache_fingerprint
-from cpr_person.clip_model import load_openai_clip, verify_rcr_scene_clip
+from cpr_baselines.scene_protocol import check_config
+from cpr_baselines.scene_clip import load_scene_clip, verify_scene_clip, scene_identity, text_features as hf_text_features
 from benchmark_data import manifest_image_digest
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
@@ -188,6 +189,8 @@ def rewrite_fingerprint(
 ) -> dict[str, Any]:
     mllm = cfg["mllm"]
     return {
+        "execution": execution_identity(__file__),
+        "encoding_runtime": cfg["runtime"],
         "schema": REWRITE_CACHE_SCHEMA,
         "adapter_version": ADAPTER_VERSION,
         "config_sha256": sha256_file(config_path),
@@ -442,59 +445,20 @@ def text_feature_fingerprint(
     *, cache_path: Path, rewrite_fingerprint_value: dict[str, Any], checkpoint: Path, model_name: str
 ) -> dict[str, Any]:
     return {
+        "execution": execution_identity(__file__),
         "schema": TEXT_FEATURE_CACHE_SCHEMA,
         "adapter_version": ADAPTER_VERSION,
         "rewrite_cache_sha256": sha256_file(cache_path),
         "rewrite_fingerprint_sha256": canonical_json_hash(rewrite_fingerprint_value),
         "clip_model_name": model_name,
-        "clip_checkpoint_sha256": sha256_file(checkpoint),
+        "scene_clip": scene_identity(checkpoint),
     }
 
 
 @torch.inference_mode()
-def rewritten_text_features(
-    *,
-    model,
-    captions: Sequence[str],
-    cache: Path,
-    fingerprint: dict[str, Any],
-    batch_size: int,
-    device: torch.device,
-) -> np.ndarray:
-    feature_dim = int(model.text_projection.shape[1])
-    expected_shape = (len(captions), feature_dim)
-    meta_path = cache.with_suffix(cache.suffix + ".meta.json")
-    if cache.is_file() and meta_path.is_file():
-        data = np.load(cache, mmap_mode="r", allow_pickle=False)
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except Exception:
-            meta = None
-        if data.shape == expected_shape and meta == fingerprint:
-            print(f"Using rewritten-text CLIP cache: {rel(cache)}", flush=True)
-            return data
-        print(f"Ignoring stale rewritten-text CLIP cache: {rel(cache)}", flush=True)
-
-    chunks: list[np.ndarray] = []
-    for start in progress_bar(
-        range(0, len(captions), batch_size),
-        desc="Encode rewritten text with CLIP",
-        total=(len(captions) + batch_size - 1) // batch_size,
-        unit="batch",
-    ):
-        tokens = clip.tokenize(captions[start : start + batch_size], truncate=True).to(device)
-        features = model.encode_text(tokens).float()
-        features /= features.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-        chunks.append(features.cpu().numpy())
-    output = np.concatenate(chunks).astype(np.float32)
-    if output.shape != expected_shape or not np.isfinite(output).all():
-        raise ValueError(f"Invalid rewritten text features: {output.shape}")
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    np.save(cache, output)
-    meta_path.write_text(
-        json.dumps(fingerprint, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    return np.load(cache, mmap_mode="r", allow_pickle=False)
+def rewritten_text_features(*, model, captions: Sequence[str], cache: Path,
+                            fingerprint: dict[str, Any], batch_size: int, device: torch.device) -> np.ndarray:
+    return hf_text_features(model, list(captions), batch_size)
 
 
 @torch.inference_mode()
@@ -525,12 +489,12 @@ def main() -> None:
 
     with tracker.phase("Validate prepared model artifacts"):
         qwen_dir, qwen_marker, qwen_marker_data = validate_qwen_artifacts(cfg)
-        clip_checkpoint = resolve_path(str(cfg["retriever"]["checkpoint"]))
-        if not clip_checkpoint.is_file():
+        clip_checkpoint = check_config(cfg["retriever"])
+        if not clip_checkpoint.is_dir():
             raise FileNotFoundError(
                 f"Missing CLIP checkpoint: {rel(clip_checkpoint)}. Run download_checkpoint.py first."
             )
-        actual_clip_hash = verify_rcr_scene_clip(clip_checkpoint, cfg["retriever"]["name"])
+        actual_clip_hash = verify_scene_clip(clip_checkpoint, cfg["retriever"]["name"])
         tracker.log(
             f"qwen={cfg['mllm']['repo_id']}@{str(cfg['mllm']['revision'])[:12]} "
             f"clip={cfg['retriever']['name']}"
@@ -559,8 +523,8 @@ def main() -> None:
             )
         tracker.log(f"rewritten_queries={len(captions):,} cache={rel(rewrite_cache)}")
 
-    with tracker.phase("Load OpenAI CLIP retriever", str(cfg["retriever"]["name"])):
-        clip_model, preprocess = load_openai_clip(clip_checkpoint, device)
+    with tracker.phase("Load frozen HF CLIP retriever", str(cfg["retriever"]["name"])):
+        clip_model, preprocess = load_scene_clip(clip_checkpoint, device)
 
     with tracker.phase("Prepare global gallery CLIP features"):
         gallery_cache = resolve_path(str(cfg["cache"]["gallery_features"]))
@@ -622,8 +586,10 @@ def main() -> None:
 
     with tracker.phase("Write reproducibility metadata"):
         run = {
+            "execution": execution_identity(__file__),
             "method": METHOD_ID,
             "scene_clip_sha256": actual_clip_hash,
+            "scene_clip": scene_identity(clip_checkpoint),
             "data_fingerprint": data_fingerprint,
             "image_provenance": {"gallery_image_content_sha256": manifest_image_digest(ROOT, gallery_manifest)},
             "display_name": str(cfg["display_name"]),
@@ -651,7 +617,7 @@ def main() -> None:
             },
             "caches": {
                 "rewritten_queries": rel(rewrite_cache),
-                "rewritten_text_features": rel(text_cache),
+                "rewritten_text_features": clip_model.sources["texts"],
                 "gallery_features": rel(gallery_cache_used),
             },
             "config": rel(config_path),

@@ -83,7 +83,7 @@ def apply_instruct_calibration(cfg, checkpoint, query_manifest, gallery_manifest
     cfg["setmatch"]["unmatched_score"]=value
     cfg["setmatch"]["unmatched_score_source"]="frozen_quantile_of_separate_noncorresponding_Instruct_ReID_pairs"
     cfg["setmatch"]["calibration_provenance"]={"artifact_sha256":sha256_file(resolve(path)),
-        "dataset_id":artifact["dataset_id"],"quantile":artifact["quantile"],
+        "artifact":str(resolve(path)), "dataset_id":artifact["dataset_id"],"quantile":artifact["quantile"],
         "checkpoint_sha256":artifact["checkpoint_sha256"],"pair_scores_sha256":artifact["pair_scores_sha256"]}
 
 

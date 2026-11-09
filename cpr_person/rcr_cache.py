@@ -38,8 +38,11 @@ def rcr_index_path(*, required=False):
 
 def _rcr_cache_id(index):
     # Matches rcr.common.detection._cache_id for the packed v1 index.
+    identity = {key: index[key] for key in ("layout", "image_ids", "detector", "prompt")}
+    if index.get("content_identity") == "boxes-and-source-images-v2":
+        identity.update(content_identity=index["content_identity"], image_content_sha256=index["image_content_sha256"])
     digest = hashlib.sha256(json.dumps(
-        {key: index[key] for key in ("layout", "image_ids", "detector", "prompt")},
+        identity,
         sort_keys=True, separators=(",", ":"),
     ).encode())
     for key in ("image_sizes", "offsets", "boxes_pixel"):

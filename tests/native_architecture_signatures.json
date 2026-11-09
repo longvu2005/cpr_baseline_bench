@@ -2,43 +2,166 @@
   "methods/published/01_word4per_setmatch/run.py": {
     "load_word4per": "fd96bf1c4a56030ff9455e42b75160b6d5f8d13aa5370077993fd2ef2c236fe2",
     "encode_query_targets": "d97a292d2ca2b63c440371feddcb61e32ec7ec5c259dac9cf4f1979cde9da163",
-    "compute_component_person_scores": "4e92b5123068671ba94eaaba5e80d0c498c48562f2075d06a4e09793d2486981"
+    "compute_component_person_scores": "4e92b5123068671ba94eaaba5e80d0c498c48562f2075d06a4e09793d2486981",
+    "QueryTarget": "3d075a6482638806935a9babfcbf4911be4a69d4842da53d9b7d9e1f95e67a5e",
+    "GalleryPersonDataset": "c8b9bd27b2c58d54fbdd7ced6e2b1f24193694b759bdd34a027e76e705763be2",
+    "encode_gallery_persons": "dade30a41e2c44da8bee986c3c3dff102e0443b21bb3ad1c1857352ac091c21d",
+    "QueryTargetDataset": "dd9da05c3f20444d2df6a39e520b67ae6bc8478534581e38dfaaeed8aeaaf49b",
+    "score_all_queries": "4c695053ebc12432f62a8619e3856cf81663515cca40f474dcdd208adfb4c6db",
+    "validate_scores": "b1165d00da55b99daa40d8624def11d46e666ac229e0a0c4599b9d4be4c5a2ea"
   },
   "methods/published/02_fafa_setmatch/run.py": {
     "load_fafa": "845c3af460b6e0e7895c565aa55e0418c70b6da4f606a46734359095e02d4e1b",
     "compute_component_person_scores": "a28b9fcfb50901007efb73bd9b4d3dce209ecf3f70b4aa29d3383f9e09192eb2",
-    "encode_query_targets": "2d6494f4abcdfd3e68c4448bc4da32efc4f5cc219e378e429833386a4668ad78"
+    "encode_query_targets": "2d6494f4abcdfd3e68c4448bc4da32efc4f5cc219e378e429833386a4668ad78",
+    "QueryTarget": "3d075a6482638806935a9babfcbf4911be4a69d4842da53d9b7d9e1f95e67a5e",
+    "block_network_during_model_load": "74afe03ee88336b6cc25e9d27069943f8e1346ceb20918c9b5691442e21b0d5f",
+    "PersonCropDataset": "4bc7a55ebbfad9875250ae27fb2bcd1c32fa7a4f613d0f16b8d409fb9cb0d473",
+    "GalleryPersonDataset": "a0c41dec4fae75ab53fc3229c971d15dbb6897d8305935ac28feec4fc5c8c62a",
+    "encode_gallery_persons": "21280aef01d6aab8aa03d84c85556c18b2e7cbd307ad8278e41ed80f642146d4",
+    "QueryTargetDataset": "bc060b2b6ecbebf3c1ecc3053a2f14f792a23703b0db179f5f38e130999aa73d",
+    "score_all_queries": "973880fe4b86715983f506dfb1a7430d5a7f27a2f91d7cd3b6c8ca4e328e4366",
+    "validate_scores": "b1165d00da55b99daa40d8624def11d46e666ac229e0a0c4599b9d4be4c5a2ea"
   },
   "methods/published/03_instruct_reid_setmatch/run.py": {
     "load_official_instruct_model": "c2a450e042b0f6563b70bcea053910e58ed0cfee782f4deabda985780093a64f",
     "run_instruct_batch": "9e64cac40307e379974b07c8bb847839229b57715fbfb64895b6f361c0d1bfae",
     "negative_squared_euclidean": "b76835b73b875838580746976bbbf86cc31a9e168a438247f7f2bede2bf03bfb",
-    "modification_instruction": "0760b900544b29a844356ad03351984fb07dcb38d3787446d64e471845ff356d"
+    "modification_instruction": "0760b900544b29a844356ad03351984fb07dcb38d3787446d64e471845ff356d",
+    "instruct_transform": "1b8ee8bc53149740a244ab521272d6ab44e58a2c214c1c9b4969c038b3e5189a",
+    "score_one_query": "ab8d93eed609d6e7384e6b9cc0840ddff3c0cee344e031b33e5d1646d72b7c24",
+    "compute_scores": "14c9b041a6547d301c2ada2b36ad0bdb04b5a384908737f8c1aeedc6009fe723",
+    "validate_scores": "881e29cc7c478ea0ee40fe0e6b22970c8ba56cc4c9f1cf0397679789f0fa0fde"
   },
   "methods/published/08_basic_setmatch/run.py": {
     "BasicScorer": "fc0db5aec090e258bb20db14483629a9d7821d25ea870d5f356fe75540624079",
     "official_parity_check": "c52635727aef46b98fe11d4f4a7cb7a3820c801094cebd138cf88aa522ea4988",
-    "verify_and_get_official_preset": "c27fa1dd21bd163da8f3658bee5d26708523477f26d1d10dc44c9139c6bbc474"
+    "verify_and_get_official_preset": "c27fa1dd21bd163da8f3658bee5d26708523477f26d1d10dc44c9139c6bbc474",
+    "QueryTarget": "3d075a6482638806935a9babfcbf4911be4a69d4842da53d9b7d9e1f95e67a5e",
+    "block_network_model_load": "5eae1e46294cca3328c97012ed5d80051a1a8e480f6644b475b23ce45183b4e6",
+    "encode_person_crops": "9748e0c8fdd6f02ba0ffd97b58ea3716f70b4a696ab555db6841c5f065ac7261",
+    "encode_full_scenes": "dfda12cad4ee0a4059111ae80e6b4ba8097e2538615fa878b222ef34c44fb934"
   },
   "methods/published/09_adafocal_setmatch/run.py": {
     "load_adafocal": "c17ee75a954c6f9846ca0e7fd9ccc230406e681d1cc30130727c555ea13c75bf",
     "extract_anchored_query_features": "2cf3d409caf43719eb215812fb91bb85650eea5c004ccd9cd1302f4e30a36e15",
     "score_query_anchors_against_persons": "0f46258857da92dd0cfe50e8be9421e1bc06d02f13b9c290e4d8c7ec66d67952",
-    "query_compose_text": "1d7c665b3773355443024d3fd610d35976ddd7980a16218a21e66e2a0c64c3e0"
+    "query_compose_text": "1d7c665b3773355443024d3fd610d35976ddd7980a16218a21e66e2a0c64c3e0",
+    "encode_reference_image": "562de2a59849e8a4efa450313388eb8ab7c6a9e0de36534f8a590c6cde0e8093",
+    "validate_scores": "a38d670a0314d86684766fd5d36346f7907e918ff2f34db9101f92d9cc4a7260"
   },
   "methods/simple/05_reid_set/run.py": {
     "load_clipreid_model": "e8873836a4ef8502ec73920401d59150ce6b291dce14ed2d41979d5b344c61f5",
-    "reid_transform": "3b4f7a94ed03c3af73c934794681477ab5fe376a10ddb5b881f6ee0871b02ae1"
+    "reid_transform": "3b4f7a94ed03c3af73c934794681477ab5fe376a10ddb5b881f6ee0871b02ae1",
+    "score_one_query": "44830b82eff9eaaa37b9a74b3e31ebee951be32b88a6ba9158e72970985b792b",
+    "compute_scores": "a4e249e2af40ac3a42aae02b4e0f805a622802afe7e2ca45b1767df02310e252",
+    "validate_scores": "b3e03a222acc6737d76dca5db3c9dd0c9202f2ec2e311813645f5699e2f6b8f6"
   },
   "methods/simple/06_reid_set_text/run.py": {
     "fuse_scores": "c6d720657ece0435fcb8d4c7995b238b154e92827051c14ea7ac67a274ed323a",
-    "compute_clip_text_scores": "ae471d1d0ec568f4e6398b1a56b9ad6eec2d852bf4266a693a48f89ef2a25c4d"
-  },
-  "methods/simple/09_reid_qwen_proxy/run.py": {
-    "build_validation_proxy_scores": "e4552388e0a8c5b8fff84ddbaaee966a14d2cffceb70b4a17e921203a1a6d736"
+    "compute_clip_text_scores": "ae471d1d0ec568f4e6398b1a56b9ad6eec2d852bf4266a693a48f89ef2a25c4d",
+    "validate_score_matrix": "9293ac7e5231ee01984ecf92d7530093aa5c3aa2af59022a743125d806cb0642"
   },
   "methods/simple/10_person_compose_setmatch/run.py": {
     "compose_query_set": "11f9135f7f7636ea0cf172ae6c92ca41c60906d53911d4661bd93f69831dba3a",
-    "query_compose_text": "086fcfccb795ea06bddaa7e99d2bef9c9cadda935bf178c01e7990b2f2bb8b19"
+    "query_compose_text": "086fcfccb795ea06bddaa7e99d2bef9c9cadda935bf178c01e7990b2f2bb8b19",
+    "score_one_query": "44830b82eff9eaaa37b9a74b3e31ebee951be32b88a6ba9158e72970985b792b",
+    "compute_scores_for_alpha": "81bf10261c6f0ad762589a32b9e7701fb2f8e9c3d561bb77b299f19693adba90",
+    "validate_score_matrix": "036ae562318eeff37eb303eb5cea931cb20f5a018d7cfb1f0867153c3577bc91"
+  },
+  "methods/published/04_pic2word/run.py": {
+    "ensure_pic2word_tokenizer_compat": "38ee7bd1a7e1fccc78d85338774625adb9e976d19eb027af0e1847d96c7c0817",
+    "load_official_model": "2005446b50451f41418c598a3c9dcaf764c55a189eeecb530ff5e58d20fa3f2a",
+    "GalleryDataset": "ffe1e1aba0d44add3a8752973bf94e12bc7773d7507a7b6d22d54a74d149bf09",
+    "QueryImageDataset": "f10f3ce8bfb51e11b34ab9488b73a4139cccb3c9f077a1c48df5653397cfcf07",
+    "encode_gallery": "6c98a22c9513d98065969ff505774e45f661411fcbd648d6fc070b519cada078",
+    "build_prompts": "30c61484ac405edcaadf2f5c9361ea7fb6d1db12246e664b24f707bc71c8694f",
+    "encode_queries": "ea00ca4544cb6b0bf1fe6a84fe0fc97cfba37b16f559d8eba7bfbd692ac0f04a",
+    "validate_scores": "545ecc8f7df82776a68c05e7c59bcb3e765813778304bf4ed7f6ac882a4ca2a3"
+  },
+  "methods/published/05_lincir/run.py": {
+    "ImageRowsDataset": "b20db5cb349666eb16c33b694a173ab0d4f9d5d3362abb6e4b82fd6c6df61f9b",
+    "build_prompts": "2c22509fe97811e63625bd61a1654041a4f13b023848703ee2bee9b9f1ae2fb6",
+    "encode_gallery": "381613ec4870b2f5cf1f25fcd85db2e7cee9a552f6d0a4417b80763fdaa29e4c",
+    "encode_queries": "9c5bafcfc8c5d47731abdbf030b5a67bbdbdb75cd703614ec85a2c8c82e71a59",
+    "validate_scores": "e4d7ee45027a9ead6477abe8e55bda30c83f4fdebb6e8aad2c0e60ed8ef18212"
+  },
+  "methods/published/06_magiclens_large/run.py": {
+    "install_openai_clip_tokenizer_shim": "155a5ce952f758c05752ed65e813ded306e1ff7d4d4216b300a6782f26162c78",
+    "build_query_tokens": "861c7d180ffe487736867210eab64732c0b82e17873544184dac0e4220e1c608",
+    "make_encoder": "3f79d4265eb584fb4165ff10b76a9634a6291af24851a06bc1037bd2e721ffc5",
+    "encode_gallery": "50c9cabec62bf4d4d6ed12e934ed86090adec7ee9bbf51cab4c894fcf3ab1520",
+    "encode_queries": "50b93cccdf65f0d4365dd8d5ebc92c85e2d68b9973a143b5d039116b259afa89",
+    "load_official_model": "467db7931c5800a40e0a5e7ce6904005a89c5de25b0776f641fa414993e7b7be",
+    "validate_scores": "caade37f94cc4df27442eb98e5268e7fe091e18a3e59343bce51a9c5316cc752",
+    "score_matrix": "08d6fd0fca7edea7e9c87164b6233f06001dce720e6f35db2ea3236dfb46cd84"
+  },
+  "methods/published/07_bge_vl_mllm_s1/run.py": {
+    "last_token_embeddings": "9bf1d48ef525820b3dff701ccc73078e94157067212c472ad53ede0932830ff5",
+    "encode_gallery": "eb62d99a7fc5c17c93b92ad24ee6f79e89649f20d4d5d24a2ba7ff3e30d89a5b",
+    "encode_queries": "037a08df5c5a0f235ef5b9c15bfac900a19f52ca721fcf9919abfa1afb45287c",
+    "validate_scores": "9befd178ba5e4d1239e39539bcd754e5f5e0a6fced3b7ae3fd9d780cb1a4f90c"
+  },
+  "methods/published/10_imagine_and_seek/run.py": {
+    "TargetPad": "9638fe9cc536cc78989b67e0ff84c1a35a2fe57adf51ae2ec6f120a3985b9dac",
+    "targetpad_transform": "721b57d9841e83676a506f45aaed3a03d2ea4ec17e1c422a0777ae380eceb8c9",
+    "PathDataset": "d275a0fd841d9169c8c6d2de7b579905878cc25bd77065575b5f4b09c183a199",
+    "encode_images": "556aa266f57da6941f00504309de094fd817c5f9706940771cc26aa5f6f61d93",
+    "encode_text_pairs": "9490bb6eb9fca7873915f50e5dd10061d96a393985ebde898bcf2994ca142d38",
+    "validate_scores": "7c2dbeede292328cd5abbe2f625249fcce6ac7e1b3a93633cb7109027b10c091"
+  },
+  "methods/published/11_wiser/run.py": {
+    "ImagePathDataset": "63fc9bc5ea654360114cb063dd3f5c7726d2ecfca75e4b5b887e148a3822ff5c",
+    "encode_images": "1cf5232906159c5f3b68b56a252b5ea0a08c7de021edc98a26a8aa96477dcba0",
+    "encode_texts": "e9b21438139e48a93277b2a2675a9f9ce0f89c695fbbf91c7cd62c5e2882e816",
+    "full_rank": "6ab7d886b03405bcd176771cd5fcca1d045ea65da4736788f4b9ac28643b490d",
+    "WiserVerifier": "74754b9f8e062816948f030752ed31887e4b1b4b918fb0ddaba8cb1145e00d5f",
+    "t2i_refine_prompt": "3a2fb88b69e1c7f5bdbb2958f0313f17efefab5e4a514e342a3670a97132d9f4",
+    "i2i_refine_prompt": "ac03c9a0f63001ffd2fb6a728837d2b0e0bfa20f4342403cfdb26af37ab6ff7e",
+    "write_full_scores": "7c4af5300fe3f0bb836e3f3c9f3af20cd6767af1e2fb72a7dfaedb72bac19658"
+  },
+  "methods/published/12_searle_xl/run.py": {},
+  "methods/published/13_context_i2w/run.py": {},
+  "methods/published/14_fti4cir/run.py": {},
+  "methods/simple/07_qwen_rewrite_clip/run.py": {
+    "fixed_prompt": "df6449f5c51430a096253074b8faffb54a76d8c7e0b5452be01e74babcf211b1"
+  },
+  "methods/simple/08_qwen_edit_clip/run.py": {
+    "fixed_prompt": "87fc871633b2f06971f9e430bc3443084b5c62bca195dcfcc60806372c64dbcc"
+  },
+  "methods/simple/09_reid_qwen_proxy/run.py": {
+    "validate_score_matrix": "27dcb83f66507f45ed9405ad5ea716ffe6ff4502035d489dee7d3212b755e4f6",
+    "load_source_scores": "07c130cb1d6525289bd534ba543e4958218c04d1bb8a3a9916325a4d8518f57e",
+    "load_cached_scores": "6669bba92839214286352916e417b1510476f67eedff60d49afc273af4e98bc4",
+    "save_scores": "95740d95293bd71b481bd93891bfe306e7e21b7f8ed3c724b03e90b183f55122"
+  },
+  "methods/simple/11_qwen_vl_rerank/run.py": {
+    "validate_scores": "0b5a20953ed32086a070ef62f6991dc9477434e42e95d2aae6a05b50e8b0401b",
+    "prompt": "28a257934bdd7357227c868845fe63d9f27b23ab5bb8dc88d78917394fcb52c1",
+    "parse_score": "3cb083ed4b8c456e707e0762c92e344e23d270da86e5f55d26fb7e001679f2be",
+    "rank_prior": "d8694ba34bb45e3a780b63bed6fdf32632d4ba4f47fbe30559a929deedf738fd",
+    "reranked_order": "d66ad85aab74a1b7aaa167c5737b1e3ffb80766bd3dd303edcd4c5648a850cda"
+  },
+  "methods/simple/12_siglip2_compose/run.py": {},
+  "methods/simple/13_qwen_caption_to_caption/run.py": {},
+  "methods/simple/14_structured_caption_retrieval/run.py": {},
+  "methods/simple/15_gme_qwen2_vl_2b/run.py": {},
+  "cpr_baselines/backends.py": {
+    "dtype_for": "df950949a98a7b3431c3d37d0a47791f82db8898b3a805986a4058b568116b07",
+    "SigLIPCompose": "629eaf7536ef6eb64f92f03804e736ea051d3d9f32da68a50df0f98fb568a2b1",
+    "GMECompose": "fce63c56bb1b91b1838644af0e485d5995f43d55e5cbf4fb297cc2ac9344f337",
+    "SentenceEncoder": "3efe418eb83fb1b4e6e49630d21dad27fec94d27f2b1248d71e847ea8dd9da01",
+    "CaptionLengthExceeded": "99d5dfb65d9b9a09b34205c42c09a7bfac5f30ae9a79ce7dfaf196b9a7059c8f",
+    "QwenGenerator": "066ab51aec38bd105d274240bb55db1ea44f93f1ac8e886c59ed8c6aee34d8b7",
+    "build_backend": "b1e439ab2da3f52c0ef60ac8c063ff90a5718279a7a43936d7156b7acbccf559"
+  },
+  "cpr_baselines/published.py": {
+    "torch_load": "04f21c209d69a8cd232283c849ce545c00a6758ff2152036784e3650b96b144d",
+    "strip_module": "ba662f5d0719390e6e620bc5a55cb04b812bdd1276c3629c535bee485879ee26",
+    "openai_clip": "c1587b2527fe933f7ab49ae6725729fd40a9665b599d9b16bdd24bd3500ccc2e",
+    "targetpad": "b37a0f2d0f530bd5198297ecbff09544c6d680b5f58ba827420695dad4e0cf1a",
+    "SEARLE": "3ab7e4f94b8494bc7249360380ac2a28b6efead7c66b858d099e5eae590313e1",
+    "ContextI2W": "70c3b8f32b3b5bc4ff6fbc867cb0b99cb4b98d4519c1f16a81e43eb6d1feae05",
+    "FTI4CIR": "e090afb8dfbc0dd8cfff25a216f764eec781c6ed369f0be4cba03f4a1d7e6b63"
   }
 }

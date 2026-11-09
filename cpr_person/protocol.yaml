@@ -1,4 +1,4 @@
-version: rcr-packed-boxes-v3
+version: rcr-packed-boxes-v5
 detector:
   backend: huggingface_grounding_dino
   model: IDEA-Research/grounding-dino-tiny

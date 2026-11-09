@@ -66,6 +66,7 @@ from torchvision.transforms import CenterCrop, Compose, InterpolationMode, Norma
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+from cpr_baselines.provenance import execution_identity
 from benchmark_data import manifest_file_fingerprint, manifest_image_digest
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
@@ -422,6 +423,7 @@ def main() -> None:
         gallery_paths = [gallery_path(row, gi) for gi, row in enumerate(gallery)]
         clip_sha = sha256_file(clip_ckpt)
         gallery_meta = {
+            "execution": execution_identity(__file__),
             "schema": FEATURE_SCHEMA, "adapter": ADAPTER_VERSION,
             "manifest_sha256": sha256_file(gallery_manifest), "clip_sha256": clip_sha,
             "gallery_image_content_sha256": manifest_image_digest(ROOT, gallery_manifest),
@@ -459,6 +461,7 @@ def main() -> None:
     with tracker.phase("Encode 15 paired LDRE captions and reproduce released debiasing"):
         ncap = int(cfg["retrieval"]["nums_caption"])
         text_meta = {
+            "execution": execution_identity(__file__),
             "schema": FEATURE_SCHEMA, "adapter": ADAPTER_VERSION,
             "proxy_manifest_sha256": sha256_file(proxy_manifest), "clip_sha256": clip_sha,
             "nums_caption": ncap,
@@ -497,6 +500,7 @@ def main() -> None:
 
     with tracker.phase("Write transparent benchmark metadata"):
         payload = {
+            "execution": execution_identity(__file__),
             "method": cfg["method"],
             "data_fingerprint": data_fingerprint,
             "image_provenance": {"gallery_image_content_sha256": gallery_meta["gallery_image_content_sha256"]},

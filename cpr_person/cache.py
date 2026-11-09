@@ -130,4 +130,6 @@ def feature_config_hash(path):
                if k not in {"setmatch", "runtime", "output", "cache", "display_name", "group"}}
     encoder["encoding_runtime"] = {k: v for k, v in cfg.get("runtime", {}).items()
                                    if not k.startswith("score") and "chunk" not in k and k != "num_workers"}
+    from cpr_baselines.provenance import execution_identity
+    encoder["execution"] = execution_identity(path)
     return canonical_hash(encoder)

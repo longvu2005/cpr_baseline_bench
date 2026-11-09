@@ -35,6 +35,8 @@ def functions(path, names, namespace=None):
 
 def test_scene_cache_tracks_same_size_image_changes_with_preserved_mtime(tmp_path, monkeypatch):
     from cpr_baselines import scene_clip
+    monkeypatch.setattr(scene_clip, 'verify_scene_clip', lambda *_: 'a'*64)
+    monkeypatch.setattr(scene_clip, 'scene_identity', lambda *_: {'assets_sha256':'a'*64})
     monkeypatch.setattr(scene_clip, 'ROOT', tmp_path)
     image = tmp_path / 'image'; image.write_bytes(b'old pixels')
     checkpoint = tmp_path / 'clip.pt'; checkpoint.write_bytes(b'checkpoint')
@@ -133,7 +135,7 @@ def test_evaluation_binds_scores_and_rejects_row_order_changes(tmp_path, monkeyp
     write_benchmark_views(tmp_path, gallery, queries)
     method = 'siglip2_compose'; directory = tmp_path / 'runs' / method; directory.mkdir(parents=True)
     path = directory / 'scores.npy'; np.save(path, np.array([[9., 1.]], np.float32))
-    run = {'method': method, 'higher_is_better': True, 'data_fingerprint': manifest_fingerprint(tmp_path),
+    run = {'result_protocol': evaluate.RESULT_PROTOCOL, 'implementation': {'evaluate.py': sha256_file(ROOT/'evaluate.py')}, 'method': method, 'higher_is_better': True, 'data_fingerprint': manifest_fingerprint(tmp_path),
            'image_provenance': {'gallery_image_content_sha256': gallery_image_digest(tmp_path, gallery)},
            'scores_sha256': sha256_file(path), 'gallery_image_ids': ['ref', 'target'], 'query_ids': ['q']}
     atomic_json(directory / 'run.json', run)

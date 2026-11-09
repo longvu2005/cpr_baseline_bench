@@ -41,6 +41,7 @@ if str(ROOT) not in sys.path:
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
+from cpr_baselines.provenance import execution_identity
 from cpr_person.adapter import load_person_context, manifest_identity
 from cpr_person.detection import BoxCandidate
 from cpr_person.fafa_text import apply_fafa_text_policy, resolve_fafa_text_policy
@@ -102,6 +103,7 @@ def checkpoint_identity(path: Path) -> dict[str, Any]:
         "path": rel(path),
         "size": int(stat.st_size),
         "mtime_ns": int(stat.st_mtime_ns),
+        "sha256": sha256_file(path),
     }
 
 
@@ -139,7 +141,7 @@ def build_stage_caches(cfg, gallery_path, queries_path, output, person):
         directories[name] = output / "cache" / name / keys[name]
         directories[name].mkdir(parents=True, exist_ok=True)
     ckpt = cfg["checkpoint"]
-    encoder = {"schema": "official-fafa-shared-crops-v1", "source": cfg["source"]["commit"],
+    encoder = {"execution": execution_identity(__file__), "schema": "official-fafa-shared-crops-v1", "source": cfg["source"]["commit"],
                "checkpoint": checkpoint_identity(resolve_config_path(ckpt["path"])),
                "model": ckpt,
                "encoding_runtime": {k: v for k, v in cfg.get("runtime", {}).items()
@@ -147,7 +149,7 @@ def build_stage_caches(cfg, gallery_path, queries_path, output, person):
     stage("gallery_features", {**encoder, "detections": keys["detections"],
           "dtype": cfg.get("runtime", {}).get("gallery_feature_dtype", "float16")})
     stage("query_features", {**encoder, "localization": keys["localization"]})
-    stage("component_scores", {"schema": "soft-fda-v1", "gallery": keys["gallery_features"],
+    stage("component_scores", {"execution": execution_identity(__file__), "schema": "soft-fda-v1", "gallery": keys["gallery_features"],
           "queries": keys["query_features"], "fda_k": int(ckpt.get("fda_k", 6))})
     return directories, {"keys": keys, "stages": fingerprints}
 
@@ -965,6 +967,7 @@ def main() -> None:
     )
 
     run = {
+        "execution": execution_identity(__file__),
         "adapter_version": ADAPTER_VERSION,
         "method": method,
         "display_name": cfg.get("display_name", "FAFA + Partial SetMatch"),

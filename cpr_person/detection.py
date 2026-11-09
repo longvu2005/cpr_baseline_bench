@@ -13,7 +13,7 @@ import numpy as np
 import yaml
 from PIL import Image
 
-from benchmark_data import gallery_image_digest
+from benchmark_data import gallery_image_digest, load_jsonl
 from . import PROTOCOL_VERSION
 from .cache import ROOT, StageCache, atomic_file, cache_lock, read_json, resolve, sha256_file
 from .rcr_cache import read_rcr_index, rcr_index_path
@@ -133,6 +133,14 @@ def _rcr_source(gallery_manifest):
             raise ValueError("Reimport the complete RCR final data with prepare_data.py")
         if provenance["gallery_ids_sha256"] != expected:
             raise ValueError("RCR detection gallery IDs/order differ from the imported final dataset")
+    hashes = index.get("image_content_sha256")
+    if not isinstance(hashes, list) or len(hashes) != len(index["image_ids"]):
+        raise ValueError("RCR detection index lacks build-time image digests; verify legacy tensors or rebuild with the paired patch")
+    mapping = dict(zip(index["image_ids"], hashes, strict=True))
+    for row in load_jsonl(manifest):
+        if mapping.get(row["image_id"]) != sha256_file(image_path(row)):
+            raise ValueError("RCR detections were built from different image bytes")
+    provenance["image_content_verified"] = True
     return index, provenance
 
 

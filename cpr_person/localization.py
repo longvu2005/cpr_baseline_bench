@@ -5,7 +5,8 @@ from collections import Counter
 from dataclasses import dataclass
 import os
 import subprocess
-import sys
+import json
+from pathlib import Path
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
@@ -187,12 +188,22 @@ def localization_fingerprint(query_manifest, detections, cfg=None):
                    "queries_manifest_sha256": sha256_file(query_manifest),
                    "selector": {k: v for k, v in selector_cfg.items()
                                 if k not in {"checkpoint", "checkpoint_url", "tokenizer_runtime_dir"}},
-                   "selector_checkpoint_sha256": checksum, "image": cfg["image"]}
+                   "selector_checkpoint_sha256": checksum, "image": cfg["image"],
+                   "runtime": json.loads(os.environ.get("CPR_SELECTOR_RUNTIME", "null")),
+                   "device": os.environ.get("CPR_SELECTOR_DEVICE"),
+                   "implementation": {name: sha256_file(Path(__file__).with_name(name)) for name in
+                     ("localization.py", "clip_model.py", "selector_worker.py", "tokenizer_runtime.py")}}
 
 
 def get_localization(queries, query_manifest, gallery, detections, device, *, selector=None, cfg=None):
     cfg = cfg or protocol_config()
     selector_cfg = cfg["selector"]
+    device = "cuda:0" if str(device) == "cuda" else str(device)
+    os.environ["CPR_SELECTOR_DEVICE"] = device
+    if selector is None:
+        from cpr_baselines.scene_runtime import scene_python
+        from cpr_baselines.provenance import probe_runtime
+        os.environ["CPR_SELECTOR_RUNTIME"] = json.dumps(probe_runtime(scene_python()), sort_keys=True)
     fingerprint = localization_fingerprint(query_manifest, detections, cfg)
     cache = StageCache("query_localization", fingerprint)
 
@@ -223,7 +234,7 @@ def get_localization(queries, query_manifest, gallery, detections, device, *, se
                 raise ValueError("Selector inference requires the detection gallery manifest from get_detections")
             # Fresh imports in the worker use the fixed selector tokenizer,
             # regardless of a native model's already-imported ftfy version.
-            subprocess.run([sys.executable,"-m","cpr_person.selector_worker",
+            subprocess.run([scene_python(),"-m","cpr_person.selector_worker",
                 "--gallery-manifest",str(detections.gallery_manifest),
                 "--query-manifest",str(resolve(query_manifest)), "--detections",str(detections.path),
                 "--cache-dir",str(cache.directory),"--device",str(device)],cwd=ROOT,check=True)

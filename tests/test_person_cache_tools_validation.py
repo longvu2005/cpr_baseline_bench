@@ -122,6 +122,9 @@ def test_selector_worker_consumes_the_correct_split_and_writes_verified_cache(to
     p=load_person_context(gallery,queries,gm,qm,"cpu")
     p.localization.path.unlink()
     p.localization.path.with_name(p.localization.path.name+".meta.json").unlink()
+    monkeypatch.setenv("CPR_SCENE_CLIP_PYTHON", __import__("sys").executable)
+    monkeypatch.setattr("cpr_baselines.provenance.probe_runtime",lambda _: {})
+    monkeypatch.setattr("cpr_baselines.provenance.runtime_identity",lambda: {})
     runtime=tmp_path/"fixed-tokenizer";runtime.mkdir()
     for name,version in cfg["selector"]["tokenizer_packages"].items():
         monkeypatch.setitem(__import__("sys").modules,name,SimpleNamespace(__file__=str(runtime/(name+".py")),__version__=version))

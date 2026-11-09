@@ -37,9 +37,13 @@ these detection, localization or image aggregation procedures.
 
 ## Scene CLIP
 
-S1–S4 and the benchmark CLIP branches of S6–S9 and S11 use RCR's official
-OpenAI ViT-B/32 weights, RGB preprocessing, L2-normalized features and CLIP
-tokenization with truncation. S2–S4 and S6 encode the finalized instruction.
+S1–S4 and the benchmark CLIP branches of S6–S9 and S11 use RCR Proposed's
+frozen Hugging Face `openai/clip-vit-base-patch32`, revision
+`3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268`. Images use stored RGB pixels,
+PIL bicubic black letterbox to 224, then HF normalization without resize/crop.
+Text uses CLIPTokenizerFast with native EOS, right padding and truncation to 77.
+Only native pretrained 512-dimensional globals are used; no learned Proposed
+projection is loaded. Features are L2-normalized before retrieval. S2–S4 and S6 encode the finalized instruction.
 S7 embeds the Qwen rewrite and S8 embeds the generated proxy. S9 reuses the
 S8 scores and S11 reranks the aligned S6 shortlist. Published native encoders
 and S10's person-crop ViT-L/14 remain method-specific.
@@ -127,7 +131,7 @@ use rectangular Hungarian. Native pair scores are never replaced by FAFA's.
 | Word4Per, FAFA, CLIP-ReID, S10, AdaFocal | `-1.0` | Lower bound of normalized cosine, top-k mean cosine or max-token cosine |
 | S6, S9 | S5's `-1.0` before fusion | Same ReID branch; global/proxy fusion remains native |
 | BASIC | Computed once from official external resources | Analytic lower bound of its unchanged polynomial score |
-| Instruct-ReID | `-1000000.0` by default | Previous predeclared native Euclidean distance cutoff `1000`, explicitly **uncalibrated** |
+| Instruct-ReID | Selected on full val | 21 native-distance quantiles; val Full-mAP; smallest-score tie break |
 
 BASIC bounds centered unit-vector norms using its official means, then bounds
 the normalized nonnegative image/text scores. The score polynomial is separately
@@ -136,9 +140,15 @@ evaluation statistics or labels choose this value. The resolved numeric value
 and source are recorded in `run.json`.
 
 Instruct-ReID's native fusion vectors are **not L2-normalized**, so there is no
-universal cosine bound. The legacy cutoff is not claimed to be calibrated and
-can dominate missing-component rankings. For a final experiment needing an
-empirical reference, freeze it once from an independent permitted dataset:
+universal cosine bound. Its default now computes a deterministic grid of 21
+quantiles from at most 200,000 evenly spaced val query/gallery component pairs,
+without normalization. It selects by complete-val Full-mAP, records every trial,
+and freezes the result before scoring test. Native real-pair scores and mandatory
+rectangular matching are unchanged. The expensive native distances/matching are
+reused across penalty candidates. This run is labeled `Val only`.
+
+An independently frozen external calibration remains an alternative. Select
+this protocol before examining test; do not choose between protocols by test:
 
 ```bash
 python -m cpr_person.calibration \
@@ -175,8 +185,9 @@ Atomic writes and OS locks protect both caches.
 Hashing gallery bytes is a CPU verification pass, not detector inference. A
 matching verified cache skips detector/model construction. Native feature caches
 also include their shared detection identity, native checkpoint and relevant
-preprocessing configuration. SetMatch aggregation/background changes do not
-invalidate detection, localization or native embeddings. FAFA retains separate
+preprocessing configuration. Ordinary SetMatch parameters and score chunk sizes are excluded from native
+embedding configuration keys. Changes to shared implementation files
+conservatively invalidate dependent stages. FAFA retains separate
 gallery/query feature and component-score stages for CPU-only reaggregation.
 
 For Kaggle, use a writable root and separate read roots (colon separated on
@@ -255,8 +266,13 @@ requirements and preparing its checkpoints:
 
 ```bash
 python scripts/smoke_person_runtime.py --methods fafa_setmatch
-python scripts/smoke_person_runtime.py --methods word4per_setmatch instruct_reid_setmatch basic_setmatch adafocal_setmatch
+python scripts/smoke_person_runtime.py --methods word4per_setmatch basic_setmatch adafocal_setmatch
 ```
+
+Instruct-ReID's default performs complete-val penalty selection. Use its full
+runner for that protocol; a smoke invocation requires a separately frozen external
+calibration and refuses to start automatic validation tuning. Smoke is not a way
+to select between these protocols.
 
 Smoke uses a temporary 40-scene/4-query subset and checks finite output shape;
 it never evaluates or reports those subset scores as benchmark results.

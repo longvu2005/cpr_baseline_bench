@@ -35,6 +35,9 @@ from torchvision.transforms import CenterCrop, Compose, InterpolationMode, Norma
 ROOT = Path(__file__).resolve().parents[3]
 METHOD_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG = METHOD_DIR / "config.yaml"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from cpr_baselines.provenance import execution_identity
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -477,6 +480,7 @@ def build_author_input(author, layout: Sequence[dict[str, Any]], query_image: Pa
 
 def generation_fingerprint(cfg: dict[str, Any], job: dict[str, Any]) -> str:
     return stable_hash({
+        "execution": execution_identity(__file__),
         "schema": 4,
         "author_commit": cfg["author_source"]["commit"],
         "job": job,

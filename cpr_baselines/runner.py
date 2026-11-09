@@ -16,6 +16,7 @@ from cpr_person.adapter import load_person_context, matching_metadata
 from cpr_person.cache import ROOT, atomic_json, canonical_hash, resolve
 from cpr_person.matching import score_feature_sets
 from . import VERSION
+from .provenance import execution_identity
 from .backends import QwenGenerator, SentenceEncoder, build_backend
 from .captions import CaptionStore, person_captions, scene_captions, structure_text
 from .common import (cached_features, feature_cache, image_digest, load_config, load_jsonl,
@@ -163,7 +164,7 @@ def run(cfg):
              else run_scene(cfg, gallery, queries, index, fingerprint, device, output))
     if manifest_fingerprint(ROOT) != data_fingerprint:
         raise RuntimeError("Manifests changed during inference")
-    metadata = {"method": cfg["method"], "display_name": cfg["display_name"], "group": cfg["group"],
+    metadata = {"execution": execution_identity(__file__), "method": cfg["method"], "display_name": cfg["display_name"], "group": cfg["group"],
         "cpr_supervision": cfg["cpr_supervision"], "higher_is_better": True,
         "num_queries": len(queries), "num_gallery": len(gallery),
         "gallery_image_ids": [row["image_id"] for row in gallery],

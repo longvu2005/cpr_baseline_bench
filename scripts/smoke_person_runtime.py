@@ -21,6 +21,15 @@ sys.path.insert(0,str(ROOT))
 from run_baseline import discover_methods, resolve_method
 
 
+def require_untuned_smoke(cfg):
+    for branch in ("composition", "fusion"):
+        selection = cfg.get(branch, {}).get("alpha_selection")
+        if isinstance(selection, dict) and selection.get("mode") != "fixed":
+            raise ValueError(f"{cfg['method']}: smoke test requires a separately prepared fixed-alpha config")
+    if cfg['method'] == 'instruct_reid_setmatch' and not cfg['setmatch'].get('unmatched_calibration'):
+        raise ValueError('Instruct-ReID smoke requires a separately frozen external calibration; use the full runner for val selection')
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--methods",nargs="+",default=["fafa_setmatch"])
@@ -45,11 +54,7 @@ def main():
             cfg=yaml.safe_load(spec.config_path.read_text())
             cfg["data"]={"gallery_manifest":str(gm),"query_manifest":str(qm)}
             cfg["output"]={"dir":str(directory/spec.method_id)}
-            # A smoke run uses fixed defaults only. No subset labels select alpha.
-            for branch in ("composition","fusion"):
-                selection=cfg.get(branch,{}).get("alpha_selection")
-                if isinstance(selection,dict) and selection.get("mode")!="fixed":
-                    raise ValueError(f"{name}: smoke test requires a separately prepared fixed-alpha config")
+            require_untuned_smoke(cfg)
             cp=directory/(spec.method_id+".yaml");cp.write_text(yaml.safe_dump(cfg,sort_keys=False))
             subprocess.run([sys.executable,str(spec.run_path),"--config",str(cp)],cwd=ROOT,check=True)
             scores=np.load(directory/spec.method_id/"scores.npy",mmap_mode="r",allow_pickle=False)

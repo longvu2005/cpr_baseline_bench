@@ -15,7 +15,7 @@ import evaluate
 from benchmark_data import manifest_fingerprint
 from cpr_baselines import captions, common, prepare, runner
 from cpr_baselines.person_cache import require_shared_context
-from cpr_person.cache import StageCache, atomic_json
+from cpr_person.cache import StageCache, atomic_json, sha256_file
 from cpr_person.detection import detection_fingerprint
 from cpr_person.matching import aggregate_people
 from run_baseline import discover_methods, resolve_method
@@ -246,7 +246,7 @@ def test_fusion_scene_adapter_evaluates_multiple_positives(toy_protocol, tmp_pat
     score=np.load(out/'scores.npy')
     assert score.shape == (1,3) and np.isfinite(score).all()
     assert score[0,0] == 0  # Raw reference entry is finite and preserved.
-    atomic_json(out/'run.json',{'method':'siglip2_compose','higher_is_better':True,
+    atomic_json(out/'run.json',{'result_protocol':evaluate.RESULT_PROTOCOL, 'implementation':{'evaluate.py':sha256_file(ROOT/'evaluate.py')},'method':'siglip2_compose','higher_is_better':True,
                               'image_provenance': {'gallery_image_content_sha256': common.image_digest(g)},
                               'data_fingerprint':manifest_fingerprint(tmp_path)})
     for key,value in {'ROOT':tmp_path,'RUNS_DIR':tmp_path/'runs','OUTPUTS_DIR':tmp_path/'outputs'}.items():

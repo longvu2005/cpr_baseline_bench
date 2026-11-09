@@ -23,6 +23,7 @@ import os
 import shutil
 import subprocess
 import sys
+from tempfile import mkdtemp
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -354,6 +355,9 @@ def main() -> None:
 
     print("[2/7] Validate external CUHK-PEDES + ITCPR data", flush=True)
     data_stats = validate_external_data_root(data_root)
+    sys.path.insert(0, str(ROOT))
+    from cpr_person.reproduction import audit_word4per_data
+    data_audit = audit_word4per_data(data_root, ROOT)
     print("[ok] " + json.dumps(data_stats, sort_keys=True), flush=True)
 
     print("[3/7] Pin official Word4Per source", flush=True)
@@ -367,6 +371,7 @@ def main() -> None:
 
     print("[5/7] Run official Word4Per Stage-2 training", flush=True)
     output_base.mkdir(parents=True, exist_ok=True)
+    output_base = Path(mkdtemp(prefix="stage2-", dir=output_base))
     command = [
         sys.executable,
         "-u",
@@ -421,14 +426,17 @@ def main() -> None:
         "openai_clip_cache": str(clip_cache),
         "openai_clip_sha256": sha256_file(clip_cache),
         "external_data": data_stats,
+        "external_data_audit": data_audit,
         "official_run_dir": str(run_dir),
         "stage2_checkpoint": str(canonical_best),
         "stage2_checkpoint_sha256": sha256_file(canonical_best),
         "stage2_config": str(canonical_configs),
+        "stage2_config_sha256": sha256_file(canonical_configs),
         "selection": "official Evaluator_toword R@1 best checkpoint",
         "cpr_supervision": False,
     }
-    provenance_path.write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
+    from cpr_person.cache import atomic_json
+    atomic_json(provenance_path, provenance)
     print(f"[ok] {provenance_path}", flush=True)
     print()
     print("Word4Per Stage-2 is ready for benchmark inference.")

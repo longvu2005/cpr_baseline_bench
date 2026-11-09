@@ -16,7 +16,7 @@ import run_baseline
 from benchmark_data import DATA_PROTOCOL, manifest_fingerprint
 from cpr_person import PROTOCOL_VERSION
 from cpr_person.protocol import PERSON_METHODS, TEXTFREE_DIAGNOSTIC_METHOD
-from cpr_person.cache import canonical_hash
+from cpr_person.cache import canonical_hash, sha256_file
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -26,7 +26,8 @@ def reporting_repo(tmp_path, monkeypatch, write_benchmark_views):
     # Copy only reporting code, not adapters, models, images or checkpoints.
     files = ["build_tables.py", "run_baseline.py", "benchmark_data.py",
              "benchmark_progress.py", "prepare_data.py", "cpr_person/__init__.py",
-             "cpr_person/protocol.py", "cpr_person/cache.py", "cpr_person/rcr_cache.py"]
+             "cpr_person/protocol.py", "cpr_person/cache.py", "cpr_person/rcr_cache.py",
+             "cpr_baselines/__init__.py", "cpr_baselines/scene_protocol.py"]
     for name in files:
         target = tmp_path / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -42,7 +43,8 @@ def write_result(root, method="lincir", provenance=None):
     output = root / "outputs" / method
     output.mkdir(parents=True, exist_ok=True)
     fingerprint = manifest_fingerprint(root)
-    run = {"method": method, "display_name": "LinCIR" if method == "lincir" else method,
+    run = {"result_protocol": build_tables.RESULT_PROTOCOL,
+           "implementation": {"cpr_person/protocol.py": sha256_file(root/"cpr_person/protocol.py")}, "method": method, "display_name": "LinCIR" if method == "lincir" else method,
            "group": "Published / SOTA Baselines", "cpr_supervision": "No",
            "higher_is_better": True, "data_fingerprint": fingerprint,
            "split": "test", "data_protocol": DATA_PROTOCOL,
@@ -72,7 +74,7 @@ def shared_provenance(root):
                  "gallery_manifest_sha256": fingerprint["gallery_sha256"],
                  "gallery_image_content_sha256": "a" * 64,
                  "protocol": {"backend": "rcr_detection_cache", "threshold": 0.30, "text_threshold": 0.25},
-                 "rcr_cache": {"layout": "person-detections-v1", "index_sha256": "1" * 64,
+                 "rcr_cache": {"layout": "person-detections-v1", "image_content_verified": True, "index_sha256": "1" * 64,
                                "cache_id": "2" * 64, "gallery_ids_sha256": "3" * 64}}
     boxes = "b" * 64
     return {"version": PROTOCOL_VERSION, "detections_fingerprint": detection,

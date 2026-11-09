@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from cpr_baselines.provenance import execution_identity
 from benchmark_data import manifest_image_digest
 from benchmark_data import ensure_gallery_layout  # noqa: E402
 from benchmark_data import manifest_file_fingerprint
@@ -230,6 +231,7 @@ def validate_prepared(cfg: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
             f"Missing prepared marker {rel(marker_path)}; run download_checkpoint.py first"
         )
     expected = {
+        "execution": execution_identity(__file__),
         "schema": 1,
         "hf_repo_id": str(c["hf_repo_id"]),
         "hf_revision": str(c["hf_revision"]),
@@ -263,6 +265,7 @@ def cache_fingerprint(
     query_manifest: Path | None, role: str,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
+        "execution": execution_identity(__file__),
         "schema": GALLERY_CACHE_SCHEMA if role == "gallery" else QUERY_CACHE_SCHEMA,
         "adapter_version": ADAPTER_VERSION,
         "config_sha256": sha256_file(config_path),
@@ -512,6 +515,7 @@ def main() -> None:
     with tracker.phase("Write reproducibility metadata"):
         run_path = output_dir / "run.json"
         payload = {
+            "execution": execution_identity(__file__),
             "method": cfg["method"],
             "data_fingerprint": data_fingerprint,
             "image_provenance": {"gallery_image_content_sha256": manifest_image_digest(ROOT, gallery_manifest)},

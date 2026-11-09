@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from cpr_baselines.provenance import execution_identity
 from benchmark_data import manifest_image_digest
 from benchmark_data import ensure_gallery_layout  # noqa: E402
 from benchmark_data import manifest_file_fingerprint
@@ -376,6 +377,7 @@ def feature_cache_meta(
     kind: str,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
+        "execution": execution_identity(__file__),
         "schema": schema,
         "kind": kind,
         "adapter_version": ADAPTER_VERSION,
@@ -699,6 +701,7 @@ def main() -> None:
     with tracker.phase("Write reproducibility metadata"):
         output_dir = resolve_path(str(cfg["output"]["dir"]))
         payload = {
+            "execution": execution_identity(__file__),
             "method": cfg["method"],
             "data_fingerprint": data_fingerprint,
             "image_provenance": {"gallery_image_content_sha256": manifest_image_digest(ROOT, gallery_manifest)},

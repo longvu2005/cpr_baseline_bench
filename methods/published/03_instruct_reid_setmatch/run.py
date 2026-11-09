@@ -38,6 +38,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from benchmark_progress import PhaseTracker, progress_bar
+from cpr_baselines.provenance import execution_identity
 from cpr_person.adapter import load_person_context, manifest_identity, matching_metadata
 from cpr_person.calibration import apply_instruct_calibration
 from cpr_person.detection import crop_person as crop_box
@@ -374,6 +375,7 @@ def gallery_feature_fingerprint(
     config_bert: Path,
 ) -> dict[str, Any]:
     return {
+        "execution": execution_identity(__file__),
         "schema": GALLERY_FEATURE_CACHE_SCHEMA,
         "adapter_version": ADAPTER_VERSION,
         "source_commit": str(cfg["source"]["commit"]),
@@ -485,6 +487,7 @@ def query_feature_fingerprint(
         for item in localization
     ]
     return {
+        "execution": execution_identity(__file__),
         "schema": QUERY_FEATURE_CACHE_SCHEMA,
         "adapter_version": ADAPTER_VERSION,
         "source_commit": str(cfg["source"]["commit"]),
@@ -675,6 +678,13 @@ def validate_scores(scores: np.ndarray, shape: tuple[int, int]) -> None:
             raise ValueError(f"scores.npy contains NaN/Inf in rows {start}:{start + len(block)}")
 
 
+def query_targets(person, queries, query_indices):
+    return [{"valid": True, "reason": None, "targets": [
+        {"source_gallery_index": int(query_indices[qi]), "global_person_index": member["global_person_index"],
+         "box": member["box"], "instruction": modification_instruction(query, query["subjects"][si])}
+        for si, member in person.localization.flat(qi)]} for qi, query in enumerate(queries)]
+
+
 def main() -> None:
     tracker = PhaseTracker(METHOD_ID, total=8)
 
@@ -733,19 +743,19 @@ def main() -> None:
         detection_cache = person.detections.path
         offsets, boxes = person.detections.offsets, person.detections.boxes
         selector_cache = person.localization.path
-        localization = []
-        for qi, query in enumerate(queries):
-            targets = [{"source_gallery_index": int(query_indices[qi]),
-                        "global_person_index": member["global_person_index"],
-                        "box": member["box"],
-                        "instruction": modification_instruction(query, query["subjects"][si])}
-                       for si, member in person.localization.flat(qi)]
-            localization.append({"valid": True, "reason": None, "targets": targets})
+        localization = query_targets(person, queries, query_indices)
         valid_queries = len(localization)
 
     with tracker.phase("Move pinned official Instruct-ReID model to CUDA"):
         model.to(device).eval()
         tracker.log(f"model_device={device}")
+
+    from cpr_person.instruct_validation import select_for_instruct
+    validation_fingerprint = None
+    if cfg['setmatch'].get('unmatched_calibration'):
+        cfg['cpr_supervision'] = 'No'
+    else:
+        validation_fingerprint = select_for_instruct(sys.modules[__name__], cfg, model, device, checkpoint_path, bert_weight, config_bert)
 
     with tracker.phase("Encode gallery person fusion features"):
         gallery_cache = resolve_path(str(cfg["cache"]["gallery_features"]))
@@ -831,6 +841,7 @@ def main() -> None:
                 reason = str(item.get("reason") or "unknown")
                 invalid_reasons[reason] = invalid_reasons.get(reason, 0) + 1
         run = {
+            "execution": execution_identity(__file__),
             "method": cfg["method"],
             "display_name": cfg["display_name"],
             "group": cfg["group"],
@@ -888,6 +899,7 @@ def main() -> None:
             "scores": rel(scores_path),
             "higher_is_better": True,
         }
+        run["validation_fingerprint"] = validation_fingerprint
         run["data_fingerprint"] = manifest_identity(run["shared_person_protocol"])
         run_path = output_dir / "run.json"
         write_json(run_path, run)

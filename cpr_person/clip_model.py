@@ -12,15 +12,6 @@ OFFICIAL_CLIP_WEIGHTS = {
 }
 
 
-def verify_rcr_scene_clip(checkpoint, model_name):
-    if model_name != RCR_CLIP_NAME:
-        raise ValueError("RCR scene CLIP must use OpenAI ViT-B/32")
-    digest = sha256_file(checkpoint)
-    if digest != RCR_CLIP_SHA256:
-        raise ValueError(f"RCR OpenAI CLIP ViT-B/32 checksum mismatch: {checkpoint}")
-    return digest
-
-
 def prepare_openai_clip(model_name, checkpoint, force=False):
     from .assets import download_stream
 

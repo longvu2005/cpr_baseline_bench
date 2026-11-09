@@ -14,7 +14,7 @@ full query/reference scene + canonical modification/query text
                     ↓
           one synthetic target/query image
                     ↓
-             OpenAI CLIP ViT-B/32
+             frozen HF CLIP ViT-B/32
                     ↓
             global gallery retrieval
 ```
@@ -42,16 +42,19 @@ checkpoints/qwen/Qwen-Image-Edit-2509/
 
 ### Retriever
 
-- model: OpenAI CLIP ViT-B/32;
-- checkpoint: official `ViT-L-14.pt`;
+- model: frozen HF CLIP ViT-B/32;
+- checkpoint: pinned `openai/clip-vit-base-patch32` snapshot;
 - query representation: CLIP image embedding of the synthetic edited image;
 - gallery representation: CLIP image embedding of the complete canonical scene;
 - score: cosine similarity between L2-normalized embeddings.
 
-The gallery feature cache intentionally uses the same fingerprint schema and path as the existing ViT-B/32 CLIP baselines:
+The gallery cache is shared with all benchmark-owned HF CLIP branches. It binds
+image bytes, model assets, runtime and preprocessing. Verified raw globals from
+RCR `cache/scene/index.pt` are reused when supplied. New/generated images use
+the same stored-RGB bicubic black letterbox and HF normalization pipeline:
 
 ```text
-runs/clip_image/scene_clip/<fingerprint>/gallery_features_vit_b32.npy
+cache/scene_clip/gallery/<fingerprint>/gallery.npy
 ```
 
 so a valid cache can be reused across methods.
@@ -185,7 +188,7 @@ The normal root runner installs requirements first, then `download_checkpoint.py
 
 1. downloads the Qwen image-edit snapshot;
 2. inventories the files and writes the prepared marker;
-3. downloads/checksums OpenAI CLIP ViT-B/32.
+3. prepares and checksums the pinned HF CLIP ViT-B/32 snapshot.
 
 No model or tokenizer is silently downloaded in `run.py`.
 

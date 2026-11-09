@@ -1,8 +1,9 @@
 method: clip_image
 
 model:
-  name: ViT-B/32
-  checkpoint: checkpoints/clip/ViT-B-32.pt
+  name: openai/clip-vit-base-patch32
+  checkpoint: checkpoints/clip/hf-vit-base-patch32
+  revision: 3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268
 
 cache:
   gallery_features: runs/clip_image/gallery_features_vit_b32.npy

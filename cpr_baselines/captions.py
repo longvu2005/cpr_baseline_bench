@@ -11,6 +11,7 @@ from benchmark_progress import progress_bar
 from cpr_person.cache import StageCache, canonical_hash, read_json
 from cpr_person.detection import crop_person, image_path, read_rgb
 from . import VERSION
+from .provenance import execution_identity
 from .backends import CaptionLengthExceeded
 from .common import query_text
 
@@ -81,7 +82,7 @@ class CaptionStore:
 
     def request(self, prompt, image=None, *, structured=False):
         parser = parse_structure if structured else parse_caption
-        fp = {"version": VERSION, "captioner": self.asset_identity,
+        fp = {"execution": execution_identity(__file__), "version": VERSION, "captioner": self.asset_identity,
               "generation": self.cfg["generation"], "runtime": self.cfg["runtime"],
               "prompt": prompt, "image_pixels": None if image is None else pixels_hash(image),
               "schema": "person-fields-v1" if structured else "scene-caption-v1"}

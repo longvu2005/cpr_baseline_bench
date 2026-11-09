@@ -282,6 +282,8 @@ def test_runner_requires_rcr_index_only_for_person_methods(tmp_path,monkeypatch,
     monkeypatch.setattr(runner,'ensure_gallery_layout',lambda *a,**k:tmp_path/'gallery')
     monkeypatch.setattr(runner,'describe_gallery_link',lambda *a:'test gallery')
     events = []
+    monkeypatch.setattr('cpr_baselines.scene_runtime.prepare_runtime', lambda **kw: events.append('shared'))
+    monkeypatch.setattr('cpr_baselines.preflight.require_readiness', lambda *args: {})
     index = tmp_path / "index.pt"
     monkeypatch.delenv("CPR_RCR_DETECTION_CACHE", raising=False)
 
@@ -302,7 +304,7 @@ def test_runner_requires_rcr_index_only_for_person_methods(tmp_path,monkeypatch,
     monkeypatch.setattr(runner.subprocess,'run',lambda *a,**k:None)
     monkeypatch.setattr(runner,'run_checkpoint_step',lambda *a,**k:False)
     runner.run_pipeline(runner.MethodSpec(method,directory),False,True)
-    assert events == (["rcr index", "native"] if method in PERSON_METHODS else ["native"])
+    assert events == (["rcr index", "shared", "native"] if method in PERSON_METHODS else ["shared", "native"])
 
 
 def test_worker_builds_gallery_then_cache_hit_avoids_forward(toy_protocol,monkeypatch):

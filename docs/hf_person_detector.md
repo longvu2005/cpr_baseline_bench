@@ -87,16 +87,12 @@ interactive GroundingDINO imports; it does not construct a person detector.
 ## Install and run
 
 Use Python 3.10-3.12 for the pinned Torch 2.5.1 / native FAFA dependencies.
-From the repository root, the simplest complete path is:
-
-```bash
-python -m pip install -r requirements-dev.txt
-python run_baseline.py fafa_setmatch
-python run_baseline.py groundingdino_clipreid_set
-```
-
-The runner prepares `.baseline_venvs/shared_person_detector` before the native
-method environment, then each method preparer downloads its assets. Native
+From the repository root, use the current [Kaggle workflow](kaggle.md) or
+pass the RCR detection cache explicitly. Official runs require verified source
+image digests; a legacy index must first be numerically verified or rebuilt.
+The runner prepares `.baseline_venvs/shared_clip` for scene CLIP and the shared
+selector. It consumes RCR's detector index without constructing a detector.
+The standalone worker below remains a diagnostic path only. Native
 FAFA remains pinned to Transformers 4.39.3 and max_txt_len/max_words 128.
 The shared consumer requirements no longer include Transformers. AdaFocal keeps
 its formerly inherited native 4.39.3 pin explicitly; S9 keeps native 4.50.3.

@@ -20,10 +20,10 @@ Counts come from actual finalized files, not older prose in the RCR protocol
 document. Reimport the release used for the paper and retain its manifest hashes.
 Matching a version string alone is insufficient because content can change.
 
-The baseline evaluator and RCR's `evaluate_rankings` were compared on the same
-synthetic full rankings for all 2,307 test queries. All eight common overall
-metrics and sixteen per-case metrics agreed within 1e-12 (maximum observed
-absolute difference 8.673617379884035e-19). This checks protocol equivalence;
+The baseline evaluator and RCR's `evaluate_rankings` are directly tested on
+synthetic full rankings with ties for both complete final splits, including
+reference exclusion, eight common overall metrics, sixteen per-case metrics
+and Macro-Full-mAP. All agree within 1e-12. This checks protocol equivalence;
 synthetic rankings are not model predictions or publishable accuracy results.
 
 R@K is the fraction of queries with at least one positive in the top K.
@@ -40,7 +40,7 @@ Partial SetMatch denote a benchmark adaptation. The proposed method's learned
 localizer is a method component; sharing detector boxes does not imply identical
 localization or equal training supervision with the proposed model.
 
-Early/late CLIP fusion, S6, S9, S10 and S11 select parameters on complete val.
+Early/late CLIP fusion, S6, S9, S10, S11 and Instruct-ReID select parameters on complete val.
 Other defaults are predeclared. If any predeclared prompt, cap, checkpoint or
 adapter setting was actually chosen using RCR val in earlier experiments,
 report that validation use truthfully. No test metric or example may select
@@ -54,15 +54,17 @@ isolation of architecture under matched training conditions.
 
 ## Remaining scientific requirements
 
-- Instruct-ReID defaults to a native-distance unmatched value of -1,000,000,
-  explicitly uncalibrated. It can dominate rankings when a person is missing.
-  Keep this run diagnostic until an independently justified calibration or a
-  validation-only sensitivity study is completed. Tables label uncalibrated
-  results. Do not replace native Euclidean scoring with normalized cosine merely
-  to reuse -1. Calibration checks image bytes against both val and test.
+- Instruct-ReID retains unnormalized native negative squared Euclidean scoring.
+  Its unmatched penalty is selected on complete val using the declared native
+  quantile grid and Full-mAP, then frozen for test. Report it as `Val only`.
+  Preserve the selection receipt; CPU contracts do not establish behavior with
+  actual Instruct weights. Independent external calibration is a separately
+  predeclared alternative, never chosen using test.
 - Word4Per requires a reproduced Stage-2 checkpoint and matching training config.
   Report it as REPRODUCED, preserve its training/checkpoint-selection records,
-  and verify it with the actual weights. Other configured checkpoint status
+  and verify it with the actual weights. The loader now requires matching weight,
+  training-config and external-image inventory receipts, rejecting byte-identical
+  overlap with current RCR val/test even under renamed paths. Other configured checkpoint status
   labels describe intended sources; they do not prove local artifacts exist.
 - The shared selector cap is five members per Subject. The inspected val export
   contains one six-member GROUP query. Test also contains one. This limits the
@@ -74,7 +76,9 @@ isolation of architecture under matched training conditions.
   alternative prompt/adapter as a separate validated variant.
 - WISER and other editor/VLM systems have much larger GPU, disk and generation
   costs. Record model revisions, runtime, generated artifacts and API refiner
-  identity. A GPT-4o alias and stochastic generation are not made deterministic
+  identity. Native WISER requests are unchanged; full API responses, resolved model
+  identities and exact loaded OpenCLIP/BLIP2 states are now recorded. Mixed API
+  model identities are rejected. A GPT-4o alias and stochastic generation are not made deterministic
   merely by pinning local Hugging Face models.
 - Audit overlap between external pretraining/reproduction/calibration data and
   the paper's data. Model-input allowlists prevent GT lookup in this code; they
@@ -98,6 +102,9 @@ python run_baseline.py --tables-only
 ```
 
 Evaluation writes score SHA256 and an evaluated-run digest into metrics.json.
+`scripts/check_publication.py` additionally requires full native run receipts,
+current checkpoint/config bytes, score hashes and portable scientific receipts.
+It validates artifacts; it cannot independently certify historical native fidelity.
 The table builder rejects mismatched metric/run pairs, incomplete counts,
 invalid metric values and different recorded image/box/membership identities.
 Historical unbound metrics are skipped. Reporting validates recorded artifacts;

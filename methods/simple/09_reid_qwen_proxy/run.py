@@ -36,6 +36,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from evaluate import full_map
+from cpr_baselines.provenance import execution_identity
 from cpr_person.validation import verify_tuning_manifests
 from benchmark_data import manifest_image_digest
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
@@ -43,7 +44,8 @@ from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 from cpr_person.adapter import matching_metadata, manifest_identity
 from cpr_person.adapter import require_person_branch
 from cpr_person.adapter import require_manifest_branch
-from cpr_person.clip_model import load_openai_clip, verify_rcr_scene_clip
+from cpr_baselines.scene_protocol import check_config
+from cpr_baselines.scene_clip import load_scene_clip, verify_scene_clip, scene_identity
 from cpr_person.protocol import require_aligned_run
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "reid_set_qwen_edit_proxy"
@@ -164,6 +166,7 @@ def load_source_scores(*, scores_path: Path, run_path: Path, expected_method: st
 
 def branch_score_fingerprint(*, kind: str, config_path: Path, gallery_manifest: Path, query_manifest: Path, extras: dict[str, Any]) -> dict[str, Any]:
     return {
+        "execution": execution_identity(__file__),
         "schema": BRANCH_SCORE_SCHEMA,
         "adapter_version": ADAPTER_VERSION,
         "kind": kind,
@@ -229,6 +232,7 @@ def select_alpha(*, cfg: dict[str, Any], config_path: Path, val_gallery_manifest
     if tie_break != "smallest_alpha":
         raise ValueError("Only tie_break=smallest_alpha is supported")
     expected = {
+        "execution": execution_identity(__file__),
         "schema": ALPHA_SCHEMA,
         "selection_split": "val",
         "adapter_version": ADAPTER_VERSION,
@@ -276,7 +280,7 @@ def build_validation_reid_scores(*, cfg, config_path, val_gallery_manifest, val_
         gallery_manifest=val_gallery_manifest, query_manifest=val_query_manifest,
         device=s5.device_from(cfg["runtime"]["device"]), feature_cache=resolve_path(cache_cfg["reid_features"]))
     output_path = resolve_path(cache_cfg["reid_scores"])
-    fp = {"schema": "shared-reid-branch-v1", "localization": person.localization.fingerprint,
+    fp = {"execution": execution_identity(__file__), "schema": "shared-reid-branch-v1", "localization": person.localization.fingerprint,
           "feature_meta": read_json(s5.meta_path(resolve_path(cache_cfg["reid_features"]))),
           "setmatch": base_cfg["setmatch"]}
     cached = load_cached_scores(output_path, fp, (len(val_queries),len(val_gallery)), "shared validation ReID")
@@ -295,14 +299,41 @@ def build_validation_proxy_scores(*, cfg: dict[str, Any], config_path: Path, val
     expected_shape = (len(val_queries), len(val_gallery))
     proxy_cfg_path = resolve_path(str(cfg["proxy"]["config"]))
     proxy_cfg = load_yaml(proxy_cfg_path)
-    checkpoint = resolve_path(str(proxy_cfg["retriever"]["checkpoint"]))
-    clip_sha = verify_rcr_scene_clip(checkpoint, proxy_cfg["retriever"]["name"])
+    checkpoint = check_config(proxy_cfg["retriever"])
+    clip_sha = verify_scene_clip(checkpoint, proxy_cfg["retriever"]["name"])
+    device = s8.device_from(str(cfg["runtime"]["device"]))
+    generator_dir, generator_marker, _marker_data = s8.validate_generator_artifacts(proxy_cfg)
+    val_proxy_cfg = json.loads(json.dumps(proxy_cfg))
+    val_proxy_cfg["runtime"]["generator_dtype"] = str(cfg["runtime"]["proxy_generator_dtype"])
+    val_proxy_cfg["runtime"]["clip_image_batch_size"] = int(cfg["runtime"]["proxy_clip_image_batch_size"])
+    val_proxy_cfg["runtime"]["clip_score_batch_size"] = int(cfg["runtime"]["proxy_clip_score_batch_size"])
+    val_proxy_cfg["runtime"]["num_workers"] = int(cfg["runtime"]["num_workers"])
+    val_proxy_cfg["cache"]["edited_queries_dir"] = str(cache_cfg["proxy_edited_queries_dir"])
+    val_proxy_cfg["cache"]["edited_queries_manifest"] = str(cache_cfg["proxy_edited_queries_manifest"])
+    val_proxy_cfg["cache"]["edited_query_features"] = str(cache_cfg["proxy_query_features"])
+    val_proxy_cfg["cache"]["gallery_features"] = str(cache_cfg["proxy_gallery_features"])
+    edit_fp = s8.edit_fingerprint(cfg=val_proxy_cfg, config_path=proxy_cfg_path,
+        gallery_manifest=val_gallery_manifest, query_manifest=val_query_manifest,
+        generator_marker=generator_marker)
+    edited_manifest_path = resolve_path(str(cache_cfg["proxy_edited_queries_manifest"]))
+    edited_paths = s8.load_edit_cache(edited_manifest_path,
+        resolve_path(str(cache_cfg["proxy_edited_queries_dir"])), edit_fp, val_queries)
+    if edited_paths is None:
+        with tracker.phase("Generate validation proxy images"):
+            edited_paths, edited_manifest_path, _ = s8.generate_or_load_edited_queries(
+                cfg=val_proxy_cfg, config_path=proxy_cfg_path, gallery_manifest=val_gallery_manifest,
+                query_manifest=val_query_manifest, generator_marker=generator_marker,
+                generator_dir=generator_dir, gallery=val_gallery, queries=val_queries, device=device)
+    gallery_cache_fp = s8.clip_gallery_cache_fingerprint(checkpoint, val_gallery_manifest, str(proxy_cfg["retriever"]["name"]))
     extras = {
         "scene_clip_sha256": clip_sha,
+        "scene_clip": scene_identity(checkpoint),
+        "encoding_runtime": cfg["runtime"],
         "proxy_config_sha256": sha256_file(proxy_cfg_path),
-        "generator_repo_id": str(proxy_cfg["generator"]["repo_id"]),
-        "generator_revision": str(proxy_cfg["generator"]["revision"]),
-        "proxy_prompt_hash": canonical_hash(str(proxy_cfg["generator"]["prompt_template"])),
+        "generator_fingerprint": edit_fp,
+        "gallery_fingerprint": gallery_cache_fp,
+        "edited_manifest_sha256": sha256_file(edited_manifest_path),
+        "edited_image_sha256s": [sha256_file(path) for path in edited_paths],
     }
     expected_meta = branch_score_fingerprint(kind="validation_proxy", config_path=config_path, gallery_manifest=val_gallery_manifest, query_manifest=val_query_manifest, extras=extras)
     cached = load_cached_scores(output_path, expected_meta, expected_shape, "validation proxy scores")
@@ -310,21 +341,7 @@ def build_validation_proxy_scores(*, cfg: dict[str, Any], config_path: Path, val
         return cached
 
     with tracker.phase("Build validation generated-proxy branch"):
-        device = s8.device_from(str(cfg["runtime"]["device"]))
-        generator_dir, generator_marker, _marker_data = s8.validate_generator_artifacts(proxy_cfg)
-        val_proxy_cfg = json.loads(json.dumps(proxy_cfg))
-        val_proxy_cfg["runtime"]["generator_dtype"] = str(cfg["runtime"]["proxy_generator_dtype"])
-        val_proxy_cfg["runtime"]["clip_image_batch_size"] = int(cfg["runtime"]["proxy_clip_image_batch_size"])
-        val_proxy_cfg["runtime"]["clip_score_batch_size"] = int(cfg["runtime"]["proxy_clip_score_batch_size"])
-        val_proxy_cfg["runtime"]["num_workers"] = int(cfg["runtime"]["num_workers"])
-        val_proxy_cfg["cache"]["edited_queries_dir"] = str(cache_cfg["proxy_edited_queries_dir"])
-        val_proxy_cfg["cache"]["edited_queries_manifest"] = str(cache_cfg["proxy_edited_queries_manifest"])
-        val_proxy_cfg["cache"]["edited_query_features"] = str(cache_cfg["proxy_query_features"])
-        val_proxy_cfg["cache"]["gallery_features"] = str(cache_cfg["proxy_gallery_features"])
-        edited_paths, edited_manifest_path, _edited_meta = s8.generate_or_load_edited_queries(cfg=val_proxy_cfg, config_path=proxy_cfg_path, gallery_manifest=val_gallery_manifest, query_manifest=val_query_manifest, generator_marker=generator_marker, generator_dir=generator_dir, gallery=val_gallery, queries=val_queries, device=device)
-
-        model, preprocess = load_openai_clip(checkpoint, device)
-        gallery_cache_fp = s8.clip_gallery_cache_fingerprint(checkpoint, val_gallery_manifest, str(proxy_cfg["retriever"]["name"]))
+        model, preprocess = load_scene_clip(checkpoint, device)
         gallery_features, _ = s8.clip_gallery_features(model, preprocess, val_gallery, resolve_path(str(cache_cfg["proxy_gallery_features"])), val_proxy_cfg["runtime"], device, gallery_cache_fp)
         query_cache_fp = s8.query_feature_cache_fingerprint(proxy_cfg_path, edited_manifest_path, checkpoint, val_query_manifest)
         query_features, _ = s8.clip_query_image_features(model, preprocess, edited_paths, resolve_path(str(cache_cfg["proxy_query_features"])), val_proxy_cfg["runtime"], device, query_cache_fp)
@@ -382,6 +399,8 @@ def main() -> None:
         read_json(resolve_path(cfg["base_set"]["main_run"])), main_gallery_manifest, main_query_manifest)
     proxy_run = read_json(resolve_path(cfg["proxy"]["main_run"]))
     require_manifest_branch(proxy_run, main_gallery_manifest, main_query_manifest)
+    from cpr_baselines.scene_clip import require_current_scene_run
+    require_current_scene_run(proxy_run)
     require_aligned_run(proxy_run, cfg["proxy"]["method"])
     val_reid_scores = build_validation_reid_scores(cfg=cfg, config_path=config_path, val_gallery_manifest=val_gallery_manifest, val_query_manifest=val_query_manifest, val_gallery=val_gallery, val_queries=val_queries, s5=s5, tracker=tracker)
     val_proxy_scores = build_validation_proxy_scores(cfg=cfg, config_path=config_path, val_gallery_manifest=val_gallery_manifest, val_query_manifest=val_query_manifest, val_gallery=val_gallery, val_queries=val_queries, s8=s8, tracker=tracker)
@@ -406,7 +425,9 @@ def main() -> None:
         output_dir = resolve_path(str(cfg["output"]["dir"]))
         run_path = output_dir / "run.json"
         payload = {
+            "execution": execution_identity(__file__),
             "scene_clip_sha256": proxy_run["scene_clip_sha256"],
+            "scene_clip": proxy_run["scene_clip"],
             "shared_person_protocol": main_person_protocol,
             "setmatch": matching_metadata(load_yaml(resolve_path(cfg["base_set"]["config"])), score_space="cosine"),
             "method": cfg["method"],

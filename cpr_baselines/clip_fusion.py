@@ -5,8 +5,9 @@ from pathlib import Path
 import numpy as np
 
 from benchmark_data import gallery_image_digest, load_jsonl, split_paths, verify_manifest
-from cpr_person.cache import atomic_json, read_json, sha256_file
+from cpr_person.cache import atomic_json, read_json
 from evaluate import full_map
+from .scene_clip import scene_identity
 
 
 def late_zscore(scores, self_indices, epsilon):
@@ -59,14 +60,14 @@ def tune_clip_fusion(root, cfg, output, device, encode_validation, *, epsilon=No
     validation = verify_manifest(root, "val")["fingerprint"]
     gallery = load_jsonl(gallery_path)
     grid = sorted({float(weight) for weight in cfg["tuning"]["image_weights"]})
-    if not grid or any(not 0.0 <= weight <= 1.0 for weight in grid):
-        raise ValueError("tuning.image_weights must be nonempty and in [0, 1]")
+    if grid != [i/20 for i in range(21)]:
+        raise ValueError("Early/late fusion must use exactly 21 weights from 0 to 1")
     # Same images and model must define both the val feature cache and lock.
     image_signature = gallery_image_digest(root, gallery)
     fingerprint = {
-        "schema": "clip-fusion-rcr-val-v3",
+        "schema": "clip-fusion-rcr-proposed-hf-v2",
         "method": cfg["method"],
-        "checkpoint_sha256": sha256_file(root / cfg["model"]["checkpoint"]),
+        "encoder": scene_identity(cfg["model"]["checkpoint"]),
         "encoder_device": device.type,
         "runtime": cfg["runtime"],
         "validation_fingerprint": validation,

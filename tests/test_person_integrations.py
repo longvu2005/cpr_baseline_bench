@@ -14,7 +14,7 @@ import build_tables
 import evaluate
 from benchmark_data import manifest_fingerprint
 from cpr_person.adapter import PERSON_METHODS, expand_targets, load_person_context, require_person_branch, require_manifest_branch
-from cpr_person.cache import read_json
+from cpr_person.cache import read_json, sha256_file
 from cpr_person.matching import aggregate_people, aggregate_component_scores, score_feature_sets
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -26,7 +26,8 @@ def function(path,name,namespace=None):
     n.decorator_list=[]
     # Postponed annotations avoid importing heavy frameworks for CPU adapters.
     module=ast.Module(body=[ast.ImportFrom(module="__future__",names=[ast.alias(name="annotations")],level=0),n],type_ignores=[])
-    env={"np":np,"os":os,"score_feature_sets":score_feature_sets,"aggregate_people":aggregate_people,
+    from cpr_baselines.provenance import execution_identity
+    env={"execution_identity":execution_identity,"__file__":str(ROOT/path),"np":np,"os":os,"score_feature_sets":score_feature_sets,"aggregate_people":aggregate_people,
          "progress_bar":lambda values,**kwargs:values,**(namespace or {})}
     exec(compile(ast.fix_missing_locations(module),str(path),"exec"),env)
     return env[name]
@@ -93,7 +94,7 @@ def test_published_component_output_contract(method,tmp_path):
     assert np.load(out).shape==(2,2) and np.isfinite(np.load(out)).all()
 
 
-def test_s5_s6_s9_share_actual_cached_context_and_score_contract(toy_protocol,tmp_path):
+def test_s5_s6_s9_share_actual_cached_context_and_score_contract(toy_protocol,tmp_path,monkeypatch):
     cfg,gallery,queries,gm,qm,calls,selector=toy_protocol
     person=load_person_context(gallery,queries,gm,qm,"cpu")
     features=np.eye(3,dtype=np.float32)
@@ -126,6 +127,7 @@ def test_s5_s6_s9_share_actual_cached_context_and_score_contract(toy_protocol,tm
         score_cache=tmp_path/"s6.npy",device="cpu")
     np.testing.assert_array_equal(s6,got)
     assert len(calls)==1 and stats["shared_person_protocol"]["version"]
+    monkeypatch.setattr("cpr_baselines.native_assets.require_current_assets", lambda *args: None)
     with pytest.raises(RuntimeError, match="RCR detection index"):
         require_person_branch({"shared_person_protocol":person.metadata()},gm,qm)
     with pytest.raises(RuntimeError):require_person_branch({"shared_person_protocol":{}},gm,qm)
@@ -161,6 +163,7 @@ def test_official_evaluator_and_table_builder_accept_adapter_scores(
               "full_positive_ids":["b" if q["image_id"]=="a" else "a"],"case":"GROUP"} for i,q in enumerate(queries)]
     write_benchmark_views(tmp_path, gallery, queries)
     person=load_person_context(gallery,queries,data/"gallery.jsonl",data/"queries.jsonl","cpu")
+    monkeypatch.setattr("cpr_baselines.native_assets.require_current_assets", lambda *args: None)
     require_person_branch(
         {"shared_person_protocol": person.metadata()}, data / "gallery.jsonl", data / "queries.jsonl",
     )
@@ -169,7 +172,7 @@ def test_official_evaluator_and_table_builder_accept_adapter_scores(
     np.save(run_dir/"scores.npy",np.array([[1,.2],[.3,1],[1,.1]],np.float32))
     # Use the official evaluator exactly as written; only its filesystem roots
     # point at the tiny test fixture. Positive sets and formulas are untouched.
-    (run_dir/"run.json").write_text(json.dumps({"method":"fafa_setmatch","higher_is_better":True,
+    (run_dir/"run.json").write_text(json.dumps({"result_protocol":evaluate.RESULT_PROTOCOL,"implementation":{"evaluate.py":sha256_file(ROOT/"evaluate.py")},"method":"fafa_setmatch","higher_is_better":True,
         "shared_person_protocol":person.metadata(),"data_fingerprint":manifest_fingerprint(tmp_path)}))
     for key,val in {"ROOT":tmp_path,"RUNS_DIR":runs,"OUTPUTS_DIR":outputs}.items():
         monkeypatch.setattr(evaluate,key,val)
@@ -238,9 +241,15 @@ def test_native_encoders_composition_and_scores_remain_unchanged():
             assert hashlib.sha256(ast.dump(node).encode()).hexdigest()==digest,(path,name)
 
 
-def test_proxy_branch_cannot_reuse_scores_from_different_manifests(toy_protocol):
+def test_proxy_branch_cannot_reuse_scores_from_different_manifests(toy_protocol, monkeypatch):
+    monkeypatch.setattr("cpr_baselines.native_assets.require_current_assets", lambda *args: None)
     from cpr_person.cache import sha256_file
     cfg,gallery,queries,gm,qm,calls,selector=toy_protocol
     expected={"gallery_sha256":sha256_file(gm),"queries_sha256":sha256_file(qm)}
-    require_manifest_branch({"data_fingerprint":expected},gm,qm)
+    from benchmark_data import manifest_image_digest
+    source={"data_fingerprint":expected,"image_provenance":{"gallery_image_content_sha256":manifest_image_digest(ROOT,gm)}}
+    require_manifest_branch(source,gm,qm)
+    from PIL import Image
+    Image.new("RGB",(40,30),"black").save(gallery[0]["path"])
+    with pytest.raises(RuntimeError,match="image bytes"):require_manifest_branch(source,gm,qm)
     with pytest.raises(RuntimeError):require_manifest_branch({"data_fingerprint":{}},gm,qm)

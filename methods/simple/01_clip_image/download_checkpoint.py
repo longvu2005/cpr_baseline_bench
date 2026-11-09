@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare the shared RCR OpenAI CLIP scene checkpoint."""
+"""Prepare the shared frozen HF CLIP scene checkpoint."""
 import sys
 from pathlib import Path
 

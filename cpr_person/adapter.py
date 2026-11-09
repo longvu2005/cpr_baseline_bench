@@ -95,16 +95,30 @@ def prepare_shared(force=False):
 
 
 def require_person_branch(run, gallery_manifest, query_manifest):
+    from cpr_baselines.native_assets import require_current_assets
+    require_current_assets(run, ROOT)
     protocol.require_aligned_run(run, "groundingdino_clipreid_set")
     provenance = run["shared_person_protocol"]
     if (provenance.get("version") != PROTOCOL_VERSION
             or provenance.get("detections_fingerprint", {}).get("gallery_manifest_sha256") != sha256_file(gallery_manifest)
             or provenance.get("localization_fingerprint", {}).get("queries_manifest_sha256") != sha256_file(query_manifest)):
         raise RuntimeError("Inherited ReID scores have an old/different person protocol or manifest; rerun S5")
+    require_image_provenance(run, gallery_manifest)
     return provenance
 
 
 def require_manifest_branch(run, gallery_manifest, query_manifest):
+    from cpr_baselines.native_assets import require_current_assets
+    require_current_assets(run, ROOT)
     expected={"gallery_sha256":sha256_file(gallery_manifest),"queries_sha256":sha256_file(query_manifest)}
     if not isinstance(run,dict) or run.get("data_fingerprint")!=expected:
         raise RuntimeError("Source scores lack the same complete manifest identity; rerun their method through run_baseline.py")
+    require_image_provenance(run, gallery_manifest)
+
+
+def require_image_provenance(run, gallery_manifest):
+    from benchmark_data import manifest_image_digest
+    recorded = run.get("shared_person_protocol", {}).get("detections_fingerprint", {}).get(
+        "gallery_image_content_sha256", run.get("image_provenance", {}).get("gallery_image_content_sha256"))
+    if recorded != manifest_image_digest(ROOT, gallery_manifest):
+        raise RuntimeError("Source image bytes differ; rerun the source method")

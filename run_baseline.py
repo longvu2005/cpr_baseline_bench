@@ -30,7 +30,7 @@ from benchmark_progress import format_duration
 from benchmark_data import (DATA_PROTOCOL, describe_gallery_link, ensure_gallery_layout,
                             manifest_fingerprint, manifest_image_digest, split_paths)
 from cpr_person.cache import atomic_json, sha256_file
-from cpr_person.protocol import PERSON_METHODS, require_aligned_run
+from cpr_person.protocol import PERSON_METHODS, RCR_SCENE_CLIP_METHODS, RESULT_PROTOCOL, require_aligned_run
 from cpr_person.rcr_cache import RCR_DETECTION_ENV, rcr_index_path
 
 ROOT = Path(__file__).resolve().parent
@@ -226,7 +226,12 @@ def run_pipeline(
     total = 6
     print(f"Method : {method.method_id}", flush=True)
     print(f"Path   : {method.relative_directory}", flush=True)
+    run_path = ROOT / "runs" / method.method_id / "run.json"
+    run_path.unlink(missing_ok=True)
 
+    from cpr_baselines.preflight import require_readiness
+    import yaml
+    require_readiness(yaml.safe_load(method.config_path.read_text()), ROOT)
     started = perf_counter()
     print(flush=True)
     print(f"[1/{total}] Validate gallery data", flush=True)
@@ -240,6 +245,9 @@ def run_pipeline(
     print(f"[1/{total}] done in {format_duration(perf_counter() - started)}: Validate gallery data", flush=True)
 
     print(flush=True)
+    if method.method_id in PERSON_METHODS | RCR_SCENE_CLIP_METHODS:
+        from cpr_baselines.scene_runtime import prepare_runtime
+        prepare_runtime(skip_install=skip_install)
     print(f"[2/{total}] Prepare isolated method environment", flush=True)
     method_python, method_env = prepare_method_python(
         root=ROOT, method_id=method.method_id,
@@ -272,12 +280,16 @@ def run_pipeline(
             "this method has no download_checkpoint.py and declares no automated checkpoint preparation.",
         )
 
+    from cpr_baselines.native_assets import snapshot
+    from cpr_baselines.provenance import execution_identity, require_execution_identity
+    frozen_config = yaml.safe_load(method.config_path.read_text())
+    frozen_config_sha = sha256_file(method.config_path)
+    assets_before = snapshot(frozen_config, ROOT)
+    implementation_before = execution_identity(method.run_path)["implementation"]
     data_fingerprint = manifest_fingerprint(ROOT)
     validation_fingerprint = manifest_fingerprint(ROOT, "val")
     test_images = manifest_image_digest(ROOT, split_paths(ROOT, "test")[0])
     val_images = manifest_image_digest(ROOT, split_paths(ROOT, "val")[0])
-    run_path = ROOT / "runs" / method.method_id / "run.json"
-    run_path.unlink(missing_ok=True)
     run_step(
         4,
         total,
@@ -291,7 +303,13 @@ def run_pipeline(
     if (manifest_image_digest(ROOT, split_paths(ROOT, "test")[0]) != test_images
             or manifest_image_digest(ROOT, split_paths(ROOT, "val")[0]) != val_images):
         raise RuntimeError("RCR image bytes changed during inference; rerun this baseline.")
+    if sha256_file(method.config_path) != frozen_config_sha or snapshot(frozen_config, ROOT) != assets_before:
+        raise RuntimeError("Method config/checkpoints changed during inference")
+    if execution_identity(method.run_path)["implementation"] != implementation_before:
+        raise RuntimeError("Benchmark implementation changed during inference")
     run = json.loads(run_path.read_text(encoding="utf-8"))
+    execution = require_execution_identity(run.get("execution"))
+    run.update(config_sha256=frozen_config_sha, config_path=str(method.config_path.relative_to(ROOT)), assets_snapshot=assets_before)
     if run.get("method") != method.method_id:
         raise ValueError(f"Inference wrote mismatched method metadata: {run_path}")
     require_aligned_run(run, method.method_id)
@@ -303,7 +321,12 @@ def run_pipeline(
         raise RuntimeError("Inference lacks matching gallery image provenance; rerun with the current adapter")
     if run.get("cpr_supervision") == "Val only" and run.get("validation_fingerprint") != validation_fingerprint:
         raise RuntimeError("Tuned inference lacks matching validation provenance")
-    run.update(split="test", data_protocol=DATA_PROTOCOL, data_fingerprint=data_fingerprint,
+    from cpr_baselines.evidence import persist_evidence
+    run = persist_evidence(run, run_path.parent, ROOT)
+    run["execution_receipt"] = {"schema": "native-method-run-v1", "method": method.method_id,
+        "entrypoint_sha256": sha256_file(method.run_path), "complete_canonical_test_gallery": True,
+        "process_succeeded": True, "environment": execution, "synthetic_model_substitution": False}
+    run.update(result_protocol=RESULT_PROTOCOL, implementation=implementation_before, split="test", data_protocol=DATA_PROTOCOL, data_fingerprint=data_fingerprint,
                scores_sha256=sha256_file(run_path.with_name("scores.npy")))
     atomic_json(run_path, run)
     run_step(
@@ -366,6 +389,8 @@ def parse_args() -> argparse.Namespace:
         "--rcr-detection-cache", type=Path,
         help="RCR cache/detections directory or its index.pt for person baselines.",
     )
+    parser.add_argument("--rcr-scene-cache", type=Path, help="Verified native RCR scene index for global CLIP reuse")
+    modes.add_argument("--preflight", action="store_true", help="Report native prerequisites without installing or running models")
     modes.add_argument("--all", action="store_true", help="Run all discovered methods in dependency order.")
     modes.add_argument("--tables-only", action="store_true",
                        help="Rebuild tables from evaluated outputs without installing or running methods.")
@@ -389,6 +414,8 @@ def main() -> None:
     args = parse_args()
     if args.rcr_detection_cache is not None:
         os.environ[RCR_DETECTION_ENV] = str(args.rcr_detection_cache.expanduser().absolute())
+    if args.rcr_scene_cache is not None:
+        os.environ["CPR_RCR_SCENE_CACHE"] = str(args.rcr_scene_cache.expanduser().absolute())
     if args.method and (args.all or args.tables_only):
         raise SystemExit("Choose a method, --all, or --tables-only.")
     if args.tables_only:
@@ -400,24 +427,43 @@ def main() -> None:
     except (RuntimeError, ValueError) as error:
         raise SystemExit(str(error)) from error
 
+    if args.preflight:
+        import yaml
+        from cpr_baselines.preflight import method_readiness
+        selected = [resolve_method(args.method, methods)] if args.method else methods
+        results = [method_readiness(yaml.safe_load(method.config_path.read_text()), ROOT) for method in selected]
+        path = ROOT / "runs/preflight.json"
+        atomic_json(path, results)
+        print(json.dumps(results, indent=2))
+        if any(not result["prerequisites_passed"] for result in results):
+            raise SystemExit(1)
+        return
     if args.list:
         print_methods(methods)
         return
 
     if args.all:
         check_table_builder()
-        # The existing simple ordering runs S5/S6/S8 before their dependents.
-        # Scene methods retain their own preparation, inference and evaluation.
-        failures = []
+        dependencies = {"reid_set_qwen_edit_proxy": ("groundingdino_clipreid_set", "qwen_image_edit_clip"),
+                        "retrieve_qwen25vl_rerank": ("groundingdino_clipreid_set_text",)}
+        failures, status = [], {}
         for method in methods:
-            try:
-                if run_pipeline(method, args.force_checkpoint, args.skip_install) is False:
-                    failures.append(method.method_id + " (checkpoint unavailable)")
-            except (subprocess.CalledProcessError, FileNotFoundError, RuntimeError, ValueError) as error:
-                print(f"FAILED {method.method_id}: {error}", flush=True)
+            blocked = [source for source in dependencies.get(method.method_id, ())
+                       if status.get(source, {}).get("state") != "completed"]
+            if blocked:
+                (ROOT/'runs'/method.method_id/'run.json').unlink(missing_ok=True)
+                status[method.method_id] = {"state": "blocked", "dependencies": blocked}
                 failures.append(method.method_id)
-        if failures:
-            raise SystemExit("Failed methods: " + ", ".join(failures))
+            else:
+                try:
+                    completed = run_pipeline(method, args.force_checkpoint, args.skip_install)
+                    status[method.method_id] = {"state": "unavailable" if completed is False else "completed"}
+                    if completed is False: failures.append(method.method_id)
+                except (subprocess.CalledProcessError, FileNotFoundError, RuntimeError, ValueError) as error:
+                    status[method.method_id] = {"state": "failed", "reason": str(error)}
+                    failures.append(method.method_id)
+            atomic_json(ROOT/"runs/batch_status.json", status)
+        if failures: raise SystemExit("Failed methods: " + ", ".join(failures))
         return
 
     if not args.method:

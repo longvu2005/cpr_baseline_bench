@@ -90,11 +90,25 @@ def main() -> None:
     output = resolve(str(cfg["cache"]["captions"]))
     meta_path = resolve(str(cfg["cache"]["captions_meta"]))
     gallery = load_jsonl(gallery_manifest)
+    device = torch.device(str(cfg["runtime"]["caption_device"]) if torch.cuda.is_available() else "cpu")
+    cap = cfg["models"]["captioner"]
+    model, processors, _ = lavis.models.load_model_and_preprocess(
+        name=str(cap["name"]),
+        model_type=str(cap["model_type"]),
+        is_eval=True,
+        device=device,
+    )
+    model = model.float()
+    model.maybe_autocast = lambda dtype=None: torch.no_grad()
+    prompt = str(cap["prompt"])
+
+    from cpr_baselines.provenance import module_state_sha256
     expected_meta = {
         "schema": 1,
         "gallery_manifest_sha256": sha256(gallery_manifest),
         "gallery_image_content_sha256": image_digest,
         "captioner": cfg["models"]["captioner"],
+        "native_state_sha256": module_state_sha256(model),
     }
 
     if output.is_file() and meta_path.is_file():
@@ -108,18 +122,6 @@ def main() -> None:
                     return
         except Exception:
             pass
-
-    device = torch.device(str(cfg["runtime"]["caption_device"]) if torch.cuda.is_available() else "cpu")
-    cap = cfg["models"]["captioner"]
-    model, processors, _ = lavis.models.load_model_and_preprocess(
-        name=str(cap["name"]),
-        model_type=str(cap["model_type"]),
-        is_eval=True,
-        device=device,
-    )
-    model = model.float()
-    model.maybe_autocast = lambda dtype=None: torch.no_grad()
-    prompt = str(cap["prompt"])
 
     output.parent.mkdir(parents=True, exist_ok=True)
     tmp = output.with_suffix(output.suffix + ".part")

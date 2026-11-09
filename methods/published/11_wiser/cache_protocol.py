@@ -5,6 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from benchmark_data import gallery_image_digest, load_jsonl
+from cpr_baselines.provenance import execution_identity, probe_runtime
 from cpr_person.cache import canonical_hash, sha256_file
 
 
@@ -17,6 +18,8 @@ def namespace_caches(cfg, root):
     queries = path(cfg["data"]["query_manifest"])
     images = gallery_image_digest(root, load_jsonl(gallery))
     fingerprint = canonical_hash({
+        "execution": execution_identity(__file__)["implementation"],
+        "runtimes": {name: probe_runtime(path(cfg[name]["python"])) for name in ("isolated_env", "caption_env") if name in cfg},
         "config": cfg,
         "gallery_sha256": sha256_file(gallery),
         "queries_sha256": sha256_file(queries),

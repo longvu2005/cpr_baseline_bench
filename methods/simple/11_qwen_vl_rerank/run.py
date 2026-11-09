@@ -10,6 +10,7 @@ import torch
 import yaml
 ROOT=Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path: sys.path.insert(0,str(ROOT))
+from cpr_baselines.provenance import execution_identity
 from benchmark_data import manifest_fingerprint, manifest_image_digest
 from cpr_person.cache import atomic_json
 from cpr_person.protocol import require_aligned_run, require_score_artifact
@@ -108,6 +109,8 @@ def s6_sources(cfg,main_g,main_q,val_g,val_q):
     from cpr_person.adapter import require_person_branch
     require_score_artifact(run, main_scores)
     require_aligned_run(run, f["method"])
+    from cpr_baselines.scene_clip import require_current_scene_run
+    require_current_scene_run(run)
     require_person_branch(run, main_g, main_q)
     if alpha is None or not isinstance(alpha.get('selected_alpha'),(int,float)): raise RuntimeError('Missing/stale S6 alpha_selection.json')
     afp=alpha.get('fingerprint')
@@ -129,7 +132,7 @@ def s6_sources(cfg,main_g,main_q,val_g,val_q):
 
 def prepare_val_s6(cfg,vr,vt,a,shape):
     p=resolve(cfg['cache']['validation_first_stage_scores']); meta=p.with_suffix(p.suffix+'.meta.json')
-    expected={'schema':CACHE_SCHEMA,'adapter':ADAPTER_VERSION,'reid_sha':sha(resolve(cfg['first_stage']['validation']['reid_scores'])),'clip_sha':sha(resolve(cfg['first_stage']['validation']['clip_text_scores'])),'alpha':a}
+    expected={"execution": execution_identity(__file__), 'schema':CACHE_SCHEMA,'adapter':ADAPTER_VERSION,'reid_sha':sha(resolve(cfg['first_stage']['validation']['reid_scores'])),'clip_sha':sha(resolve(cfg['first_stage']['validation']['clip_text_scores'])),'alpha':a}
     if p.is_file() and read_json(meta)==expected:
         x=np.load(p,mmap_mode='r',allow_pickle=False)
         if x.shape==shape:return x
@@ -138,7 +141,7 @@ def prepare_val_s6(cfg,vr,vt,a,shape):
     out.flush(); write_json(meta,expected); return np.load(p,mmap_mode='r',allow_pickle=False)
 
 def verifier_fingerprint(cfg,manifest_g,manifest_q,first_stage_path,marker,max_k):
-    v=cfg['verifier']; return {'schema':CACHE_SCHEMA,'adapter':ADAPTER_VERSION,'gallery_sha':sha(manifest_g),'gallery_image_content_sha256':manifest_image_digest(ROOT,manifest_g),'query_sha':sha(manifest_q),'first_stage_sha':sha(first_stage_path),'qwen_marker_sha':sha(marker),'repo_id':v['repo_id'],'revision':v['revision'],'processor':v['processor'],'generation':v['generation'],'prompt':v['prompt_template'],'max_k':int(max_k)}
+    v=cfg['verifier']; return {'execution':execution_identity(__file__),'encoding_runtime':cfg['runtime'],'schema':CACHE_SCHEMA,'adapter':ADAPTER_VERSION,'gallery_sha':sha(manifest_g),'gallery_image_content_sha256':manifest_image_digest(ROOT,manifest_g),'query_sha':sha(manifest_q),'first_stage_sha':sha(first_stage_path),'qwen_marker_sha':sha(marker),'repo_id':v['repo_id'],'revision':v['revision'],'processor':v['processor'],'generation':v['generation'],'prompt':v['prompt_template'],'max_k':int(max_k)}
 
 @torch.inference_mode()
 def qwen_verify_cache(cfg,gallery,queries,first_scores,first_stage_path,manifest_g,manifest_q,checkpoint,marker,cache_path,max_k,device):
@@ -187,6 +190,7 @@ def select_params(cfg, val_scores, indices, verifier, gallery, queries, validati
     rerank = cfg["rerank"]
     path = resolve(rerank["result"])
     expected = {
+        "execution": execution_identity(__file__),
         "schema": SELECT_SCHEMA,
         "adapter": ADAPTER_VERSION,
         "selection_split": "val",
@@ -304,6 +308,7 @@ def main():
 
     with tracker.phase("Write run metadata"):
         atomic_json(output / "run.json", {
+            "execution": execution_identity(__file__),
             "method": cfg["method"],
             "display_name": cfg["display_name"],
             "group": cfg["group"],
@@ -311,6 +316,7 @@ def main():
             "adapter_version": ADAPTER_VERSION,
             "first_stage_method": cfg["first_stage"]["method"],
             "scene_clip_sha256": first_stage["scene_clip_sha256"],
+            "scene_clip": first_stage["scene_clip"],
             "shared_person_protocol": first_stage["shared_person_protocol"],
             "verifier": {key: cfg["verifier"][key] for key in ("repo_id", "revision")},
             "selected_top_k": k,

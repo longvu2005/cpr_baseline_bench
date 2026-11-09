@@ -6,18 +6,22 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 
-def partial_setmatch(matrix, unmatched_score):
+def partial_setmatch_sum(matrix):
     matrix = np.asarray(matrix, dtype=np.float64)
     if matrix.ndim != 2 or matrix.shape[0] < 1 or not np.isfinite(matrix).all():
         raise ValueError("SetMatch requires a finite [K,N] matrix, K >= 1")
+    if matrix.shape[1] == 0:
+        return 0., 0
+    rows, cols = linear_sum_assignment(-matrix)
+    return float(matrix[rows, cols].sum()), len(rows)
+
+
+def partial_setmatch(matrix, unmatched_score):
     if not np.isfinite(unmatched_score):
         raise ValueError("Unmatched score must be finite")
-    k, n = matrix.shape
-    if n == 0:
-        return float(unmatched_score)
-    rows, cols = linear_sum_assignment(-matrix)
-    # Rectangular Hungarian must take all min(K,N) real pairs, even below b.
-    return float((matrix[rows, cols].sum() + (k - len(rows)) * unmatched_score) / k)
+    total, count = partial_setmatch_sum(matrix)
+    k = np.asarray(matrix).shape[0]
+    return float((total + (k - count) * unmatched_score) / k)
 
 
 def build_person_index(offsets):

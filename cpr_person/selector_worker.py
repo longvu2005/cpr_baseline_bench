@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import os
 
 import numpy as np
 
@@ -19,6 +20,9 @@ def main():
     for name in ["gallery-manifest","query-manifest","detections","cache-dir","device"]:
         parser.add_argument("--"+name,required=True)
     args=parser.parse_args()
+    from cpr_baselines.provenance import runtime_identity
+    if json.loads(os.environ.get("CPR_SELECTOR_RUNTIME", "null")) != runtime_identity():
+        raise RuntimeError("Selector runtime differs from its fingerprint")
     cfg=protocol_config()
     root=validate_tokenizer(cfg["selector"])
     sys.path.insert(0,str(root))
@@ -43,7 +47,7 @@ def main():
         raise ValueError("Selector output directory differs from its immutable inputs")
     selector=ClipSelector(cfg["selector"],args.device)
     members,stats=localize_queries(queries,gallery,detections,cfg["selector"],selector)
-    validate_localization(members,queries,gallery,detections)
+    validate_localization(members,queries,gallery,detections,int(cfg["selector"]["max_members_per_subject"]))
     cache.write_json("members.json",{"members":members,"stats":stats})
 
 

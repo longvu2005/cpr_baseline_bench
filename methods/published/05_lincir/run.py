@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from cpr_baselines.provenance import execution_identity
 from benchmark_data import manifest_image_digest
 from benchmark_data import manifest_file_fingerprint
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
@@ -284,6 +285,7 @@ def load_feature_cache(path: Path, expected_meta: dict[str, Any], expected_shape
 
 def gallery_fingerprint(cfg: dict[str, Any], config_path: Path, gallery_manifest: Path, checkpoint: Path, snapshot: Path) -> dict[str, Any]:
     return {
+        "execution": execution_identity(__file__),
         "schema": GALLERY_CACHE_SCHEMA,
         "adapter_version": ADAPTER_VERSION,
         "config_sha256": sha256_file(config_path),
@@ -300,6 +302,7 @@ def gallery_fingerprint(cfg: dict[str, Any], config_path: Path, gallery_manifest
 
 def query_fingerprint(cfg: dict[str, Any], config_path: Path, gallery_manifest: Path, query_manifest: Path, checkpoint: Path, snapshot: Path) -> dict[str, Any]:
     return {
+        "execution": execution_identity(__file__),
         "schema": QUERY_CACHE_SCHEMA,
         "adapter_version": ADAPTER_VERSION,
         "config_sha256": sha256_file(config_path),
@@ -572,6 +575,7 @@ def main() -> None:
         output_dir = resolve_path(str(cfg["output"]["dir"]))
         run_path = output_dir / "run.json"
         payload = {
+            "execution": execution_identity(__file__),
             "method": cfg["method"],
             "data_fingerprint": data_fingerprint,
             "image_provenance": {"gallery_image_content_sha256": manifest_image_digest(ROOT, gallery_manifest)},

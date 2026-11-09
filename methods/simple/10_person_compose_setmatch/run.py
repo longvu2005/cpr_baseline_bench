@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from evaluate import full_map
+from cpr_baselines.provenance import execution_identity
 from cpr_person.validation import verify_tuning_manifests
 from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 
@@ -145,6 +146,7 @@ def query_gallery_indices(queries: Sequence[dict[str, Any]], gallery_index: dict
 
 def person_feature_fingerprint(*, config_path: Path, detection_cache: Path, clip_checkpoint: Path, clip_name: str) -> dict[str, Any]:
     return {
+        "execution": execution_identity(__file__),
         "schema": PERSON_FEATURE_SCHEMA,
         "adapter_version": ADAPTER_VERSION,
         "feature_config_sha256": feature_config_hash(config_path),
@@ -353,6 +355,7 @@ def select_alpha(*, cfg: dict[str, Any], config_path: Path, val_gallery_manifest
     if selection["metric"] != "Full-mAP" or selection["tie_break"] != "smallest_alpha":
         raise ValueError("Expected Full-mAP selection with smallest-alpha tie breaking")
     expected = {
+        "execution": execution_identity(__file__),
         "schema": ALPHA_SCHEMA,
         "selection_split": "val",
         "adapter_version": ADAPTER_VERSION,
@@ -512,6 +515,7 @@ def main() -> None:
         output_dir = resolve_path(str(cfg["output"]["dir"]))
         run_path = output_dir / "run.json"
         payload = {
+            "execution": execution_identity(__file__),
             "shared_person_protocol": main_person.metadata(),
             "setmatch": matching_metadata(cfg, score_space="cosine"),
             "method": cfg["method"],
