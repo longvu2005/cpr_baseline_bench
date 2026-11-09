@@ -41,11 +41,8 @@ venv/
 
 # macOS
 .DS_Store
-**/.DS_Store
 ._*
-**/._*
 __MACOSX/
-**/__MACOSX/
 
 # Reproduced checkpoint-side configs (must come from the same training run)
 checkpoints/word4per/word4per_cuhk_pedes_stage2_configs.yaml
@@ -56,9 +53,7 @@ checkpoints/**/runtime_assets_ready.json
 checkpoints/**/.cache/
 checkpoints/groundingdino/hf-cache/
 checkpoints/fafa/runtime_cache/
-checkpoints/fafa/runtime_assets_ready.json
 checkpoints/groundingdino/runtime_cache/
-checkpoints/groundingdino/runtime_assets_ready.json
 checkpoints/clip/selector_tokenizer/
 checkpoints/clip/.selector-tokenizer/
 checkpoints/clip/.clip-prepare/

@@ -177,7 +177,7 @@ def prepare_method_python(*, root: Path, method_id: str, requirements_path: Path
                 f"Missing/incomplete isolated environment for {method_id}: {directory}. "
                 f"Run python run_baseline.py {method_id} without --skip-install."
             )
-        # --clear repairs the directory left behind by the previous ensurepip failure.
+        # Recreate an incomplete environment before installing requirements.
         _create_venv(directory, executable, env)
 
     try:

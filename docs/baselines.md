@@ -76,7 +76,7 @@ build it once from the RCR root in its Proposed environment.
 - The benchmark reads the original RCR index and reuses its boxes across person
   methods. As in RCR, an index without image digests is bound by its content ID,
   gallery order and per-image sizes; current image bytes enter every run fingerprint.
-  See the [legacy detector notes](hf_person_detector.md) for diagnostic runs.
+  See the [Kaggle parity checks](kaggle.md#direct-parity-tests) for verification.
 
 ## Subject localization and GROUP
 

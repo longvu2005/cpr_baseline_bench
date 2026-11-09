@@ -153,6 +153,7 @@ python scripts/smoke_additional_runtime.py --method gme_qwen2_vl_2b
 ```
 
 Optional native tests check author modules/released mappers with tiny random
-CLIP backbones, without computing benchmark metrics. Completed validation
-and its limits are recorded in `docs/additional_validation.md`.
+CLIP backbones, without computing benchmark metrics. See the
+[paper comparison protocol](paper_protocol.md) and
+[Kaggle parity checks](kaggle.md#direct-parity-tests) for validation limits.
 

@@ -7,7 +7,6 @@ Default pipeline:
 
 Examples:
     python run_baseline.py clip_image
-    python run_baseline.py clip_image
     python run_baseline.py fafa_setmatch --rcr-detection-cache /path/to/rcr/cache/detections
     python run_baseline.py clip_image --skip-install
     python run_baseline.py --list
@@ -371,7 +370,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "method",
         nargs="?",
-        help="Method id or method directory name, e.g. clip_image or clip_image.",
+        help="Method ID or method directory name, e.g. clip_image or fafa_setmatch.",
     )
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument(

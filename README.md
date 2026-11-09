@@ -42,7 +42,7 @@ Scene methods use their native encoders; clip_image–clip_late_fusion, groundin
 frozen Hugging Face ViT-B/32 from RCR Proposed, including letterbox
 preprocessing and native text globals. The shared person selector retains RCR
 FAFA's separate OpenAI ViT-B/32 pipeline.
-See [the 29-method audit](docs/audit_29.md) and [Kaggle execution](docs/kaggle.md).
+See [Kaggle execution](docs/kaggle.md) and [paper comparison requirements](docs/paper_protocol.md).
 
 reid_set_qwen_edit_proxy needs completed groundingdino_clipreid_set and qwen_image_edit_clip source runs. retrieve_qwen25vl_rerank needs completed groundingdino_clipreid_set_text. The configured
 order used by `--all` places these sources before their dependents:
@@ -80,8 +80,8 @@ results. Full-mAP is query weighted; Macro-Full-mAP weights present cases equall
 Image content, manifests and inherited score artifacts are checked before
 comparison. Evaluation binds metrics to the exact score bytes and evaluated
 run metadata. Historical results without that binding are excluded from tables.
-After this update, rerun affected inference and evaluation; do not edit metadata
-to attach old scores to a new protocol.
+After changing a protocol, configuration or checkpoint, rerun inference and
+evaluation instead of attaching existing scores to new metadata.
 
 ```bash
 python run_baseline.py --tables-only
@@ -106,7 +106,8 @@ also compare the val/test import, text routing, Subject membership, Partial
 SetMatch and metrics with that RCR checkout's own functions, without torch.
 Native pretrained GPU inference requires real model assets and gallery images;
 passing CPU tests does not certify accuracy.
-See [validation scope](docs/additional_validation.md).
+See [Kaggle parity checks](docs/kaggle.md#direct-parity-tests) and
+[paper comparison requirements](docs/paper_protocol.md).
 
 For a new method, follow [the integration guide](docs/adding_baselines.md).
 Keep model scoring in its method directory and shared benchmark rules in the

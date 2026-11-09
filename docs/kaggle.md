@@ -7,8 +7,8 @@ No substitute checkpoint/model is generated if any dependency is missing.
 
 ## Get the code
 
-The repository already contains every baseline change; no patch is applied.
-RCR is used unmodified: the baselines read its original
+Use the current benchmark checkout and an unmodified RCR checkout.
+The baselines read RCR's original
 `cache/detections/index.pt` and, optionally, `cache/scene/index.pt`.
 
 ```bash
@@ -31,8 +31,7 @@ same contract as RCR FAFA and Proposed:
   are re-encoded through the shared worker; every cosine must be at least 0.999.
   A different image, crop or preprocessing fails this check.
 
-An index that does carry `image_content_sha256` (written by a patched builder or by
-the audit below) has those digests verified as well.
+If an index includes `image_content_sha256`, those digests are also verified.
 `scripts/verify_rcr_cache_provenance.py` is an optional full audit that reruns
 Grounding DINO/CLIP on every image; enable it with `CPR_VERIFY_RCR_CACHES=1`. RCR
 loads Grounding DINO without a pinned revision, whereas the audit uses this repo's

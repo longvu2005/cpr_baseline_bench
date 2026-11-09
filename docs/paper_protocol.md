@@ -90,11 +90,11 @@ images and model assets. The CPU tests and synthetic evaluator comparison do
 not establish those claims. Evaluate every test query, including localization
 failures, and report failure counts rather than silently dropping queries.
 
-## Reporting after this update
+## Reporting and verification
 
 Run the normal pipeline with the exact finalized release and shared detection
-index. Cache keys changed intentionally for content/precision-sensitive stages.
-Old score matrices should not be relabeled with new metadata.
+index. Do not relabel scores from a different configuration or protocol
+with new metadata.
 
 ```bash
 python run_baseline.py <method> --rcr-detection-cache /path/to/rcr/cache/detections

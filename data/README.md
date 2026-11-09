@@ -9,8 +9,8 @@ python validate_data.py
 ```
 
 The same commands work with a Kaggle mount. Pass the image root that contains
-both `val/` and `test/`. A previous flat `data/gallery` directory can be moved
-aside before linking the split image root. For a metadata-only check, use
+both `val/` and `test/`. Remove any conflicting flat `data/gallery` link
+before linking the split image root. For a metadata-only check, use
 `python validate_data.py --skip-image-files`.
 
 ## Imported files
