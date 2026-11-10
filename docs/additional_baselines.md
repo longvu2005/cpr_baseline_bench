@@ -5,7 +5,7 @@ These adapters complement the native scene and shared-person methods in
 
 | Method ID | Folder | Representation | Protocol |
 | --- | --- | --- | --- |
-| `siglip2_compose` | `methods/simple/siglip2_compose` | SigLIP2 image/text fusion, fixed alpha 0.5 | Whole scene |
+| `siglip2_compose` | `methods/simple/siglip2_compose` | SigLIP2 image/text fusion, alpha selected on validation | Whole scene |
 | `searle_xl` | `methods/published/searle_xl` | Official Phi on raw CLIP features, native pseudo-word encoder | Whole scene |
 | `context_i2w` | `methods/published/context_i2w` | Official context mapper, patch tokens and custom tokenizer | Whole scene |
 | `fti4cir` | `methods/published/fti4cir` | Official IMG2TEXT, subject/attribute pseudo-tokens | Whole scene |
@@ -62,9 +62,10 @@ To use a read-only mount for the projected boxes and memberships, set
 - Model input views expose only image paths/IDs, public instructions and Subject
   selection/modification text. GT person IDs, target IDs/images, positive sets
   and case labels are excluded from model input.
-- All models are frozen. No benchmark training, evaluation-label tuning, retrieval
-  feedback to Qwen or query-specific fusion selection is used. SigLIP2 alpha is
-  fixed at 0.5.
+- All models are frozen. SigLIP2 selects one global fusion weight on the complete
+  RCR validation split by Full-mAP, using the same 21-weight grid and tie rule as
+  CLIP Early Fusion. No test-label tuning, benchmark training, retrieval feedback
+  to Qwen, or query-specific fusion selection is used.
 - Scores cover the full gallery and retain a finite reference-image entry. Only
   the original evaluator excludes the reference. ID/Full mAP, Recall and
   multi-positive formulas are unchanged.

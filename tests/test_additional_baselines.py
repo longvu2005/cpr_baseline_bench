@@ -41,11 +41,10 @@ def test_seven_integrations_and_assets_are_pinned():
                 assert len(asset["revision"]) == 40 and all(c in '0123456789abcdef' for c in asset["revision"])
         assert cfg["output"]["dir"] == f"runs/{method}"
         assert cfg["data"] == {"gallery_manifest": "data/test/gallery.jsonl", "query_manifest": "data/test/queries.jsonl"}
-        assert cfg["cpr_supervision"] == "No"
+        assert cfg["cpr_supervision"] == ("Val only" if method == "siglip2_compose" else "No")
     assert config("structured_caption_retrieval")["person_protocol"] == "cpr_person/protocol.yaml"
-    assert config("siglip2_compose")["composition"]["alpha_selection"] == "fixed_no_benchmark_labels"
-
-
+    assert config("siglip2_compose")["composition"]["alpha_selection"] == "validation_full_map"
+    assert config("siglip2_compose")["tuning"]["image_weights"] == [i / 20 for i in range(21)]
 def test_model_inputs_cannot_observe_labels(toy_protocol):
     _, gallery, queries, *_ = toy_protocol
     queries = [{**row, "query_id": str(i), "text": "public instruction", "full_positive_ids": ["label"],

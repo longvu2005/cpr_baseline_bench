@@ -159,6 +159,12 @@ def run(cfg):
     # On failure, old successful metadata must not describe newly partial scores.
     # Existing completed scores are replaced atomically after successful scoring.
     (output / "run.json").unlink(missing_ok=True)
+    selection = None
+    if cfg["method"] == "siglip2_compose":
+        from .siglip2_tuning import tune_siglip2
+        selection = tune_siglip2(cfg, marker, device, output)
+        cfg = {**cfg, "composition": {**cfg["composition"], "alpha": selection["image_weight"]}}
+        fingerprint["composition"] = cfg["composition"]
     extra = (run_captions(cfg, gallery, queries, index, person, fingerprint, device, output)
              if cfg["backend"] in {"caption_to_caption", "structured_caption"}
              else run_scene(cfg, gallery, queries, index, fingerprint, device, output))
@@ -173,6 +179,9 @@ def run(cfg):
         "adapter_version": VERSION, "input_fields": "public allowlist; no GT IDs, positives, case labels or target images",
         "runtime": cfg["runtime"], "environment": environment_metadata(device),
         "elapsed_seconds": perf_counter() - started, **extra}
+    if selection is not None:
+        metadata["selection"] = selection
+        metadata["validation_fingerprint"] = selection["fingerprint"]["validation_fingerprint"]
     if person is not None:
         metadata["shared_person_protocol"] = person.metadata()
         metadata["setmatch"] = matching_metadata(cfg, score_space="cosine")

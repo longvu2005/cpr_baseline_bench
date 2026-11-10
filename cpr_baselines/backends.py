@@ -28,7 +28,7 @@ class SigLIPCompose:
         with self.torch.inference_mode():
             return self.model.get_image_features(pixel_values=values).float().cpu().numpy()
 
-    def queries(self, images, texts, reference_features=None):
+    def texts(self, texts):
         limit = int(self.cfg["composition"]["max_text_tokens"])
         if not 1 <= limit <= self.model.config.text_config.max_position_embeddings:
             raise ValueError("SigLIP2 text limit exceeds the checkpoint's position embedding size")
@@ -36,7 +36,9 @@ class SigLIPCompose:
                                 truncation=True, return_tensors="pt")
         tokens = {key: value.to(self.device) for key, value in tokens.items()}
         with self.torch.inference_mode():
-            features = self.model.get_text_features(**tokens).float().cpu().numpy()
+            return self.model.get_text_features(**tokens).float().cpu().numpy()
+    def queries(self, images, texts, reference_features=None):
+        features = self.texts(texts)
         refs = self.images(images) if reference_features is None else reference_features
         return compose_linear(refs, features, float(self.cfg["composition"]["alpha"]))
 
