@@ -210,3 +210,25 @@ def test_packed_detection_cache_projects_identical_rcr_fafa_geometry(
             for c in actual
         ] == wanted
     assert got.fingerprint["rcr_cache"]["image_binding"] == "rcr_ids_and_image_sizes"
+
+
+def test_fafa_text_routing_matches_proposed_on_real_rcr_samples():
+    """Full real-split text parity against a live RCR Proposed checkout."""
+    pytest.importorskip("torch")
+    import json
+    from cpr_person.fafa_text import subject_conditions
+    from rcr.proposed.cache.native import subject_conditions as expected
+
+    final = Path(os.environ.get("CPR_TEST_RCR_FINAL", str(RCR / "dataset/data/final")))
+    sample_path = final / "samples.jsonl"
+    if not sample_path.is_file():
+        pytest.skip("RCR final samples.jsonl is not available")
+    count = 0
+    with sample_path.open(encoding="utf-8") as reader:
+        for line in reader:
+            if not line.strip():
+                continue
+            sample = json.loads(line)
+            assert subject_conditions(sample) == expected(sample), sample["sample_id"]
+            count += 1
+    assert count > 0

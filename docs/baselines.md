@@ -112,6 +112,15 @@ the complete reference image and applies its official anchor transform/mask
 for each selected member. Its existing explicit handling of an anchor removed
 by native TargetPad remains recorded in `invalid_localization_queries`.
 
+**FAFA text routing versus other person baselines.** `fafa_setmatch` uses
+RCR Proposed's complete `final_change` reanchored to each Subject using the
+exact `subject_conditions()` logic from `src/rcr/proposed/cache/native.py`.
+The imported per-Subject `modify_text` (independently split clauses) is ignored
+by FAFA only. `select_text` continues to select reference crops by CLIP.
+No other method's instruction text or the shared imported manifest is changed.
+This aligns the native FAFA image-text inputs, not Proposed's learned matching,
+so do not expect equivalent end-to-end rankings.
+
 **groundingdino_clipreid_set now uses text for localization.** Its public ID is unchanged; display name
 and metadata explicitly identify the adaptation. Text does not enter its ReID
 encoder or cosine pair score. The separately labeled diagnostic is:

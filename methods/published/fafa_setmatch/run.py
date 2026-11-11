@@ -44,11 +44,17 @@ from benchmark_progress import PhaseTracker, progress_bar  # noqa: E402
 from cpr_baselines.provenance import execution_identity
 from cpr_person.adapter import load_person_context, manifest_identity
 from cpr_person.detection import BoxCandidate
-from cpr_person.fafa_text import apply_fafa_text_policy, resolve_fafa_text_policy
+from cpr_person.fafa_text import (
+    PROPOSED_TEXT_POLICY,
+    RCR_PROPOSED_SOURCE_COMMIT,
+    apply_fafa_text_policy,
+    resolve_fafa_text_policy,
+    subject_conditions,
+)
 from cpr_person.matching import aggregate_component_scores
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
 METHOD_ID = "fafa_setmatch"
-ADAPTER_VERSION = "2026-10-12-v5-groundingdino-stage-cache"
+ADAPTER_VERSION = "2026-11-11-v6-proposed-condition-routing"
 # Runtime-only guard revision. Deliberately excluded from stage cache keys so this
 # non-semantic guard revision does not invalidate inference caches by itself.
 RUNTIME_GUARD_VERSION = "2026-08-13-v1-readonly-official-source"
@@ -148,7 +154,10 @@ def build_stage_caches(cfg, gallery_path, queries_path, output, person):
                                     if not k.startswith("score") and "chunk" not in k and k != "num_workers"}}
     stage("gallery_features", {**encoder, "detections": keys["detections"],
           "dtype": cfg.get("runtime", {}).get("gallery_feature_dtype", "float16")})
-    stage("query_features", {**encoder, "localization": keys["localization"]})
+    stage("query_features", {**encoder, "localization": keys["localization"],
+          "query_manifest_sha256": sha256_file(queries_path),
+          "text_routing": PROPOSED_TEXT_POLICY,
+          "text_routing_sha256": sha256_file(ROOT / "cpr_person" / "fafa_text.py")})
     stage("component_scores", {"execution": execution_identity(__file__), "schema": "soft-fda-v1", "gallery": keys["gallery_features"],
           "queries": keys["query_features"], "fda_k": int(ckpt.get("fda_k", 6))})
     return directories, {"keys": keys, "stages": fingerprints}
@@ -200,32 +209,26 @@ def build_gallery_index(gallery: Sequence[dict[str, Any]]) -> dict[Any, int]:
 
 
 def parse_query_targets(query: dict[str, Any], qi: int) -> list[QueryTarget]:
+    """Mirror Proposed's per-Subject complete condition, independent of imports.
+
+    Imported subjects[].modify_text is still available for other baselines, but
+    is deliberately ignored here because prepare_data splits independent clauses.
+    """
     subjects = query.get("subjects")
     if not isinstance(subjects, list) or not subjects:
         raise ValueError(f"Query {qi}: subjects must be a non-empty list")
-
-    relation_text = str(query.get("relation_text") or "").strip()
-    query_text = str(query.get("text") or "").strip()
-    targets: list[QueryTarget] = []
-
     for si, subject in enumerate(subjects):
         if not isinstance(subject, dict):
             raise TypeError(f"Query {qi} subject {si} must be an object")
 
-        modify_text = str(subject.get("modify_text") or "").strip()
+    changes = subject_conditions(query)
+    targets: list[QueryTarget] = []
+    for si, (subject, modify_text) in enumerate(zip(subjects, changes, strict=True)):
         if not modify_text:
-            modify_text = relation_text or query_text
-        if not modify_text:
-            raise ValueError(f"Query {qi} subject {si}: no usable modification text")
-
+            raise ValueError(f"Query {qi} subject {si}: no usable Proposed condition")
         select_text = str(subject.get("select_text") or "").strip()
         if not select_text:
-            # Only a localization fallback. This text is never used as FAFA's
-            # final retrieval caption when select_text is present.
-            select_text = str(subject.get("modify_text") or "").strip() or query_text
-        if not select_text:
             raise ValueError(f"Query {qi} subject {si}: no usable selection text")
-
         targets.append(
             QueryTarget(
                 modify_text=modify_text,
@@ -233,7 +236,6 @@ def parse_query_targets(query: dict[str, Any], qi: int) -> list[QueryTarget]:
                 subject_id=subject.get("subject_id"),
             )
         )
-
     return targets
 
 
@@ -959,12 +961,6 @@ def main() -> None:
     case_counts = Counter(str(q.get("case", "UNKNOWN")).upper() for q in queries)
     target_hist = Counter(len(targets) for targets in query_targets)
     gallery_person_hist = Counter(len(boxes) for boxes in gallery_boxes)
-    relation_fallbacks = sum(
-        1
-        for q in queries
-        for subject in q["subjects"]
-        if not str(subject.get("modify_text") or "").strip()
-    )
 
     run = {
         "execution": execution_identity(__file__),
@@ -1029,7 +1025,8 @@ def main() -> None:
             "gallery": "gallery.jsonl image_id + path; person_ids are not used for scoring/localization",
             "query_reference": "queries.jsonl image_id -> gallery.image_id",
             "target_selection_text": "subjects[].select_text",
-            "target_modification_text": "subjects[].modify_text; relation_text then query text fallback",
+            "target_modification_text": "RCR Proposed full final_change, relative to each Subject",
+            "ignores_imported_modify_text": True,
             "membership": "inferred from CLIP; never use case, IDs, or GT counts",
         },
         "query_case_counts": dict(case_counts),
@@ -1040,7 +1037,15 @@ def main() -> None:
         "gallery_predicted_person_count_histogram": {
             str(k): v for k, v in sorted(gallery_person_hist.items())
         },
-        "relation_text_fallback_subjects": relation_fallbacks,
+        "fafa_query_text_routing": {
+            "policy": PROPOSED_TEXT_POLICY,
+            "source_repository": "longvu2005/referential-composition-retrieval",
+            "source_commit": RCR_PROPOSED_SOURCE_COMMIT,
+            "source_function": "src/rcr/proposed/cache/native.py:subject_conditions",
+            "uses_final_change": True,
+            "uses_selection_text_only_for_localization": True,
+            "uses_imported_modify_text": False,
+        },
         "runtime": {
             "device": str(device),
             "image_batch_size": int(runtime.get("image_batch_size", 4)),
@@ -1080,7 +1085,7 @@ def main() -> None:
             "Subject anchors are assigned without threshold; extra members are selected by absolute CLIP threshold and distance from the assigned anchor.",
             "The same case-agnostic query membership policy is applied to every Subject; public Subject slots are used but case and GT cardinality are not.",
             "Partial SetMatch maximizes the sum of min(K, N) one-to-one real pairs and averages over all K query components; each missing person contributes the fixed configured background score.",
-            "RELATIONAL text is not modeled jointly by native single-person FAFA; relation_text is only a per-target fallback when modify_text is empty.",
+            "FAFA receives each Subject-aligned full condition from RCR Proposed; native single-person FAFA does not jointly reason over relationships.",
         ],
     }
 
